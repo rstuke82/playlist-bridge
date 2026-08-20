@@ -112,11 +112,11 @@ Paste a public Spotify or Apple Music playlist URL.
 Examples:
 
 ```text
-https://open.spotify.com/playlist/7eahWLng9go8LDR5gcW6A3?si=...
+https://open.spotify.com/playlist/xyz...
 ```
 
 ```text
-https://music.apple.com/us/playlist/replay-2019/pl.rp-NLLMIo0EvBxO
+https://music.apple.com/us/playlist/xzy
 ```
 
 Spotify URLs with query parameters are normalized automatically. Apple Music playlist IDs containing characters such as hyphens are also supported.
@@ -469,30 +469,6 @@ That means:
 - Apple Music developer credentials are not required
 - The source playlist must be accessible publicly
 - Changes to Spotify or Apple Music's public page structure can require parser updates
-
-## Suggested `.gitignore`
-
-The JSON files contain local configuration and match state and generally should not be committed.
-
-A practical `.gitignore` is:
-
-```gitignore
-config.json
-mapping.json
-missing_tracks.json
-
-spotify-test.py
-sync copy.py
-
-__pycache__/
-*.pyc
-```
-
-If you prefer to ignore every JSON file in the repository instead:
-
-```gitignore
-*.json
-```
 
 ## Troubleshooting
 
