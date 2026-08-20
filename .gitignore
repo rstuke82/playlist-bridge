@@ -6,3 +6,8 @@ missing_tracks.json
 
 __pycache__/
 *.pyc
+
+.venv/
+venv/
+.DS_Store
+.env
