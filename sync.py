@@ -24,7 +24,7 @@ from fuzzywuzzy import fuzz # type: ignore
 from fuzzywuzzy import process # type: ignore
 
 APP_NAME = "Playlist Bridge"
-VERSION = "1.0"
+VERSION = "1.01"
 
 # Color codes for terminal output
 class Colors:
@@ -43,6 +43,58 @@ def colored(text: str, color: str) -> str:
     return f"{color}{text}{Colors.RESET}"
 
 
+def repair_text(value) -> str:
+    """
+    Repair common UTF-8 text that was accidentally decoded as Latin-1.
+
+    Example:
+        We Didnât -> We Didn’t
+
+    Already-correct Unicode is left unchanged.
+    """
+    if value is None:
+        return ""
+
+    text = str(value)
+
+    suspicious_markers = ("Ã", "Â", "â", "ð", "�")
+
+    def suspicious_count(candidate: str) -> int:
+        return (
+            sum(candidate.count(marker) for marker in suspicious_markers)
+            + sum(1 for ch in candidate if 0x80 <= ord(ch) <= 0x9F)
+        )
+
+    # Two passes also repairs common double-encoded strings.
+    for _ in range(2):
+        before = suspicious_count(text)
+
+        if before == 0:
+            break
+
+        best = text
+        best_count = before
+
+        for encoding in ("latin-1", "cp1252"):
+            try:
+                candidate = text.encode(encoding).decode("utf-8")
+            except (UnicodeEncodeError, UnicodeDecodeError):
+                continue
+
+            candidate_count = suspicious_count(candidate)
+
+            if candidate_count < best_count:
+                best = candidate
+                best_count = candidate_count
+
+        if best == text:
+            break
+
+        text = best
+
+    return text
+
+
 def source_display_name(source_type: str) -> str:
     """Return one consistent user-facing service name."""
     names = {
@@ -56,7 +108,7 @@ def source_display_name(source_type: str) -> str:
 
 def source_album_display(track: dict) -> str:
     """Return source album using the same format as Plex album output."""
-    album = str(track.get("album", "") or "").strip()
+    album = repair_text(track.get("album", "") or "").strip()
 
     if album:
         return colored(f"({album})", Colors.YELLOW)
@@ -98,7 +150,24 @@ class Config:
     def _load_missing(self) -> dict:
         if MISSING_FILE.exists():
             with open(MISSING_FILE) as f:
-                return json.load(f)
+                data = json.load(f)
+
+            for tracks in data.values():
+                if not isinstance(tracks, list):
+                    continue
+
+                for track in tracks:
+                    if not isinstance(track, dict):
+                        continue
+
+                    for field in ("title", "artist", "album"):
+                        if field in track:
+                            track[field] = repair_text(
+                                track.get(field, "")
+                            )
+
+            return data
+
         return {}
 
     def save(self):
@@ -669,9 +738,9 @@ class SpotifyAPI:
 
                 track_list.append(
                     {
-                        "title": title,
-                        "artist": artist_names,
-                        "album": album_name,
+                        "title": repair_text(title),
+                        "artist": repair_text(artist_names),
+                        "album": repair_text(album_name),
                         "source_id": track.get("id", ""),
                         "uri": track.get("uri", ""),
                     }
@@ -1087,9 +1156,13 @@ class AppleMusicAPI:
             )
 
         return {
-            "title": title.strip(),
-            "artist": artist.strip(),
-            "album": album.strip() if isinstance(album, str) else "",
+            "title": repair_text(title).strip(),
+            "artist": repair_text(artist).strip(),
+            "album": (
+                repair_text(album).strip()
+                if isinstance(album, str)
+                else ""
+            ),
             "source_id": str(source_id) if source_id else "",
         }
 
@@ -1382,9 +1455,23 @@ class PlexAPI:
 
             return [
                 {
-                    "title": t.get("title", ""),
-                    "artist": t.get("grandparentTitle", ""),
-                    "album": t.get("parentTitle", ""),
+                    "title": repair_text(t.get("title", "")),
+                    # Plex uses originalTitle for the track artist when it
+                    # differs from the album artist (common on soundtracks
+                    # and Various Artists compilations).
+                    "artist": repair_text(
+                        t.get("originalTitle")
+                        or t.get("grandparentTitle", "")
+                    ),
+                    "track_artist": repair_text(
+                        t.get("originalTitle", "")
+                    ),
+                    "album_artist": repair_text(
+                        t.get("grandparentTitle", "")
+                    ),
+                    "album": repair_text(
+                        t.get("parentTitle", "")
+                    ),
                     "plex_id": str(t.get("ratingKey")),
                     "key": t.get("key"),
                 }
@@ -1971,6 +2058,7 @@ class Matcher:
 
     MATCH_THRESHOLD = 90
     PROMPT_THRESHOLD = 70
+    MIN_DISPLAY_SCORE = 50
 
     # These are ranking penalties, not hard exclusions. If the only copy
     # available is on a compilation/live/deluxe release, it can still match.
@@ -1982,6 +2070,378 @@ class Matcher:
         "deluxe": 7,
         "remaster": 5,
     }
+
+    @staticmethod
+    def _normalize_match_text(value: str) -> str:
+        """Normalize punctuation/whitespace used in title and artist scoring."""
+        if not value:
+            return ""
+
+        text = repair_text(value).casefold()
+        text = (
+            text.replace("’", "'")
+            .replace("‘", "'")
+            .replace("“", '"')
+            .replace("”", '"')
+            .replace("–", "-")
+            .replace("—", "-")
+        )
+        return re.sub(r"\s+", " ", text).strip()
+
+    @classmethod
+    def _strip_title_metadata(cls, title: str) -> str:
+        """
+        Remove common release/credit qualifiers that are usually metadata,
+        while leaving arbitrary parenthetical subtitles intact.
+
+        Examples:
+            Dark Sky (feat. S.A. Martinez) -> Dark Sky
+            Song (Remastered 2011) -> Song
+            Song - Radio Edit -> Song
+        """
+        value = cls._normalize_match_text(title)
+
+        if not value:
+            return ""
+
+        # Parenthetical/bracketed metadata.
+        metadata_parenthetical = re.compile(
+            r"\s*[\(\[]\s*"
+            r"(?:"
+            r"feat(?:uring)?\.?|ft\.?|with|"
+            r"remaster(?:ed)?(?:\s+\d{4})?|"
+            r"live\b[^)\]]*|"
+            r"acoustic|stripped|"
+            r"radio\s+edit|single\s+edit|edit|"
+            r"remix(?:ed)?|mix|"
+            r"mono|stereo|"
+            r"bonus\s+track|"
+            r"from\s+.+?(?:soundtrack|motion\s+picture)"
+            r")"
+            r"[^)\]]*[\)\]]",
+            re.IGNORECASE,
+        )
+
+        value = metadata_parenthetical.sub(" ", value)
+
+        # Suffix metadata outside parentheses.
+        value = re.sub(
+            r"\s*[-:]\s*"
+            r"(?:"
+            r"feat(?:uring)?\.?|ft\.?|with|"
+            r"remaster(?:ed)?(?:\s+\d{4})?|"
+            r"live(?:\s+(?:at|from|in|on)\b.*)?|"
+            r"acoustic|stripped|"
+            r"radio\s+edit|single\s+edit|edit|"
+            r"remix(?:ed)?|mix|mono|stereo"
+            r")\b.*$",
+            "",
+            value,
+            flags=re.IGNORECASE,
+        )
+
+        # Featured-credit suffix without punctuation.
+        value = re.sub(
+            r"\s+(?:feat(?:uring)?\.?|ft\.?)\s+.+$",
+            "",
+            value,
+            flags=re.IGNORECASE,
+        )
+
+        return re.sub(r"\s+", " ", value).strip(" -:")
+
+    @classmethod
+    def _strip_trailing_parenthetical(cls, title: str) -> Tuple[str, bool]:
+        """
+        Return title without one arbitrary trailing (...) or [...] qualifier.
+
+        This broad fallback is only compared when one side has the trailing
+        qualifier and the other side does not. That avoids collapsing:
+            Song (Part 1)
+            Song (Part 2)
+        into the same title.
+        """
+        value = cls._normalize_match_text(title)
+
+        if not value:
+            return "", False
+
+        stripped = re.sub(
+            r"\s*[\(\[][^)\]]+[\)\]]\s*$",
+            "",
+            value,
+        ).strip()
+
+        return stripped, stripped != value
+
+    @classmethod
+    def _title_score(cls, source_title: str, plex_title: str) -> Tuple[int, int]:
+        """
+        Return (best_title_score, raw_title_score).
+
+        The best score considers:
+        - literal titles;
+        - safe metadata-stripped titles;
+        - a one-sided arbitrary trailing-parenthetical fallback.
+
+        The one-sided rule is what allows:
+            Austin (Boots Stop Workin') <-> Austin
+        without making:
+            Song (Part 1) <-> Song (Part 2)
+        an artificial 100% match.
+        """
+        source_raw = cls._normalize_match_text(source_title)
+        plex_raw = cls._normalize_match_text(plex_title)
+
+        raw_score = fuzz.token_sort_ratio(
+            source_raw,
+            plex_raw,
+        )
+
+        scores = [raw_score]
+
+        source_meta = cls._strip_title_metadata(source_raw)
+        plex_meta = cls._strip_title_metadata(plex_raw)
+
+        if source_meta and plex_meta:
+            scores.append(
+                fuzz.token_sort_ratio(
+                    source_meta,
+                    plex_meta,
+                )
+            )
+
+        if source_meta and plex_raw:
+            scores.append(
+                fuzz.token_sort_ratio(
+                    source_meta,
+                    plex_raw,
+                )
+            )
+
+        if source_raw and plex_meta:
+            scores.append(
+                fuzz.token_sort_ratio(
+                    source_raw,
+                    plex_meta,
+                )
+            )
+
+        source_base, source_had_trailing = (
+            cls._strip_trailing_parenthetical(source_meta)
+        )
+        plex_base, plex_had_trailing = (
+            cls._strip_trailing_parenthetical(plex_meta)
+        )
+
+        # Generic parenthetical fallback only if ONE side has it.
+        if source_had_trailing and not plex_had_trailing:
+            if source_base and plex_meta:
+                scores.append(
+                    fuzz.token_sort_ratio(
+                        source_base,
+                        plex_meta,
+                    )
+                )
+
+        # Deliberately do NOT apply the arbitrary fallback in reverse.
+        # A destination-only qualifier can identify a different recording or
+        # arrangement, e.g.:
+        #   Bring Me to Life -> Bring Me to Life (Synthesis)
+        #
+        # Known metadata such as feat/remaster/live/remix is already handled
+        # by _strip_title_metadata() and the release-type penalties below.
+
+        return max(scores), raw_score
+
+    @classmethod
+    def _title_remix_credit(cls, title: str) -> str:
+        """
+        Extract a named remix credit from a title.
+
+        Example:
+            Dracula (JENNIE Remix) -> jennie
+
+        A generic "(Remix)" does not identify a collaborator and therefore
+        returns an empty string.
+        """
+        value = cls._normalize_match_text(title)
+
+        if not value:
+            return ""
+
+        match = re.search(
+            r"[\(\[]\s*(.+?)\s+remix\s*[\)\]]",
+            value,
+            flags=re.IGNORECASE,
+        )
+
+        if not match:
+            return ""
+
+        credit = match.group(1).strip()
+
+        if not credit or credit == "remix":
+            return ""
+
+        return credit
+
+    @classmethod
+    def _title_has_feature_credit(cls, title: str) -> bool:
+        """Return True when a title explicitly identifies a featured guest."""
+        value = cls._normalize_match_text(title)
+
+        if not value:
+            return False
+
+        return bool(
+            re.search(
+                r"(?:^|[\s(\[\-:])"
+                r"(?:feat(?:uring)?\.?|ft\.?|with)"
+                r"\s+",
+                value,
+                flags=re.IGNORECASE,
+            )
+        )
+
+    @classmethod
+    def _artist_variants(
+        cls,
+        artist: str,
+        allow_primary_collaborator: bool = False,
+    ) -> List[str]:
+        """
+        Generate conservative artist variants.
+
+        When the source title explicitly says "feat." (or equivalent), the
+        first/primary portion of a collaboration string is also considered.
+        This allows:
+            AWOLNATION & Nothing But Thieves -> AWOLNATION
+        for:
+            Maniac (feat. Conor Mason of Nothing but Thieves)
+
+        We only enable that behavior when the track title itself tells us the
+        additional artist is a feature, so ordinary co-billed artists are not
+        silently discarded.
+        """
+        value = cls._normalize_match_text(artist)
+
+        if not value:
+            return [""]
+
+        variants = [value]
+
+        # Artist-string feature syntax.
+        primary = re.sub(
+            r"\s+(?:feat(?:uring)?\.?|ft\.?|with)\s+.+$",
+            "",
+            value,
+            flags=re.IGNORECASE,
+        ).strip()
+
+        if primary and primary not in variants:
+            variants.append(primary)
+
+        if allow_primary_collaborator:
+            # Add progressively shorter collaboration prefixes. This is safer
+            # than blindly taking only the first token because artist names
+            # can themselves contain "&".
+            for separator in (" & ", " x ", " and "):
+                if separator not in value:
+                    continue
+
+                parts = value.split(separator)
+
+                # All prefixes except the complete original value.
+                for end in range(1, len(parts)):
+                    candidate = separator.join(parts[:end]).strip()
+                    if candidate and candidate not in variants:
+                        variants.append(candidate)
+
+        return variants
+
+    @classmethod
+    def _artist_score(
+        cls,
+        source_artist: str,
+        plex_artist: str,
+        source_title: str = "",
+        plex_title: str = "",
+    ) -> int:
+        """Return the best conservative artist score."""
+        remix_credit = cls._title_remix_credit(
+            source_title
+        )
+
+        allow_source_primary = (
+            cls._title_has_feature_credit(source_title)
+            or (
+                bool(remix_credit)
+                and remix_credit
+                in cls._normalize_match_text(source_artist)
+            )
+        )
+
+        source_variants = cls._artist_variants(
+            source_artist,
+            allow_primary_collaborator=allow_source_primary,
+        )
+
+        plex_variants = cls._artist_variants(
+            plex_artist,
+            allow_primary_collaborator=cls._title_has_feature_credit(
+                plex_title
+            ),
+        )
+
+        return max(
+            fuzz.ratio(source_variant, plex_variant)
+            for source_variant in source_variants
+            for plex_variant in plex_variants
+        )
+
+
+    @classmethod
+    def _title_release_types(cls, title: str) -> set:
+        """
+        Detect explicit remix/live intent in a track title.
+
+        These are treated differently from album-release metadata:
+        if the source title explicitly says Remix or Live, matching the same
+        kind of Plex copy is desirable rather than something to penalize.
+        """
+        value = cls._normalize_match_text(title)
+
+        if not value:
+            return set()
+
+        kinds = set()
+
+        # Remix intent can safely be recognized anywhere as a standalone word.
+        if re.search(
+            r"\bremix(?:ed|es)?\b|\bmixes\b",
+            value,
+            flags=re.IGNORECASE,
+        ):
+            kinds.add("remix")
+
+        # Live is deliberately conservative so a real title such as
+        # "Live Through This" is not automatically treated as a live version.
+        live_patterns = (
+            r"[\(\[]\s*live\b[^)\]]*[\)\]]",
+            r"\s[-:]\s*live(?:\s+(?:at|from|in|on)\b.*)?$",
+            r"\blive\s+(?:at|from|in|on)\b",
+            r"\bunplugged\b",
+            r"\bin concert\b",
+        )
+
+        if any(
+            re.search(pattern, value, flags=re.IGNORECASE)
+            for pattern in live_patterns
+        ):
+            kinds.add("live")
+
+        return kinds
 
     @staticmethod
     def _normalize_album(album: str) -> str:
@@ -2101,22 +2561,24 @@ class Matcher:
         the only copy in Plex, but a studio-album copy should win when both
         exist.
         """
-        source_title = str(source_track.get("title", "")).casefold()
-        source_artist = str(source_track.get("artist", "")).casefold()
+        source_title = str(source_track.get("title", ""))
+        source_artist = str(source_track.get("artist", ""))
         source_album = str(source_track.get("album", "") or "")
 
-        plex_title = str(plex_track.get("title", "")).casefold()
-        plex_artist = str(plex_track.get("artist", "")).casefold()
+        plex_title = str(plex_track.get("title", ""))
+        plex_artist = str(plex_track.get("artist", ""))
         plex_album = str(plex_track.get("album", "") or "")
 
-        title_score = fuzz.token_sort_ratio(
+        title_score, raw_title_score = cls._title_score(
             source_title,
             plex_title,
         )
 
-        artist_score = fuzz.ratio(
+        artist_score = cls._artist_score(
             source_artist,
             plex_artist,
+            source_title=source_title,
+            plex_title=plex_title,
         )
 
         # Preserve the existing strong artist penalty.
@@ -2142,39 +2604,111 @@ class Matcher:
                     plex_album_norm,
                 )
 
-                # Reward the intended album, but don't let album metadata
-                # overpower title/artist identity.
-                if album_score >= 95:
-                    album_bonus = 12
-                elif album_score >= 85:
-                    album_bonus = 8
-                elif album_score >= 70:
-                    album_bonus = 4
+                # Reward the intended album only after title identity is
+                # already plausible. This prevents a wrong song by the same
+                # artist on the same album from outranking the correct title.
+                if title_score >= 95:
+                    if album_score >= 95:
+                        album_bonus = 12
+                    elif album_score >= 85:
+                        album_bonus = 8
+                    elif album_score >= 70:
+                        album_bonus = 4
+
+                elif title_score >= 85:
+                    # A moderate title match may receive only a small nudge.
+                    if album_score >= 95:
+                        album_bonus = 4
+                    elif album_score >= 85:
+                        album_bonus = 2
 
         source_types = cls._album_types(source_album)
         plex_types = cls._album_types(plex_album)
 
-        # Canonical-copy preference:
-        #
-        # Streaming services frequently point a playlist entry at a
-        # compilation/remaster/live/deluxe release even when the same song
-        # exists on its original studio album in Plex. We therefore penalize
-        # special-release Plex copies regardless of the source album type.
-        #
-        # This remains a ranking preference rather than a hard exclusion:
-        # if the special-release copy is the only strong title/artist match,
-        # match_track() can still use it.
-        album_penalty = sum(
-            cls.ALBUM_TYPE_PENALTIES[kind]
-            for kind in plex_types
+        source_title_types = cls._title_release_types(
+            source_title
+        )
+        plex_title_types = cls._title_release_types(
+            plex_title
         )
 
-        # Do not reward an exact album-name match when that album itself is
-        # one of the non-canonical release types we're trying to de-prioritize.
-        # Example: Spotify says Greatest Hits, but Plex also has Transistor.
-        if source_types or plex_types:
-            if plex_types:
-                album_bonus = 0.0
+        # Remix/live in the SOURCE TITLE is explicit version intent.
+        #
+        # Example:
+        #   Dracula (JENNIE Remix)
+        #
+        # In that case a Plex remix copy is correct and should not receive
+        # the normal remix penalty. The same applies to an explicitly live
+        # source title.
+        requested_variant_types = (
+            source_title_types
+            & {"remix", "live"}
+        )
+
+        candidate_variant_types = (
+            plex_title_types
+            | plex_types
+        ) & {"remix", "live"}
+
+        # Canonical-copy preference still applies to release types the source
+        # did NOT explicitly request in its title.
+        unwanted_plex_types = (
+            plex_types - requested_variant_types
+        )
+
+        album_penalty = sum(
+            cls.ALBUM_TYPE_PENALTIES[kind]
+            for kind in unwanted_plex_types
+        )
+
+        # A destination title can reveal an unwanted version even when the
+        # album does not. Avoid double-penalizing a type already caught by
+        # the album classification.
+        unwanted_title_variant_types = (
+            (plex_title_types & {"remix", "live"})
+            - requested_variant_types
+            - unwanted_plex_types
+        )
+
+        title_variant_penalty = sum(
+            cls.ALBUM_TYPE_PENALTIES[kind]
+            for kind in unwanted_title_variant_types
+        )
+
+        # If the source explicitly asks for remix/live, title-level evidence
+        # is stronger than album-level evidence:
+        #
+        #   candidate title says Remix/Live -> no intent penalty
+        #   only candidate album says it    -> half penalty
+        #   neither says it                 -> full penalty
+        #
+        # This keeps "Dracula (JENNIE remix)" above plain "Dracula" even when
+        # both Plex tracks happen to live on the same remix album.
+        release_intent_penalty = 0
+
+        for kind in requested_variant_types:
+            full_penalty = cls.ALBUM_TYPE_PENALTIES[kind]
+
+            if kind in plex_title_types:
+                continue
+
+            if kind in plex_types:
+                release_intent_penalty += max(
+                    1,
+                    full_penalty // 2,
+                )
+            else:
+                release_intent_penalty += full_penalty
+
+        # Do not allow an album bonus to erase a missing title-level remix/live
+        # marker. A plain track on a remix/live album remains viable but ranks
+        # below a candidate whose title explicitly matches the source intent.
+        missing_title_intent = (
+            requested_variant_types - plex_title_types
+        )
+
+        if unwanted_plex_types or missing_title_intent:
+            album_bonus = 0.0
 
         adjusted_score = max(
             0.0,
@@ -2182,7 +2716,9 @@ class Matcher:
                 100.0,
                 identity_score
                 + album_bonus
-                - album_penalty,
+                - album_penalty
+                - title_variant_penalty
+                - release_intent_penalty,
             ),
         )
 
@@ -2190,12 +2726,25 @@ class Matcher:
             "adjusted_score": adjusted_score,
             "identity_score": identity_score,
             "title_score": title_score,
+            "raw_title_score": raw_title_score,
             "artist_score": artist_score,
             "album_score": album_score,
             "album_bonus": album_bonus,
             "album_penalty": album_penalty,
+            "title_variant_penalty": title_variant_penalty,
+            "release_intent_penalty": release_intent_penalty,
             "source_album_types": source_types,
             "plex_album_types": plex_types,
+            "source_title_release_types": source_title_types,
+            "plex_title_release_types": plex_title_types,
+            "requested_variant_types": requested_variant_types,
+            "candidate_variant_types": candidate_variant_types,
+            "candidate_title_variant_types": (
+                plex_title_types & {"remix", "live"}
+            ),
+            "candidate_album_variant_types": (
+                plex_types & {"remix", "live"}
+            ),
         }
 
     @classmethod
@@ -2254,15 +2803,31 @@ class Matcher:
                 item[0]["adjusted_score"],
                 item[0]["identity_score"],
                 item[0]["title_score"],
+                item[0]["raw_title_score"],
             ),
         )
 
-        # Album penalties affect which copy wins, not whether a confident
-        # title/artist identity is allowed to match.
-        if (
+        # Automatic matching has two confidence paths:
+        #
+        # 1) Strong title/artist identity (original behavior).
+        # 2) A near-exact normalized title with a strong final score.
+        #
+        # The second path keeps initial sync consistent with the score shown
+        # in Option 5 when source-service artist credits differ, while the
+        # strict title/artist gates prevent album metadata from rescuing a
+        # clearly different song.
+        strong_identity_match = (
             best_details["identity_score"] >= cls.MATCH_THRESHOLD
             and best_details["title_score"] >= 75
-        ):
+        )
+
+        strong_adjusted_match = (
+            best_details["adjusted_score"] >= cls.MATCH_THRESHOLD
+            and best_details["title_score"] >= 95
+            and best_details["artist_score"] >= 70
+        )
+
+        if strong_identity_match or strong_adjusted_match:
             return best_track["plex_id"]
 
         return None
@@ -3079,7 +3644,8 @@ class Syncer:
                 plex_track,
             )
 
-            candidates.append((score, plex_track))
+            if score >= Matcher.MIN_DISPLAY_SCORE:
+                candidates.append((score, plex_track))
 
         candidates.sort(key=lambda x: x[0], reverse=True)
 
@@ -3100,15 +3666,47 @@ class Syncer:
             penalty_note = ""
             if score_details["album_penalty"]:
                 kinds = ", ".join(
-                    sorted(score_details["plex_album_types"])
+                    sorted(
+                        score_details["plex_album_types"]
+                        - score_details["requested_variant_types"]
+                    )
                 )
                 penalty_note = (
                     f" [-{score_details['album_penalty']} {kinds}]"
                 )
 
+            title_variant_note = ""
+            if score_details["title_variant_penalty"]:
+                kinds = ", ".join(
+                    sorted(
+                        (
+                            score_details["plex_title_release_types"]
+                            & {"remix", "live"}
+                        )
+                        - score_details["requested_variant_types"]
+                    )
+                )
+                title_variant_note = (
+                    f" [-{score_details['title_variant_penalty']} "
+                    f"{kinds} title]"
+                )
+
+            intent_note = ""
+            if score_details["release_intent_penalty"]:
+                missing = ", ".join(
+                    sorted(
+                        score_details["requested_variant_types"]
+                        - score_details["candidate_variant_types"]
+                    )
+                )
+                intent_note = (
+                    f" [-{score_details['release_intent_penalty']} "
+                    f"title missing {missing}]"
+                )
+
             print(
                 f"{marker}[{i}] {cand_title} - {cand_artist}{album_str} "
-                f"({score}%){penalty_note}"
+                f"({score}%){penalty_note}{title_variant_note}{intent_note}"
             )
 
         print("\n[s] Skip")
@@ -3366,20 +3964,22 @@ class Syncer:
                     round(details["adjusted_score"])
                 )
 
-                candidates.append(
-                    (
-                        score,
-                        details["identity_score"],
-                        details,
-                        plex_track,
+                if score >= Matcher.MIN_DISPLAY_SCORE:
+                    candidates.append(
+                        (
+                            score,
+                            details["identity_score"],
+                            details,
+                            plex_track,
+                        )
                     )
-                )
 
             candidates.sort(
                 key=lambda item: (
                     item[0],  # adjusted score
                     item[1],  # raw title/artist identity
                     item[2]["title_score"],
+                    item[2]["raw_title_score"],
                     item[2]["artist_score"],
                 ),
                 reverse=True,
@@ -3429,9 +4029,8 @@ class Syncer:
                     if details["album_penalty"]:
                         kinds = ", ".join(
                             sorted(
-                                details[
-                                    "plex_album_types"
-                                ]
+                                details["plex_album_types"]
+                                - details["requested_variant_types"]
                             )
                         )
                         penalty_note = (
@@ -3439,10 +4038,39 @@ class Syncer:
                             f"{kinds}]"
                         )
 
+                    title_variant_note = ""
+                    if details["title_variant_penalty"]:
+                        kinds = ", ".join(
+                            sorted(
+                                (
+                                    details["plex_title_release_types"]
+                                    & {"remix", "live"}
+                                )
+                                - details["requested_variant_types"]
+                            )
+                        )
+                        title_variant_note = (
+                            f" [-{details['title_variant_penalty']} "
+                            f"{kinds} title]"
+                        )
+
+                    intent_note = ""
+                    if details["release_intent_penalty"]:
+                        missing = ", ".join(
+                            sorted(
+                                details["requested_variant_types"]
+                                - details["candidate_variant_types"]
+                            )
+                        )
+                        intent_note = (
+                            f" [-{details['release_intent_penalty']} "
+                            f"title missing {missing}]"
+                        )
+
                     print(
                         f"  [{i}] {cand_title} - "
                         f"{cand_artist}{album_str} "
-                        f"({score}%){penalty_note}"
+                        f"({score}%){penalty_note}{title_variant_note}{intent_note}"
                         f"{confidence_note}"
                     )
             else:
@@ -3543,15 +4171,16 @@ class Syncer:
                         plex_track,
                     )
 
+                    manual_score = int(
+                        round(details["adjusted_score"])
+                    )
+
+                    if manual_score < Matcher.MIN_DISPLAY_SCORE:
+                        continue
+
                     manual_candidates.append(
                         (
-                            int(
-                                round(
-                                    details[
-                                        "adjusted_score"
-                                    ]
-                                )
-                            ),
+                            manual_score,
                             details["identity_score"],
                             details,
                             plex_track,
@@ -3620,15 +4249,43 @@ class Syncer:
                         if details["album_penalty"]:
                             kinds = ", ".join(
                                 sorted(
-                                    details[
-                                        "plex_album_types"
-                                    ]
+                                    details["plex_album_types"]
+                                    - details["requested_variant_types"]
                                 )
                             )
                             penalty_note = (
                                 f" [-"
                                 f"{details['album_penalty']} "
                                 f"{kinds}]"
+                            )
+
+                        title_variant_note = ""
+                        if details["title_variant_penalty"]:
+                            kinds = ", ".join(
+                                sorted(
+                                    (
+                                        details["plex_title_release_types"]
+                                        & {"remix", "live"}
+                                    )
+                                    - details["requested_variant_types"]
+                                )
+                            )
+                            title_variant_note = (
+                                f" [-{details['title_variant_penalty']} "
+                                f"{kinds} title]"
+                            )
+
+                        intent_note = ""
+                        if details["release_intent_penalty"]:
+                            missing = ", ".join(
+                                sorted(
+                                    details["requested_variant_types"]
+                                    - details["candidate_variant_types"]
+                                )
+                            )
+                            intent_note = (
+                                f" [-{details['release_intent_penalty']} "
+                                f"title missing {missing}]"
                             )
 
                         print(
@@ -3638,6 +4295,8 @@ class Syncer:
                             f"{album_str} "
                             f"({score}%)"
                             f"{penalty_note}"
+                            f"{title_variant_note}"
+                            f"{intent_note}"
                             f"{confidence_note}"
                         )
 
