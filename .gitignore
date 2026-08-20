@@ -1,0 +1,8 @@
+config.json
+mapping.json
+missing_tracks.json
+
+sync.py.bak
+
+__pycache__/
+*.pyc
