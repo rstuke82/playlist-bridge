@@ -1,6 +1,6 @@
 # Playlist Bridge
 
-**Version 1.01**
+**Version 1.1**
 
 Playlist Bridge syncs public **Spotify** and **Apple Music** playlists to your local music library through Plex.
 
@@ -27,6 +27,23 @@ It matches source tracks against your library, preserves manual match decisions,
 - Last-sync history
 - Automatic cleanup of common text-encoding glitches
 - Fully automated `--sync-all` mode
+- Missing-track overview before triage
+- Last-sync timestamps in the single-playlist sync picker
+- Current-match counts in the match editor
+- Per-playlist or all-playlist matching reset
+- Artwork lookup only during actual playlist create/sync operations
+
+## What's New in 1.1
+
+Version 1.1 focuses on workflow and quality-of-life improvements:
+
+- Playlist artwork is only fetched when a playlist is actually created or synced. Match review workflows no longer spend time discovering artwork.
+- Option 3 shows the last sync time beside each playlist before you choose one to sync.
+- Option 5 shows the complete unresolved-track list before triage begins, so you can review what is missing before scanning Plex or working through candidates.
+- Option 6 shows the number of current saved matches for each playlist.
+- Match changes made in Option 6 are saved first, then Playlist Bridge offers one full playlist sync when you finish editing instead of modifying Plex one track at a time.
+- Settings now uses **Configure Plex** and includes **Clear matching for a playlist**.
+- Matching can be cleared for one playlist or for all registered playlists. This resets saved match/unresolved state without deleting registrations or Plex playlists.
 
 ## Requirements
 
@@ -81,10 +98,11 @@ Plex API token:
 
 Playlist Bridge verifies the connection before saving it.
 
-You can change the Plex connection later from:
+You can configure or update the Plex connection later from:
 
 ```text
 [9] Settings
+[1] Configure Plex
 ```
 
 ## Main Menu
@@ -99,7 +117,7 @@ opens the interactive menu:
 
 ```text
 ==================================================
-Playlist Bridge v1.01 - Spotify/Apple Music to Plex
+Playlist Bridge v1.1 - Spotify/Apple Music to Plex
 ==================================================
 [1] Add new Spotify/Apple Music playlist
 [2] Sync all playlists
@@ -173,6 +191,13 @@ Choose:
 
 Then select the playlist you want to refresh.
 
+The playlist picker shows the last successful sync time:
+
+```text
+[1] Your Top Songs 2018 (Spotify) - Last sync: 2026-08-20 13:45
+[2] Replay 2025 (Apple Music) - Last sync: Never
+```
+
 During a normal sync, Playlist Bridge shows the source and matched destination track:
 
 ```text
@@ -203,7 +228,23 @@ Choose:
 
 Playlist Bridge shows playlists with unresolved tracks and lets you work through them one at a time.
 
-For each unresolved track, Playlist Bridge shows the best candidate matches scoring **50% or higher**. Lower-scoring results are hidden.
+After you select a playlist, Playlist Bridge first displays **all currently unresolved tracks** before any Plex scan or source refresh begins:
+
+```text
+Missing tracks for 'Replay 2025' (9 total):
+
+[1] Example Song - Example Artist (Example Album)
+[2] Another Song - Another Artist (N/A)
+...
+
+[t] Start triage
+[b] Back
+[x] Exit
+```
+
+Choose `t` when you are ready to begin triage. This makes it possible to review the whole missing list and back out without starting the matching workflow.
+
+For each unresolved track during triage, Playlist Bridge shows the best candidate matches scoring **50% or higher**. Lower-scoring results are hidden.
 
 Example:
 
@@ -258,7 +299,14 @@ Choose:
 
 This lets you review tracks that already have saved mappings.
 
-Example:
+The playlist picker shows how many current saved matches each playlist has:
+
+```text
+[1] Your Top Songs 2018 (Spotify) - 73 current matches
+[2] Replay 2016 (Apple Music) - 0 current matches
+```
+
+After selecting a playlist, the current mappings are shown:
 
 ```text
 [1] Beautiful Disaster - 311 (Transistor)
@@ -288,6 +336,14 @@ Controls include:
 - `x` — exit
 
 Once you choose a manual match, Playlist Bridge remembers that Plex track for future syncs.
+
+Option 6 saves mapping changes without immediately adding individual tracks to the Plex playlist. When you finish editing after making changes, Playlist Bridge asks:
+
+```text
+Sync this playlist to Plex now? (y/n):
+```
+
+Choosing `y` performs one normal full playlist sync using the updated mappings. Choosing `n` leaves the Plex playlist unchanged until the next sync.
 
 ## How Matching Works
 
@@ -474,7 +530,9 @@ The source service also does not force a compilation copy. If Spotify or Apple M
 
 ## Playlist Artwork
 
-Playlist Bridge attempts to copy playlist artwork from the source service.
+Playlist Bridge attempts to copy playlist artwork from the source service **only when a playlist is being created or synced**.
+
+Artwork discovery is skipped while reviewing missing tracks in Option 5 and editing existing matches in Option 6. This keeps matching workflows focused and avoids unnecessary artwork requests.
 
 ### Spotify
 
@@ -540,6 +598,52 @@ to remove a playlist from Playlist Bridge after confirmation.
 
 This removes the registration from Playlist Bridge. It does not delete the original Spotify or Apple Music playlist.
 
+## Settings
+
+Choose:
+
+```text
+[9] Settings
+```
+
+The Settings menu includes:
+
+```text
+[1] Configure Plex
+[2] Clear matching for a playlist
+[b] Back
+[x] Exit
+```
+
+### Configure Plex
+
+Use **Configure Plex** to set or replace the Plex server URL and token. Existing playlist registrations and saved mappings are not removed.
+
+### Clear matching
+
+Use **Clear matching for a playlist** when you want Playlist Bridge to forget its saved matching decisions and rematch tracks from scratch.
+
+The playlist list shows the current saved-match and unresolved counts:
+
+```text
+[1] Your Top Songs 2018 (Spotify) - 73 saved matches, 27 unresolved
+[2] Replay 2016 (Apple Music) - 0 saved matches, 10 unresolved
+
+[a] All playlists
+[b] Back
+[x] Exit
+```
+
+You can clear one playlist or choose `a` to clear matching for every registered playlist.
+
+Clearing matching removes that playlist's entries from `mapping.json` and `missing_tracks.json`. It does **not**:
+
+- remove the playlist registration from Playlist Bridge
+- delete or modify the Plex playlist
+- delete the source Spotify or Apple Music playlist
+
+The next sync rematches every source track whose saved matching state was cleared.
+
 ## Automated Sync
 
 Playlist Bridge includes a non-interactive mode for scheduled syncing.
@@ -573,7 +677,7 @@ Example:
 ```text
 usage: sync.py [-h] [--sync-all]
 
-Playlist Bridge v1.01 - Sync Spotify and Apple Music playlists to Plex. Run
+Playlist Bridge v1.1 - Sync Spotify and Apple Music playlists to Plex. Run
 without arguments for the interactive menu.
 
 options:
@@ -630,7 +734,7 @@ Check that:
 - The server is reachable from the computer running Playlist Bridge
 - Your Plex token is valid
 
-You can reconfigure Plex through Option 9.
+You can configure Plex through Option 9 → Configure Plex.
 
 ### A lot of tracks are missing
 
@@ -645,6 +749,19 @@ You can also manually search by title, artist, or album.
 Use Option 6 and choose the correct Plex track.
 
 Your corrected match will be saved and reused during future syncs.
+
+### I want to rematch a playlist from scratch
+
+Open:
+
+```text
+[9] Settings
+[2] Clear matching for a playlist
+```
+
+Choose a playlist, or choose `a` for all playlists, and confirm the reset.
+
+This clears saved matching and unresolved state only. The registered playlists and Plex playlists remain in place.
 
 ### A remix or live version matched incorrectly
 
@@ -668,7 +785,7 @@ If Spotify or Apple Music later changes the exact title or artist text, Playlist
 
 ### Text contains characters such as `â`
 
-Version 1.01 automatically repairs common UTF-8/Latin-1 encoding glitches before matching and display.
+Playlist Bridge automatically repairs common UTF-8/Latin-1 encoding glitches before matching and display.
 
 If malformed text still appears, it may already be stored that way in the original source or Plex metadata.
 
