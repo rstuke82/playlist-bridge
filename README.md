@@ -1,49 +1,203 @@
 # Playlist Bridge
 
-**Version 1.1**
+**Version 1.2**
 
 Playlist Bridge syncs public **Spotify** and **Apple Music** playlists to your local music library through Plex.
 
-It matches source tracks against your library, preserves manual match decisions, prefers better album copies when duplicates exist, keeps playlist order in sync, and copies available playlist artwork.
+It matches source tracks against your Plex library, preserves manual match decisions, prefers appropriate album/recording copies, keeps playlist order synchronized, copies meaningful playlist metadata and artwork, and tracks changes between syncs.
 
 ## Features
 
 - Spotify playlist support
 - Apple Music playlist support, including Replay playlists
 - No Spotify or Apple Music API credentials required
-- Fuzzy track matching with title, artist, and album awareness
+- Fuzzy track matching with title, artist, album, and recording-version awareness
 - Parenthetical and featured-artist normalization
-- Remix and live-version intent matching
+- Explicit version handling for live, remix/mix, acoustic, demo, and branded session recordings
+- Canonical studio-album preference when the source does not request a special version
 - Soundtrack and `Various Artists` track-artist handling
-- Preference for original studio-album copies when appropriate
-- Persistent manual match overrides
+- Persistent automatic and manual match mappings
 - Interactive review of missing or incorrect matches
 - Scored Plex candidates for difficult tracks
 - Manual Plex search
 - Candidate lists hide results below 50%
+- Deduplicated all-missing-tracks view across registered playlists
 - Playlist artwork synchronization
-- Apple artwork quality and dimension checks
+- Playlist description synchronization when the source provides a meaningful description
+- Generic source descriptions such as `Playlist · 86 Songs` are omitted
 - Playlist order synchronization
-- Last-sync history
-- Automatic cleanup of common text-encoding glitches
+- Source playlist `ADDED` / `REMOVED` tracking
+- Match-state `NEW` / `LOST` tracking
+- End-of-sync change summaries
+- Oldest-first playlist sorting by last sync
+- Last match-attempt tracking for unresolved-track triage
+- Multiple-playlist selection for Option 3
+- Match provenance: `automatic`, `manual`, and protected `legacy`
+- Clear only automatic mappings while preserving manual and legacy mappings
+- Versioned JSON state with automatic legacy migration and one-time backups
 - Fully automated `--sync-all` mode
-- Missing-track overview before triage
-- Last-sync timestamps in the single-playlist sync picker
-- Current-match counts in the match editor
-- Per-playlist or all-playlist matching reset
-- Artwork lookup only during actual playlist create/sync operations
+- Read-only `--sync-all --dry-run` mode
+- Automatic cleanup of common text-encoding glitches
+- Predictable one-level Back behavior throughout submenus
 
-## What's New in 1.1
+## What's New in 1.2
 
-Version 1.1 focuses on workflow and quality-of-life improvements:
+Version 1.2 expands matching safety, synchronization visibility, state management, and interactive workflow.
 
-- Playlist artwork is only fetched when a playlist is actually created or synced. Match review workflows no longer spend time discovering artwork.
-- Option 3 shows the last sync time beside each playlist before you choose one to sync.
-- Option 5 shows the complete unresolved-track list before triage begins, so you can review what is missing before scanning Plex or working through candidates.
-- Option 6 shows the number of current saved matches for each playlist.
-- Match changes made in Option 6 are saved first, then Playlist Bridge offers one full playlist sync when you finish editing instead of modifying Plex one track at a time.
-- Settings now uses **Configure Plex** and includes **Clear matching for a playlist**.
-- Matching can be cleared for one playlist or for all registered playlists. This resets saved match/unresolved state without deleting registrations or Plex playlists.
+### Sync change tracking
+
+Playlist Bridge now remembers the previous source playlist contents and can distinguish:
+
+```text
+ADDED
+REMOVED
+```
+
+from matching-state changes:
+
+```text
+NEW
+LOST
+```
+
+These labels describe different things:
+
+- `ADDED` — the track is new in the source playlist since the previous snapshot.
+- `REMOVED` — the track was present in the previous source snapshot but is no longer present.
+- `NEW` — the source track did not previously have a saved mapping and was matched during this sync.
+- `LOST` — a previously saved Plex target is no longer safely usable.
+
+At the end of a normal sync, Playlist Bridge prints:
+
+```text
+=== SYNC SUMMARY ===
+Source tracks:
+Matched:
+New matches:
+Lost matches:
+Source ADDED:
+Source REMOVED:
+Unresolved:
+```
+
+Existing installations establish a source-content baseline on their first tracked 1.2 sync rather than incorrectly reporting every existing source track as newly added.
+
+### Safer match provenance
+
+Saved mappings can now be identified as:
+
+```text
+automatic
+manual
+legacy
+```
+
+`legacy` means the mapping existed before provenance tracking was introduced. Playlist Bridge does not guess whether an older mapping was automatic or manual.
+
+Manual and legacy mappings are protected from **Clear automatic matches**.
+
+If a saved manual or legacy Plex ID becomes stale, Playlist Bridge does not silently replace it with a new automatic guess. It is surfaced for review instead.
+
+### Improved recording/version matching
+
+Explicit source recording intent is now handled more carefully.
+
+Examples of distinct recording intent include:
+
+```text
+Song (Demo)
+Song (Acoustic)
+Song (iTunes Session)
+Song (Apple Music Session)
+Song (Spotify Sessions)
+Song (Named Remix)
+Song (Somebody Mix)
+Song (Live ...)
+```
+
+A source that explicitly requests one of those versions will not automatically collapse to a plain studio recording that lacks the requested intent.
+
+Generic album-era provenance is treated differently. For example:
+
+```text
+Time is Precious (Evolver Sessions)
+```
+
+can correctly match:
+
+```text
+Time Is Precious (Evolver sessions – 2003)
+```
+
+without treating `Evolver Sessions` as the same kind of distinct performance marker as `iTunes Session`.
+
+Featured-artist credits remain flexible metadata. A source such as:
+
+```text
+Good Vibes (feat. Lutan Fyah) - Rebelution
+```
+
+can match a destination such as:
+
+```text
+Good Vibes - Rebelution feat. Lutan Fyah
+```
+
+without incorrectly preferring an acoustic copy simply because the album name is similar.
+
+### Better playlist selection and navigation
+
+Option 3 supports multiple selections:
+
+```text
+1,3,5
+```
+
+and ranges:
+
+```text
+1-3
+```
+
+Playlists shown with a **Last sync** timestamp are ordered with:
+
+```text
+Never
+oldest
+...
+newest
+```
+
+Option 5 is similarly ordered by **Last match attempt**, with `Never` first.
+
+Where `[b] Back` is shown, both `b` and an empty Enter return exactly one menu level.
+
+### State-file schema versioning
+
+Playlist Bridge now versions its persistent JSON structure independently from the application version.
+
+Current state files use schema 1:
+
+```json
+{
+  "_schema_version": 1,
+  "data": {
+    "...": "..."
+  }
+}
+```
+
+Existing unversioned Playlist Bridge state is treated as legacy schema 0 and loads normally.
+
+On the next normal save, legacy files are migrated to schema 1. Before an existing file is rewritten, Playlist Bridge makes a one-time byte-for-byte backup such as:
+
+```text
+mapping.json.pre-schema-1.bak
+```
+
+A dry run does not perform the migration or write any state.
+
+If an older Playlist Bridge build encounters a newer unsupported schema, it stops instead of risking corruption of the newer state.
 
 ## Requirements
 
@@ -52,7 +206,7 @@ Version 1.1 focuses on workflow and quality-of-life improvements:
 - A Plex authentication token
 - Public Spotify and/or Apple Music playlist URLs
 
-Install the Python dependencies with:
+Install dependencies with:
 
 ```bash
 pip install -r requirements.txt
@@ -98,7 +252,7 @@ Plex API token:
 
 Playlist Bridge verifies the connection before saving it.
 
-You can configure or update the Plex connection later from:
+You can configure or update Plex later from:
 
 ```text
 [9] Settings
@@ -113,11 +267,11 @@ Running:
 python sync.py
 ```
 
-opens the interactive menu:
+opens:
 
 ```text
 ==================================================
-Playlist Bridge v1.1 - Spotify/Apple Music to Plex
+Playlist Bridge v1.2 - Spotify/Apple Music to Plex
 ==================================================
 [1] Add new Spotify/Apple Music playlist
 [2] Sync all playlists
@@ -154,18 +308,19 @@ Apple Music example:
 https://music.apple.com/us/playlist/replay-2019/pl.rp-NLLMIo0EvBxO
 ```
 
-Playlist Bridge accepts normal Spotify playlist URLs with query parameters and Apple Music playlist IDs that contain characters such as hyphens.
+Playlist Bridge accepts Spotify playlist URLs with query parameters and Apple Music playlist IDs containing characters such as hyphens.
 
 When a playlist is added, Playlist Bridge:
 
 1. Fetches the source playlist.
-2. Scans your Plex music library.
+2. Scans the Plex music library.
 3. Matches source tracks to Plex tracks.
 4. Saves unresolved tracks for later review.
 5. Creates the Plex playlist.
 6. Adds matched tracks in source order.
-7. Applies available playlist metadata and artwork.
+7. Applies meaningful source metadata and available artwork.
 8. Registers the playlist for future syncs.
+9. Establishes its initial source snapshot.
 
 ## Syncing Playlists
 
@@ -179,9 +334,9 @@ Choose:
 
 Every registered playlist is refreshed.
 
-Saved mappings are reused first, including matches you selected manually in Options 5 and 6.
+Saved mappings are reused first, including matches you selected manually.
 
-### Sync one playlist
+### Sync selected playlists
 
 Choose:
 
@@ -189,27 +344,56 @@ Choose:
 [3] Sync specific playlist
 ```
 
-Then select the playlist you want to refresh.
-
-The playlist picker shows the last successful sync time:
+The picker is sorted by oldest last-sync time, with `Never` first:
 
 ```text
-[1] Your Top Songs 2018 (Spotify) - Last sync: 2026-08-20 13:45
-[2] Replay 2025 (Apple Music) - Last sync: Never
+[1] Replay 2015 (Apple Music) - Last sync: Never
+[2] Replay 2022 (Apple Music) - Last sync: 2026-08-18 13:45
+[3] Replay 2025 (Apple Music) - Last sync: 2026-08-21 08:10
 ```
 
-During a normal sync, Playlist Bridge shows the source and matched destination track:
+Select one playlist:
 
 ```text
-[1/100] ✓ What The?! - 311 (Voyager) → What The?! - 311 (Voyager)
+2
 ```
 
-A green `✓` means the track matched.
-
-A red `✗` means no suitable automatic match was found:
+or several:
 
 ```text
-[98/100] ✗ HandClap - Fitz and The Tantrums (Fitz & the Tantrums (Deluxe))
+1,3,5
+```
+
+Ranges are also accepted:
+
+```text
+1-3
+```
+
+During a normal sync, Playlist Bridge shows each source track and its Plex destination.
+
+A normal matched track appears with a green checkmark.
+
+A newly created mapping may be marked:
+
+```text
+✓ NEW
+```
+
+A track newly added to the source playlist may also be marked:
+
+```text
+ADDED
+```
+
+Those markers can appear together because source changes and mapping changes are tracked independently.
+
+A red `✗` means no suitable match was found.
+
+If a previously mapped track can no longer safely use its saved Plex target, it may be marked:
+
+```text
+✗ LOST
 ```
 
 If the source service does not provide an album, the source album appears as:
@@ -217,6 +401,26 @@ If the source service does not provide an album, the source album appears as:
 ```text
 (N/A)
 ```
+
+## Source Playlist Changes
+
+After Playlist Bridge has a previous source snapshot, it compares the current playlist against the prior successful sync.
+
+Added tracks are reported as:
+
+```text
+ADDED   Song - Artist (Album)
+```
+
+Removed tracks are reported as:
+
+```text
+REMOVED Song - Artist (Album)
+```
+
+The first tracked sync for an older installation establishes a baseline instead of reporting the entire playlist as added.
+
+Source snapshots are updated only during real syncs, not dry runs.
 
 ## Resolving Missing Tracks
 
@@ -226,68 +430,65 @@ Choose:
 [5] Resolve missing tracks
 ```
 
-Playlist Bridge shows playlists with unresolved tracks and lets you work through them one at a time.
+Playlist Bridge shows playlists containing unresolved tracks.
 
-After you select a playlist, Playlist Bridge first displays **all currently unresolved tracks** before any Plex scan or source refresh begins:
+The list is sorted by **Last match attempt**, with `Never` first:
+
+```text
+[1] Replay 2015 (Apple Music) - 9 unmatched - Last match attempt: Never
+[2] Replay 2025 (Apple Music) - 7 unmatched - Last match attempt: 2026-08-20 20:14
+```
+
+The timestamp changes only when you explicitly choose:
+
+```text
+[t] Start triage
+```
+
+Simply opening a missing-track overview and backing out does not count as an attempt.
+
+### All missing tracks
+
+Option 5 also provides:
+
+```text
+[a] All missing tracks (deduped)
+```
+
+This combines unresolved tracks across all registered playlists.
+
+Tracks are deduplicated by normalized title + artist. If different occurrences contain different album metadata, Playlist Bridge prefers a meaningful album over `N/A` for display.
+
+Each entry reports how many playlists and unresolved occurrences contain that track.
+
+### Per-playlist triage
+
+After selecting a playlist, Playlist Bridge first shows the complete unresolved list before scanning Plex:
 
 ```text
 Missing tracks for 'Replay 2025' (9 total):
 
 [1] Example Song - Example Artist (Example Album)
 [2] Another Song - Another Artist (N/A)
-...
 
 [t] Start triage
 [b] Back
 [x] Exit
 ```
 
-Choose `t` when you are ready to begin triage. This makes it possible to review the whole missing list and back out without starting the matching workflow.
+Choosing `b` or pressing Enter returns to the playlists-with-unmatched-tracks list.
 
-For each unresolved track during triage, Playlist Bridge shows the best candidate matches scoring **50% or higher**. Lower-scoring results are hidden.
+During triage, candidate matches scoring below 50% are hidden.
 
-Example:
+Controls include:
 
-```text
-[1/20] Let It Go - Idina Menzel (Frozen)
-
-  Best Plex candidates:
-  [1] Let It Go - Idina Menzel (Frozen) (100%)
-  [2] Let It Go - Idina Menzel (Frozen Deluxe Edition) (93%) [-7 deluxe]
-  [3] Let It Go - James Bay (...) (68%) [LOW CONFIDENCE]
-
-  [s] Skip
-  [m] Manual search
-  [f] Finish triage & sync now
-  [x] Exit
-```
-
-Numbers are used only to select numbered items.
-
-Controls:
-
-- `s` — skip the current track and leave it unresolved
+- numbered choice — select a displayed Plex candidate
+- `s` — leave the track unresolved
 - `m` — manually search Plex by title, artist, or album
-- `f` — save your progress, sync the playlist immediately, and return to the main menu
+- `f` — save triage progress and sync the playlist now
 - `x` — save progress and exit
 
-Manual search results are also scored and sorted.
-
-Use:
-
-```text
-[c] Cancel manual search
-```
-
-to leave manual search without selecting a result.
-
-If you reach the end of the unresolved list, Playlist Bridge asks:
-
-```text
-Sync this playlist to Plex now? (y/n):
-```
-
-You can return to Option 5 later and continue resolving anything that remains.
+A match explicitly selected during triage is stored as a **manual** mapping.
 
 ## Editing Existing Matches
 
@@ -297,71 +498,49 @@ Choose:
 [6] Edit playlist matches
 ```
 
-This lets you review tracks that already have saved mappings.
-
-The playlist picker shows how many current saved matches each playlist has:
+The playlist list shows mapping provenance counts:
 
 ```text
-[1] Your Top Songs 2018 (Spotify) - 73 current matches
-[2] Replay 2016 (Apple Music) - 0 current matches
+[1] Replay 2025 (Apple Music) - 91 current matches (78 auto, 8 manual, 5 legacy)
 ```
 
-After selecting a playlist, the current mappings are shown:
+After selecting a playlist, each current mapping shows its provenance:
 
 ```text
-[1] Beautiful Disaster - 311 (Transistor)
-    → Beautiful Disaster - 311 (Transistor)
+[1] Example Song - Example Artist (Example Album)
+    → Example Song - Example Artist (Example Album) [manual]
 ```
 
-Select a track to see alternative Plex candidates:
-
-```text
-→ Fixing: Summer of Love - 311 (Omaha Sessions)
-
-  Current match: Summer Of Love - 311 (Dammit)
-
-Top Plex candidates:
-
-  [1] Summer Of Love - 311 (Dammit) (100%)
-  [2] Summer of Love - 311 (Omaha Sessions) (100%)
-  [3] Summer Of Love - 311 (Unity) (100%)
-```
+Select a track to view alternative Plex candidates.
 
 Controls include:
 
-- numbered choices — select a different Plex match
+- numbered choice — choose or confirm a Plex match
 - `s` — leave the current match unchanged
-- `d` — unlink the saved match
-- `b` — go back
+- `d` — unlink the saved mapping
+- `b` or Enter — go back one level
 - `x` — exit
 
-Once you choose a manual match, Playlist Bridge remembers that Plex track for future syncs.
+A match explicitly selected or confirmed here becomes **manual**.
 
-Option 6 saves mapping changes without immediately adding individual tracks to the Plex playlist. When you finish editing after making changes, Playlist Bridge asks:
-
-```text
-Sync this playlist to Plex now? (y/n):
-```
-
-Choosing `y` performs one normal full playlist sync using the updated mappings. Choosing `n` leaves the Plex playlist unchanged until the next sync.
+After changes are saved, Playlist Bridge can perform one normal full playlist sync using the updated mappings.
 
 ## How Matching Works
 
-Playlist Bridge first checks whether you have already saved a match for the source track.
+Playlist Bridge checks saved mappings first.
 
-If you have, that match is reused.
-
-If not, Playlist Bridge compares:
+If no usable saved mapping exists, it compares:
 
 - Track title
 - Track artist
 - Album, when available
+- Explicit recording/version intent
 
-Title and artist identity are the primary signals. Album information helps choose between multiple copies of the same song rather than rescuing a clearly different title.
+Title and artist identity remain the primary signals. Album information helps choose among plausible copies of the same song rather than rescuing a clearly different title.
 
 ### Parentheses and alternate title formats
 
-Version 1.01 improves matching when services represent the same song differently.
+Playlist Bridge can normalize common metadata differences while keeping the original source title for display and saved mappings.
 
 Examples:
 
@@ -372,138 +551,47 @@ Song (Remastered 2011)  ↔  Song
 Song - Radio Edit  ↔  Song
 ```
 
-Playlist Bridge keeps the original source title for display and saved mappings. Normalized title forms are used only while scoring candidates.
-
-The normalization is intentionally directional for unknown parenthetical text. A source title such as:
-
-```text
-Austin (Boots Stop Workin')
-```
-
-can match a plain destination title:
-
-```text
-Austin
-```
-
-but a plain source title is not automatically treated as identical to a destination-only alternate version such as:
-
-```text
-Bring Me to Life
-Bring Me to Life (Synthesis)
-```
-
-That helps avoid choosing alternate arrangements or rerecordings just because their base titles are the same.
+Unknown destination-only alternate labels are handled conservatively, so a plain source title is not automatically treated as identical to every alternate arrangement with the same base title.
 
 ### Featured artists
 
-Featured-credit variations such as `feat.`, `ft.`, `featuring`, and `with` are handled more flexibly.
+Feature credits such as `feat.`, `ft.`, `featuring`, and `with` are treated as credit metadata rather than recording-version intent.
 
-This also applies when the source service lists featured performers as full co-artists.
+This allows equivalent metadata layouts across services to match even when the guest appears in the source title, artist field, destination artist field, or only one service.
 
-For example:
+### Recording/version intent
 
-```text
-Take a Chance on Me (feat. Jewel)
-AWOLNATION & Jewel
-```
+Explicit special recordings are protected.
 
-can match:
+Supported intent includes:
 
-```text
-Take a Chance on Me
-AWOLNATION
-```
+- remix / named mix
+- live
+- acoustic / stripped
+- demo
+- iTunes Session
+- Apple Music Session
+- Spotify Session / Sessions
 
-The same logic handles cases where the featured performer named in the title differs from the additional artist text supplied by the source service.
+If the source explicitly requests one of these and Plex only has a plain copy with no matching recording intent, Playlist Bridge can leave the source track unmatched rather than silently substituting the wrong recording.
 
-### Remix and live versions
+Generic album-era session labels such as `Evolver Sessions` are treated as provenance rather than automatically as a branded alternate-performance recording.
 
-When the **source title explicitly requests a remix or live version**, Playlist Bridge treats that as intentional version information.
+### Soundtracks and Various Artists
 
-For example:
-
-```text
-Dracula (JENNIE Remix)
-```
-
-prefers:
-
-```text
-Dracula (JENNIE remix)
-```
-
-over a plain `Dracula` track, even if both happen to be stored on a remix album.
-
-The ranking preference is:
-
-```text
-1. Destination title explicitly identifies the remix/live version
-2. Destination title is plain, but its album identifies the version
-3. Neither title nor album identifies the requested version
-```
-
-The reverse is also true: if the source does **not** request a live or remix version, a destination title that explicitly says `Live` or `Remix` is de-prioritized.
-
-This prevents cases such as:
-
-```text
-Going Under (Remastered 2023)
-```
-
-from being treated as equivalent to:
-
-```text
-Going Under (live acoustic – 2003)
-```
-
-A title such as `Live Through This` is not treated as a live-version marker merely because it contains the word `Live`.
-
-### Soundtracks and Various Artists albums
-
-Plex can store a soundtrack or compilation under the album artist `Various Artists` while retaining the real performer as the individual track artist.
-
-Playlist Bridge uses the Plex **track artist** when available.
-
-So a source track such as:
-
-```text
-Ironic - Avril Lavigne
-```
-
-can correctly match a soundtrack entry whose album artist is `Various Artists`, while still displaying and scoring against `Avril Lavigne` as the track artist.
+When Plex has a compilation or soundtrack whose album artist is `Various Artists`, Playlist Bridge uses the individual track artist when Plex provides it.
 
 ### Candidate score display
 
-Options 5 and 6 show the strongest Plex candidates for a track.
+Options 5 and 6 show the strongest candidate results.
 
-Candidates scoring below **50%** are hidden so obviously unrelated library results do not clutter the list.
-
-Low-confidence candidates that remain above the cutoff are still clearly labeled.
-
-### Text cleanup
-
-Playlist Bridge repairs common UTF-8/Latin-1 display corruption before matching and displaying metadata.
-
-For example:
-
-```text
-We Didnât Start The Fire
-```
-
-is repaired to:
-
-```text
-We Didn’t Start The Fire
-```
-
-Already-correct Unicode text is left unchanged.
+Candidates below **50%** are hidden.
 
 ## Album Preference
 
-When your library contains multiple copies of the same song, Playlist Bridge generally prefers a normal studio-album copy over special-release copies when the source does not explicitly request a special version.
+When multiple copies of the same recording exist, Playlist Bridge generally prefers a normal studio-album copy over a special-release copy unless the source explicitly requests the special recording.
 
-Examples of lower-priority releases include:
+Lower-priority release types can include:
 
 - Greatest Hits / Best Of / Essential collections
 - Live albums
@@ -512,47 +600,70 @@ Examples of lower-priority releases include:
 - Deluxe or expanded editions
 - Remasters
 
-Typical ranking behavior:
+This is a ranking preference, not a blanket rejection.
+
+A source compilation does not force the Plex compilation copy if the canonical studio version is a better destination.
+
+## Playlist Metadata and Artwork
+
+Playlist Bridge updates source metadata and artwork during actual playlist creation/sync operations.
+
+Artwork discovery is skipped during matching-review and dry-run paths.
+
+### Descriptions
+
+A meaningful source playlist description is copied to Plex.
+
+Service-generated labels such as:
 
 ```text
-Beautiful Disaster - 311 (Transistor)
-    preferred over
-Beautiful Disaster - 311 (Greatest Hits ’93–’03)
+Playlist · 86 Songs
+86 Songs
+Playlist · 86 Songs · 5 hr 12 min
 ```
 
-This is a preference, not a hard rule.
+are intentionally omitted because Plex already identifies the object as a playlist and displays its item count.
 
-If the source explicitly identifies a remix or live recording in the **track title**, that version intent takes priority over the normal studio-copy preference.
+If the source exposes no meaningful description, the Plex description is left empty.
 
-If the only good copy in your library is from a Greatest Hits, live, deluxe, remastered, or similar release, Playlist Bridge can still use it.
+### Text cleanup
 
-The source service also does not force a compilation copy. If Spotify or Apple Music points to a Greatest Hits release but Plex also contains the original studio-album version, Playlist Bridge can prefer the studio version.
+Common UTF-8/Latin-1 mojibake is repaired before matching/display and before playlist metadata is sent to Plex.
 
-## Playlist Artwork
+For example:
 
-Playlist Bridge attempts to copy playlist artwork from the source service **only when a playlist is being created or synced**.
+```text
+We Didnât Start The Fire
+```
 
-Artwork discovery is skipped while reviewing missing tracks in Option 5 and editing existing matches in Option 6. This keeps matching workflows focused and avoids unnecessary artwork requests.
+becomes:
 
-### Spotify
+```text
+We Didn’t Start The Fire
+```
+
+and:
+
+```text
+Playlist Â· 86 Songs
+```
+
+is repaired before generic-description filtering.
+
+### Spotify artwork
 
 Spotify artwork is retrieved from public Spotify playlist metadata.
 
-### Apple Music
+### Apple Music artwork
 
-Apple Music sometimes exposes wide social-preview images instead of square playlist covers.
+Apple Music can expose wide social-preview images instead of square playlist art.
 
-Playlist Bridge checks the actual downloaded image before sending it to Plex.
+Playlist Bridge checks actual image dimensions and can:
 
-It can:
-
-- Prefer playlist-level artwork
-- Verify actual pixel dimensions
-- Reject wide preview/banner images
-- Reject very small images
-- Try alternate square Apple artwork renditions
-
-This helps prevent low-quality or badly cropped playlist posters.
+- prefer playlist-level square artwork
+- reject wide banner/social-preview images
+- reject very small images
+- try alternate square Apple artwork renditions
 
 ## Registered Playlists
 
@@ -562,19 +673,14 @@ Choose:
 [4] View registered playlists
 ```
 
-to see:
+Registered playlists are shown oldest-last-sync first, with `Never` first.
+
+The list includes:
 
 - Playlist name
 - Source service
 - Source URL
 - Last sync time
-
-Service names are displayed consistently as:
-
-```text
-Spotify
-Apple Music
-```
 
 ## Sync History
 
@@ -594,9 +700,9 @@ Choose:
 [8] Remove playlist
 ```
 
-to remove a playlist from Playlist Bridge after confirmation.
+to remove the registration from Playlist Bridge after confirmation.
 
-This removes the registration from Playlist Bridge. It does not delete the original Spotify or Apple Music playlist.
+This does not delete the original Spotify or Apple Music playlist.
 
 ## Settings
 
@@ -610,61 +716,70 @@ The Settings menu includes:
 
 ```text
 [1] Configure Plex
-[2] Clear matching for a playlist
+[2] Clear all matching for a playlist
+[3] Clear automatic matches
 [b] Back
 [x] Exit
 ```
 
 ### Configure Plex
 
-Use **Configure Plex** to set or replace the Plex server URL and token. Existing playlist registrations and saved mappings are not removed.
+Use **Configure Plex** to set or replace the Plex server URL and token.
 
-### Clear matching
+Existing playlist registrations and saved mappings are not removed.
 
-Use **Clear matching for a playlist** when you want Playlist Bridge to forget its saved matching decisions and rematch tracks from scratch.
+### Clear all matching for a playlist
 
-The playlist list shows the current saved-match and unresolved counts:
+This removes that playlist's saved mappings and unresolved state so the next sync can rematch from scratch.
 
-```text
-[1] Your Top Songs 2018 (Spotify) - 73 saved matches, 27 unresolved
-[2] Replay 2016 (Apple Music) - 0 saved matches, 10 unresolved
+You can clear one playlist or all registered playlists.
 
-[a] All playlists
-[b] Back
-[x] Exit
-```
+This does not remove the playlist registration or modify the Plex playlist immediately.
 
-You can clear one playlist or choose `a` to clear matching for every registered playlist.
+### Clear automatic matches
 
-Clearing matching removes that playlist's entries from `mapping.json` and `missing_tracks.json`. It does **not**:
+This removes only mappings explicitly recorded as `automatic`.
 
-- remove the playlist registration from Playlist Bridge
-- delete or modify the Plex playlist
-- delete the source Spotify or Apple Music playlist
+It preserves:
 
-The next sync rematches every source track whose saved matching state was cleared.
+- `manual` mappings
+- `legacy` mappings whose original provenance cannot be known safely
+
+The cleared tracks are matched again on the next sync.
 
 ## Automated Sync
 
-Playlist Bridge includes a non-interactive mode for scheduled syncing.
-
-Sync every registered playlist:
+Sync every registered playlist non-interactively:
 
 ```bash
 python sync.py --sync-all
 ```
 
-This:
+This uses saved mappings, refreshes source contents, updates Plex playlists, records unresolved tracks, updates change-tracking state, and updates last-sync timestamps.
 
-- Uses saved mappings
-- Respects manual matches
-- Fetches current source playlist contents
-- Refreshes Plex playlists
-- Updates available metadata and artwork
-- Records unresolved tracks for later review
-- Updates last-sync timestamps
+If Plex is not already configured, `--sync-all` exits rather than opening interactive setup.
 
-If Plex is not already configured, `--sync-all` exits instead of opening an interactive setup prompt.
+### Dry run
+
+Evaluate all registered playlists without changing Plex or local state:
+
+```bash
+python sync.py --sync-all --dry-run
+```
+
+Dry run:
+
+- fetches current source playlist contents
+- scans Plex
+- performs normal matching analysis
+- reports matching and source-change information
+- does not clear or rebuild Plex playlists
+- does not update Plex metadata/artwork
+- does not update timestamps
+- does not write any JSON state
+- does not perform legacy schema migration
+
+`--dry-run` must be used together with `--sync-all`.
 
 ### Help
 
@@ -672,35 +787,76 @@ If Plex is not already configured, `--sync-all` exits instead of opening an inte
 python sync.py --help
 ```
 
-Example:
+The public command-line options are:
 
 ```text
-usage: sync.py [-h] [--sync-all]
-
-Playlist Bridge v1.1 - Sync Spotify and Apple Music playlists to Plex. Run
-without arguments for the interactive menu.
-
-options:
-  -h, --help  show this help message and exit
-  --sync-all  Sync all registered playlists to Plex non-interactively using
-              saved mappings.
+-h, --help
+--sync-all
+--dry-run
 ```
 
 ## Scheduled Syncing
 
 Because `--sync-all` is non-interactive, it can be run from cron, systemd timers, Task Scheduler, or another scheduler.
 
-Example cron job running every day at 2:00 AM:
+Example daily cron job at 2:00 AM:
 
 ```cron
-0 2 * * * cd /path/to/playlist-bridge && /path/to/python sync.py --sync-all
+0 2 * * * cd /path/to/playlist-bridge && /path/to/playlist-bridge/.venv/bin/python sync.py --sync-all >> /path/to/playlist-bridge/cron.log 2>&1
 ```
 
-Run Playlist Bridge from its project directory so it can find its saved configuration and matching data.
+Run Playlist Bridge from its project directory because saved state is stored relative to the current working directory.
 
 ## Saved Data
 
-Playlist Bridge stores its local state in:
+Playlist Bridge stores persistent state in:
+
+```text
+config.json
+mapping.json
+missing_tracks.json
+match_metadata.json
+source_snapshots.json
+```
+
+Purpose:
+
+- `config.json` — Plex configuration and registered playlists
+- `mapping.json` — source-track to Plex-track mappings
+- `missing_tracks.json` — unresolved source tracks
+- `match_metadata.json` — automatic/manual provenance for mappings
+- `source_snapshots.json` — previous source playlist contents for `ADDED` / `REMOVED` comparison
+
+### JSON schema
+
+Schema 1 uses:
+
+```json
+{
+  "_schema_version": 1,
+  "data": {
+    "...": "..."
+  }
+}
+```
+
+Older unwrapped Playlist Bridge JSON loads as schema 0.
+
+The first normal save under 1.2 migrates those existing files and creates one-time backups such as:
+
+```text
+config.json.pre-schema-1.bak
+mapping.json.pre-schema-1.bak
+missing_tracks.json.pre-schema-1.bak
+```
+
+New state files that did not previously exist do not need a migration backup.
+
+If the file declares a schema newer than this Playlist Bridge build understands, the application stops rather than overwriting it.
+
+## Upgrading from 1.1
+
+You can replace the old `sync.py` with 1.2 and keep your existing:
 
 ```text
 config.json
@@ -708,11 +864,17 @@ mapping.json
 missing_tracks.json
 ```
 
-These files contain your Plex configuration, registered playlists, saved match decisions, and unresolved tracks.
+No reset is required.
 
-Do not delete them unless you intentionally want to reset that information.
+Existing saved mappings load normally and are classified as `legacy` until you explicitly confirm/change them or new automatic mappings are created.
 
-Manual matches are stored persistently and are reused during normal syncs and `--sync-all`.
+If you want to verify the upgrade without writing anything first:
+
+```bash
+python sync.py --sync-all --dry-run
+```
+
+Then run a normal sync when ready. The first normal state save performs the schema-1 migration and creates the one-time backups.
 
 ## Public Playlist Requirement
 
@@ -722,7 +884,7 @@ You do not need Spotify developer credentials or Apple Music developer credentia
 
 The playlist must be publicly accessible.
 
-If Spotify or Apple Music changes the structure of its public playlist pages, a future Playlist Bridge update may be required.
+If either service changes the structure of its public pages, a future Playlist Bridge update may be required.
 
 ## Troubleshooting
 
@@ -730,70 +892,79 @@ If Spotify or Apple Music changes the structure of its public playlist pages, a 
 
 Check that:
 
-- The Plex server URL is correct
-- The server is reachable from the computer running Playlist Bridge
-- Your Plex token is valid
+- the Plex server URL is correct
+- the server is reachable from the computer running Playlist Bridge
+- your Plex token is valid
 
-You can configure Plex through Option 9 → Configure Plex.
+You can update Plex through Option 9 → Configure Plex.
 
 ### A lot of tracks are missing
 
 Use Option 5.
 
-Playlist Bridge shows its best Plex candidates scoring 50% or higher.
-
-You can also manually search by title, artist, or album.
+Review the complete unresolved list, use the deduplicated all-missing view, then start triage when ready.
 
 ### A track matched the wrong copy
 
-Use Option 6 and choose the correct Plex track.
+Use Option 6 and select the correct Plex track.
 
-Your corrected match will be saved and reused during future syncs.
+Explicit choices are stored as manual mappings and reused on future syncs.
 
-### I want to rematch a playlist from scratch
+### A demo/acoustic/live/remix/session version is unmatched
+
+This can be intentional.
+
+If the source explicitly requests a distinct recording and Plex only contains a plain version, Playlist Bridge prefers leaving it unresolved instead of silently choosing the wrong recording.
+
+Use Option 5 or Option 6 if your Plex metadata identifies the correct recording in an unusual way.
+
+### I want to rematch automatic choices but keep my corrections
 
 Open:
 
 ```text
 [9] Settings
-[2] Clear matching for a playlist
+[3] Clear automatic matches
 ```
 
-Choose a playlist, or choose `a` for all playlists, and confirm the reset.
+Manual and legacy mappings remain protected.
 
-This clears saved matching and unresolved state only. The registered playlists and Plex playlists remain in place.
+### I want to reset all matching for a playlist
 
-### A remix or live version matched incorrectly
+Open:
 
-Check whether the source track title itself identifies the version.
+```text
+[9] Settings
+[2] Clear all matching for a playlist
+```
 
-Playlist Bridge treats title-level `Remix` and `Live` markers as intentional. A plain source title will normally prefer a plain/studio copy, while a source title explicitly marked as a remix or live version will prefer that version.
+The playlist registration and Plex playlist remain in place.
 
-If the library metadata is unusual, use Option 6 to save the desired Plex copy.
+### Source changes are all showing baseline
 
-### A soundtrack track shows Various Artists
+That is expected on the first tracked 1.2 sync for an existing playlist.
 
-Playlist Bridge uses Plex's individual track artist when Plex provides one.
+The next sync has a prior source snapshot to compare against.
 
-If a soundtrack entry still appears only as `Various Artists`, check the track metadata in Plex and make sure the individual track artist is populated.
+### A manual mapping's Plex ID disappeared
 
-### A manual match is no longer being used
+Playlist Bridge does not silently replace a stale manual or legacy mapping with a new automatic guess.
 
-Playlist Bridge saves mappings using the source title and artist.
+The track is surfaced for review.
 
-If Spotify or Apple Music later changes the exact title or artist text, Playlist Bridge may see it as a new source track and require another match.
+### Text contains characters such as `â` or `Â·`
 
-### Text contains characters such as `â`
+Playlist Bridge repairs common UTF-8/Latin-1 encoding corruption before matching and metadata updates.
 
-Playlist Bridge automatically repairs common UTF-8/Latin-1 encoding glitches before matching and display.
+### Playlist description is just `Playlist · N Songs`
 
-If malformed text still appears, it may already be stored that way in the original source or Plex metadata.
+Playlist Bridge suppresses that generic source-generated metadata. A meaningful source description is preserved; otherwise Plex receives an empty description.
 
 ### Apple Music artwork looks wrong
 
 Watch the artwork messages during sync.
 
-Playlist Bridge reports actual image dimensions and rejects unsuitable wide or low-resolution artwork before uploading it.
+Playlist Bridge validates actual image dimensions and rejects unsuitable wide or low-resolution artwork.
 
 ### `--sync-all` stops because Plex is not configured
 
@@ -803,17 +974,15 @@ Run:
 python sync.py
 ```
 
-and configure Plex interactively first.
-
-Then run `--sync-all` again.
+configure Plex interactively, then run `--sync-all` again.
 
 ## Security
 
 `config.json` contains your Plex connection information, including your Plex token.
 
-Keep it private and do not share it publicly.
+Keep all local state files and schema-migration backups private and out of source control.
 
-The other saved data files contain information about your local music library and matching decisions and should also be treated as private local data.
+The recommended `.gitignore` excludes them.
 
 ## License
 
