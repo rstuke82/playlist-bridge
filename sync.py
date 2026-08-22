@@ -27,7 +27,7 @@ from fuzzywuzzy import fuzz # type: ignore
 from fuzzywuzzy import process # type: ignore
 
 APP_NAME = "Playlist Bridge"
-VERSION = "1.2"
+VERSION = "1.21-dev"
 
 # Color codes for terminal output
 class Colors:
@@ -470,6 +470,21 @@ class Config:
                         track[field] = repair_text(
                             track.get(field, "")
                         )
+
+                previous_match = track.get(
+                    "previous_match"
+                )
+
+                if isinstance(previous_match, dict):
+                    for field in (
+                        "title",
+                        "artist",
+                        "album",
+                    ):
+                        if field in previous_match:
+                            previous_match[field] = repair_text(
+                                previous_match.get(field, "")
+                            )
 
         return data
 
@@ -1942,6 +1957,88 @@ class PlexAPI:
 
         except Exception as e:
             print(f"Error searching library: {e}")
+            return []
+
+    def get_audio_playlists(self) -> List[dict]:
+        """
+        Return every Plex audio playlist visible to this server/token.
+
+        This is used only by read-only developer diagnostics. Both normal and
+        smart audio playlists are included when Plex exposes them.
+        """
+
+        try:
+            resp = requests.get(
+                f"{self.base_url}/playlists",
+                headers=self.headers,
+                timeout=15,
+            )
+
+            if resp.status_code != 200:
+                print(
+                    f"Failed to get Plex playlists: "
+                    f"{resp.status_code}"
+                )
+                return []
+
+            playlists = (
+                resp.json()
+                .get("MediaContainer", {})
+                .get("Metadata", [])
+            )
+
+            results = []
+
+            for playlist in playlists:
+                playlist_type = str(
+                    playlist.get("playlistType")
+                    or playlist.get("type")
+                    or ""
+                ).casefold()
+
+                # Plex normally reports playlistType="audio". If the field is
+                # absent on a server/version, retain the item unless it is
+                # explicitly known to be video/photo.
+                if playlist_type in (
+                    "video",
+                    "photo",
+                ):
+                    continue
+
+                if (
+                    playlist_type
+                    and playlist_type != "audio"
+                ):
+                    continue
+
+                rating_key = playlist.get(
+                    "ratingKey"
+                )
+
+                if rating_key is None:
+                    continue
+
+                results.append(
+                    {
+                        "plex_id": str(rating_key),
+                        "title": repair_text(
+                            playlist.get("title", "")
+                        ),
+                        "smart": bool(
+                            playlist.get("smart")
+                        ),
+                        "leaf_count": playlist.get(
+                            "leafCount"
+                        ),
+                    }
+                )
+
+            return results
+
+        except Exception as e:
+            print(
+                f"Error getting Plex playlists: {e}"
+            )
             return []
 
     def get_playlist(self, playlist_id: str) -> dict:
@@ -3470,21 +3567,157 @@ class Syncer:
         )
         return value if isinstance(value, dict) else {}
 
+    @staticmethod
+    def _plex_match_snapshot(
+        plex_track: dict,
+        plex_id: str = None,
+    ) -> dict:
+        """Return the small Plex metadata snapshot used for LOST history."""
+        if not isinstance(plex_track, dict):
+            return {
+                "plex_id": str(plex_id or ""),
+                "title": "",
+                "artist": "",
+                "album": "",
+            }
+
+        return {
+            "plex_id": str(
+                plex_track.get("plex_id")
+                or plex_id
+                or ""
+            ),
+            "title": repair_text(
+                plex_track.get("title", "")
+            ),
+            "artist": repair_text(
+                plex_track.get("artist", "")
+            ),
+            "album": repair_text(
+                plex_track.get("album", "")
+            ),
+        }
+
+    def _remember_match_snapshot(
+        self,
+        mapping_key: str,
+        search_key: str,
+        plex_track: dict,
+        plex_id: str = None,
+    ):
+        """
+        Remember the last known Plex title/artist/album for a saved mapping.
+
+        If the mapping predates provenance tracking, this enriches the legacy
+        record without guessing whether it was automatic or manual.
+        """
+        bucket = self._get_match_metadata_bucket(
+            mapping_key,
+            create=True,
+        )
+        current = bucket.get(
+            search_key,
+            {},
+        )
+
+        if not isinstance(current, dict):
+            current = {}
+
+        current = dict(current)
+        current["matched_track"] = (
+            self._plex_match_snapshot(
+                plex_track,
+                plex_id,
+            )
+        )
+        current["updated_at"] = (
+            datetime.now().isoformat()
+        )
+        bucket[search_key] = current
+
+    def _previous_match_snapshot(
+        self,
+        mapping_key: str,
+        search_key: str,
+        plex_id: str,
+    ) -> dict:
+        """Return the last known Plex metadata for a mapping that went stale."""
+        record = self._get_match_metadata_bucket(
+            mapping_key,
+            create=False,
+        ).get(search_key)
+
+        if isinstance(record, dict):
+            previous = record.get(
+                "matched_track"
+            )
+
+            if isinstance(previous, dict):
+                snapshot = {
+                    "plex_id": str(
+                        previous.get("plex_id")
+                        or plex_id
+                        or ""
+                    ),
+                    "title": repair_text(
+                        previous.get("title", "")
+                    ),
+                    "artist": repair_text(
+                        previous.get("artist", "")
+                    ),
+                    "album": repair_text(
+                        previous.get("album", "")
+                    ),
+                }
+
+                return snapshot
+
+        # Existing 1.2 mappings do not yet have the last-known metadata
+        # snapshot. Keep the old Plex ID so the LOST record still has a
+        # concrete reference and can explain why details are unavailable.
+        return {
+            "plex_id": str(plex_id or ""),
+            "title": "",
+            "artist": "",
+            "album": "",
+        }
+
     def _set_match_provenance(
         self,
         mapping_key: str,
         search_key: str,
         provenance: str,
+        matched_track: dict = None,
+        plex_id: str = None,
     ):
-        """Record whether a saved mapping was automatic or manual."""
+        """Record mapping provenance and, when known, the Plex match snapshot."""
         bucket = self._get_match_metadata_bucket(
             mapping_key,
             create=True,
         )
-        bucket[search_key] = {
-            "provenance": provenance,
-            "updated_at": datetime.now().isoformat(),
-        }
+        current = bucket.get(
+            search_key,
+            {},
+        )
+
+        if not isinstance(current, dict):
+            current = {}
+
+        current = dict(current)
+        current["provenance"] = provenance
+        current["updated_at"] = (
+            datetime.now().isoformat()
+        )
+
+        if matched_track is not None:
+            current["matched_track"] = (
+                self._plex_match_snapshot(
+                    matched_track,
+                    plex_id,
+                )
+            )
+
+        bucket[search_key] = current
 
     def _remove_match_provenance(
         self,
@@ -3821,6 +4054,13 @@ class Syncer:
             plex_id = None
             cached_valid = False
             stale_cached_mapping = False
+            stale_provenance = "legacy"
+            previous_match = {
+                "plex_id": "",
+                "title": "",
+                "artist": "",
+                "album": "",
+            }
             allow_automatic_match = True
 
             if search_key in playlist_mapping:
@@ -3834,15 +4074,36 @@ class Syncer:
                 if matched_track is not None:
                     plex_id = cached_id
                     cached_valid = True
+
+                    if record_provenance:
+                        self._remember_match_snapshot(
+                            mapping_key,
+                            search_key,
+                            matched_track,
+                            cached_id,
+                        )
                 else:
                     stale_cached_mapping = True
-                    stale_mappings.append(track)
 
                     stale_provenance = (
                         self._get_match_provenance(
                             mapping_key,
                             search_key,
                         )
+                    )
+                    previous_match = (
+                        self._previous_match_snapshot(
+                            mapping_key,
+                            search_key,
+                            cached_id,
+                        )
+                    )
+                    stale_mappings.append(
+                        {
+                            "source": dict(track),
+                            "previous_match": previous_match,
+                            "previous_provenance": stale_provenance,
+                        }
                     )
 
                     # A stale mapping that was explicitly manual -- or a
@@ -3890,6 +4151,8 @@ class Syncer:
                             mapping_key,
                             search_key,
                             "automatic",
+                            matched_track=matched_track,
+                            plex_id=plex_id,
                         )
 
             if plex_id:
@@ -3972,11 +4235,32 @@ class Syncer:
                 )
                 continue
 
-            unmatched.append(track)
+            unmatched_track = dict(track)
 
-            is_lost = was_mapped
+            is_lost = (
+                was_mapped
+                and stale_cached_mapping
+            )
+
             if is_lost:
-                lost_matches.append(track)
+                previous_provenance = (
+                    stale_provenance
+                )
+
+                unmatched_track["status"] = "lost"
+                unmatched_track["previous_match"] = (
+                    previous_match
+                )
+                unmatched_track[
+                    "previous_provenance"
+                ] = previous_provenance
+                lost_matches.append(
+                    unmatched_track
+                )
+
+            unmatched.append(
+                unmatched_track
+            )
 
             source_title = colored(
                 track["title"],
@@ -4013,6 +4297,56 @@ class Syncer:
                 f"{source_album_display(track)}"
             )
 
+            if is_lost:
+                previous_title = (
+                    previous_match.get(
+                        "title",
+                        "",
+                    )
+                )
+                previous_artist = (
+                    previous_match.get(
+                        "artist",
+                        "",
+                    )
+                )
+                previous_album = (
+                    previous_match.get(
+                        "album",
+                        "",
+                    )
+                )
+                previous_id = (
+                    previous_match.get(
+                        "plex_id",
+                        "",
+                    )
+                )
+
+                if previous_title or previous_artist:
+                    previous_text = (
+                        f"{previous_title} - "
+                        f"{previous_artist}"
+                    )
+
+                    if previous_album:
+                        previous_text += (
+                            f" ({previous_album})"
+                        )
+
+                    print(
+                        "      Previous Plex match: "
+                        f"{previous_text} "
+                        f"[{previous_provenance}]"
+                    )
+                elif previous_id:
+                    print(
+                        "      Previous Plex match: "
+                        f"metadata unavailable "
+                        f"(Plex ID {previous_id}) "
+                        f"[{previous_provenance}]"
+                    )
+
         return (
             matched_tracks,
             unmatched,
@@ -4033,15 +4367,38 @@ class Syncer:
         """Store unmatched tracks."""
 
         if unmatched:
-            self.config.missing[mapping_key] = [
-                {
+            stored_tracks = []
+
+            for t in unmatched:
+                stored = {
                     "title": t["title"],
                     "artist": t["artist"],
                     "album": t.get("album", ""),
                     "source_id": t.get("source_id", ""),
                 }
-                for t in unmatched
-            ]
+
+                if t.get("status") == "lost":
+                    stored["status"] = "lost"
+                    stored["previous_match"] = dict(
+                        t.get(
+                            "previous_match",
+                            {},
+                        )
+                    )
+                    stored["previous_provenance"] = (
+                        t.get(
+                            "previous_provenance",
+                            "legacy",
+                        )
+                    )
+
+                stored_tracks.append(
+                    stored
+                )
+
+            self.config.missing[
+                mapping_key
+            ] = stored_tracks
 
             print(
                 f"\n⚠ {len(unmatched)} tracks unmatched"
@@ -4655,6 +5012,7 @@ class Syncer:
             print("\nDeveloper tools:\n")
             print("[1] Dry run matching")
             print("[2] Check manual source track")
+            print("[3] Albums with no playlist tracks")
             print("[b] Back")
             print("[x] Exit")
 
@@ -4676,7 +5034,232 @@ class Syncer:
                 self.manual_match_check_interactive()
                 continue
 
+            if choice == "3":
+                self.show_albums_without_playlist_tracks()
+                continue
+
             print("✗ Invalid choice")
+
+    def find_albums_without_playlist_tracks(
+        self,
+    ) -> dict:
+        """
+        Find Plex albums with zero tracks on any Plex audio playlist.
+
+        "Any playlist" means every Plex audio playlist visible to the current
+        Plex server/token, not only playlists registered with Playlist Bridge.
+
+        Returns diagnostic data so the interactive view can remain simple and
+        the logic can be regression-tested independently.
+        """
+
+        plex = self._get_plex()
+
+        print("\n→ Scanning Plex music library...")
+        plex_library = plex.search_library("")
+
+        if not plex_library:
+            return {
+                "albums": [],
+                "playlist_count": 0,
+                "playlist_track_count": 0,
+                "library_track_count": 0,
+                "library_album_count": 0,
+            }
+
+        print(
+            f"  Found {len(plex_library)} tracks in Plex library"
+        )
+
+        print("→ Scanning Plex audio playlists...")
+        playlists = plex.get_audio_playlists()
+
+        playlist_track_ids = set()
+
+        for i, playlist in enumerate(
+            playlists,
+            1,
+        ):
+            playlist_id = playlist.get(
+                "plex_id"
+            )
+            playlist_name = (
+                playlist.get("title")
+                or f"Playlist {playlist_id}"
+            )
+
+            print(
+                f"  [{i}/{len(playlists)}] "
+                f"{playlist_name}"
+            )
+
+            items = plex.get_playlist_items(
+                str(playlist_id)
+            )
+
+            for item in items:
+                plex_id = item.get(
+                    "plex_id"
+                )
+
+                if plex_id is not None:
+                    playlist_track_ids.add(
+                        str(plex_id)
+                    )
+
+        albums = {}
+
+        for track in plex_library:
+            album = repair_text(
+                track.get("album", "")
+            ).strip()
+
+            # A track with no Plex album metadata is not useful in an
+            # album-level report.
+            if not album:
+                continue
+
+            album_artist = repair_text(
+                track.get("album_artist", "")
+                or track.get("artist", "")
+            ).strip()
+
+            key = (
+                album_artist.casefold(),
+                album.casefold(),
+            )
+
+            if key not in albums:
+                albums[key] = {
+                    "artist": album_artist,
+                    "album": album,
+                    "track_count": 0,
+                    "playlist_track_count": 0,
+                }
+
+            entry = albums[key]
+            entry["track_count"] += 1
+
+            plex_id = track.get(
+                "plex_id"
+            )
+
+            if (
+                plex_id is not None
+                and str(plex_id)
+                in playlist_track_ids
+            ):
+                entry[
+                    "playlist_track_count"
+                ] += 1
+
+        unused_albums = [
+            album
+            for album in albums.values()
+            if album["playlist_track_count"] == 0
+        ]
+
+        unused_albums.sort(
+            key=lambda item: (
+                item["artist"].casefold(),
+                item["album"].casefold(),
+            )
+        )
+
+        return {
+            "albums": unused_albums,
+            "playlist_count": len(playlists),
+            "playlist_track_count": len(
+                playlist_track_ids
+            ),
+            "library_track_count": len(
+                plex_library
+            ),
+            "library_album_count": len(
+                albums
+            ),
+        }
+
+    def show_albums_without_playlist_tracks(
+        self,
+    ):
+        """
+        Read-only developer report of albums unused by every Plex playlist.
+        """
+
+        print(
+            "\nAlbums with no tracks on any Plex playlist"
+        )
+        print(
+            "This checks every Plex audio playlist visible to "
+            "the current server/token."
+        )
+
+        result = (
+            self.find_albums_without_playlist_tracks()
+        )
+
+        if not result["library_track_count"]:
+            print("✗ No Plex music tracks were found.")
+            return
+
+        albums = result["albums"]
+
+        print(
+            "\n=== UNUSED ALBUM SUMMARY ==="
+        )
+        print(
+            f"Library tracks:          "
+            f"{result['library_track_count']}"
+        )
+        print(
+            f"Library albums:          "
+            f"{result['library_album_count']}"
+        )
+        print(
+            f"Audio playlists scanned: "
+            f"{result['playlist_count']}"
+        )
+        print(
+            f"Unique playlist tracks:  "
+            f"{result['playlist_track_count']}"
+        )
+        print(
+            f"Albums with zero tracks "
+            f"on any playlist: {len(albums)}"
+        )
+
+        if not albums:
+            print(
+                "\n✓ Every Plex album has at least one track "
+                "on a Plex audio playlist."
+            )
+            return
+
+        print(
+            "\nAlbums with zero playlist coverage:\n"
+        )
+
+        for i, album in enumerate(
+            albums,
+            1,
+        ):
+            artist = (
+                album["artist"]
+                or "Unknown Artist"
+            )
+
+            print(
+                f"[{i}] "
+                f"{colored(artist, Colors.GREEN)} - "
+                f"{colored(album['album'], Colors.YELLOW)} "
+                f"({album['track_count']} tracks)"
+            )
+
+        print(
+            "\n✓ Developer report complete. "
+            "No Plex or local state was changed."
+        )
 
     def manual_match_check_interactive(self):
         """
@@ -5438,6 +6021,8 @@ class Syncer:
                     mapping_key,
                     current_match["search_key"],
                     "manual",
+                    matched_track=selected,
+                    plex_id=selected.get("plex_id"),
                 )
                 self.config.mapping[mapping_key] = playlist_mapping
                 self.config.save()
@@ -5821,6 +6406,72 @@ class Syncer:
 
             print("✗ Invalid choice")
 
+    @staticmethod
+    def _print_previous_lost_match(
+        track: dict,
+        indent: str = "",
+    ):
+        """Display the previous Plex target stored with a LOST track."""
+        if track.get("status") != "lost":
+            return
+
+        previous = track.get(
+            "previous_match",
+            {},
+        )
+
+        if not isinstance(previous, dict):
+            previous = {}
+
+        provenance = str(
+            track.get(
+                "previous_provenance",
+                "legacy",
+            )
+        )
+
+        title = repair_text(
+            previous.get("title", "")
+        ).strip()
+        artist = repair_text(
+            previous.get("artist", "")
+        ).strip()
+        album = repair_text(
+            previous.get("album", "")
+        ).strip()
+        plex_id = str(
+            previous.get("plex_id", "")
+            or ""
+        )
+
+        if title or artist:
+            text = (
+                f"{title} - {artist}"
+            ).strip(" -")
+
+            if album:
+                text += f" ({album})"
+
+            print(
+                f"{indent}Previous Plex match: "
+                f"{text} [{provenance}]"
+            )
+            return
+
+        if plex_id:
+            print(
+                f"{indent}Previous Plex match: "
+                f"metadata unavailable "
+                f"(Plex ID {plex_id}) "
+                f"[{provenance}]"
+            )
+            return
+
+        print(
+            f"{indent}Previous Plex match: "
+            "metadata unavailable"
+        )
+
     def resolve_missing_interactive(self):
         """Interactive resolution of missing tracks."""
 
@@ -5990,10 +6641,16 @@ class Syncer:
                         "playlists": [],
                         "playlist_count": 0,
                         "occurrence_count": 0,
+                        "lost_occurrence_count": 0,
                     }
 
                 entry = deduped[key]
                 entry["occurrence_count"] += 1
+
+                if track.get("status") == "lost":
+                    entry[
+                        "lost_occurrence_count"
+                    ] += 1
 
                 if album and album.casefold() != "n/a":
                     current_album = (
@@ -6044,8 +6701,19 @@ class Syncer:
             deduped,
             1,
         ):
+            lost_prefix = ""
+
+            if track.get(
+                "lost_occurrence_count",
+                0,
+            ):
+                lost_prefix = (
+                    f"{colored('LOST', Colors.RED)} "
+                )
+
             print(
                 f"[{i}] "
+                f"{lost_prefix}"
                 f"{colored(track['title'], Colors.CYAN)} - "
                 f"{colored(track['artist'], Colors.GREEN)} "
                 f"{source_album_display(track)}"
@@ -6068,6 +6736,15 @@ class Syncer:
                 f"{track['occurrence_count']} unresolved "
                 f"{occurrence_word}"
             )
+            if track.get(
+                "lost_occurrence_count",
+                0,
+            ):
+                print(
+                    f"    LOST occurrences: "
+                    f"{track['lost_occurrence_count']}"
+                )
+
             print(
                 f"    Playlists: "
                 f"{', '.join(track['playlists'])}"
@@ -6126,12 +6803,26 @@ class Syncer:
         )
 
         for i, track in enumerate(unmatched, 1):
+            lost_prefix = ""
+
+            if track.get("status") == "lost":
+                lost_prefix = (
+                    f"{colored('LOST', Colors.RED)} "
+                )
+
             print(
                 f"[{i}] "
+                f"{lost_prefix}"
                 f"{colored(track['title'], Colors.CYAN)} - "
                 f"{colored(track['artist'], Colors.GREEN)} "
                 f"{source_album_display(track)}"
             )
+
+            if track.get("status") == "lost":
+                self._print_previous_lost_match(
+                    track,
+                    indent="    ",
+                )
 
         print("\n[t] Start triage")
         print("[b] Back")
@@ -6287,12 +6978,26 @@ class Syncer:
 
             displayed_candidates = candidates[:5]
 
+            lost_prefix = ""
+
+            if track.get("status") == "lost":
+                lost_prefix = (
+                    f"{colored('LOST', Colors.RED)} "
+                )
+
             print(
                 f"\n[{track_index + 1}/{len(unmatched)}] "
+                f"{lost_prefix}"
                 f"{colored(track['title'], Colors.CYAN)} - "
                 f"{colored(track['artist'], Colors.GREEN)} "
                 f"{source_album_display(track)}"
             )
+
+            if track.get("status") == "lost":
+                self._print_previous_lost_match(
+                    track,
+                    indent="  ",
+                )
 
             print("\n  Best Plex candidates:")
 
@@ -6639,6 +7344,8 @@ class Syncer:
                                 mapping_key,
                                 search_key,
                                 "manual",
+                                matched_track=selected,
+                                plex_id=selected.get("plex_id"),
                             )
 
                             print(
@@ -6701,6 +7408,8 @@ class Syncer:
                         mapping_key,
                         search_key,
                         "manual",
+                        matched_track=selected,
+                        plex_id=selected.get("plex_id"),
                     )
 
                     print(
