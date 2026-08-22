@@ -27,7 +27,7 @@ from fuzzywuzzy import fuzz # type: ignore
 from fuzzywuzzy import process # type: ignore
 
 APP_NAME = "Playlist Bridge"
-VERSION = "1.21-dev"
+VERSION = "1.21"
 
 # Color codes for terminal output
 class Colors:
