@@ -27,7 +27,7 @@ from fuzzywuzzy import fuzz # type: ignore
 from fuzzywuzzy import process # type: ignore
 
 APP_NAME = "Playlist Bridge"
-VERSION = "1.21"
+VERSION = "1.22"
 
 # Color codes for terminal output
 class Colors:
@@ -4076,12 +4076,57 @@ class Syncer:
                     cached_valid = True
 
                     if record_provenance:
-                        self._remember_match_snapshot(
-                            mapping_key,
-                            search_key,
-                            matched_track,
-                            cached_id,
+                        cached_provenance = (
+                            self._get_match_provenance(
+                                mapping_key,
+                                search_key,
+                            )
                         )
+
+                        # Legacy mappings predate provenance tracking. Only
+                        # for those mappings, independently run the current
+                        # automatic matcher without allowing the saved
+                        # mapping to short-circuit it. If today's matcher
+                        # independently chooses the exact same Plex track,
+                        # it is safe to promote the mapping to automatic.
+                        #
+                        # Manual and already-automatic mappings never enter
+                        # this validation path.
+                        if cached_provenance == "legacy":
+                            current_auto_id = (
+                                Matcher.match_track(
+                                    track,
+                                    plex_library,
+                                    {},
+                                )
+                            )
+
+                            if (
+                                current_auto_id is not None
+                                and str(current_auto_id)
+                                == cached_id
+                            ):
+                                self._set_match_provenance(
+                                    mapping_key,
+                                    search_key,
+                                    "automatic",
+                                    matched_track=matched_track,
+                                    plex_id=cached_id,
+                                )
+                            else:
+                                self._remember_match_snapshot(
+                                    mapping_key,
+                                    search_key,
+                                    matched_track,
+                                    cached_id,
+                                )
+                        else:
+                            self._remember_match_snapshot(
+                                mapping_key,
+                                search_key,
+                                matched_track,
+                                cached_id,
+                            )
                 else:
                     stale_cached_mapping = True
 
