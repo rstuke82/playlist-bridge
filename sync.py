@@ -10,6 +10,7 @@ successfully matched to a Plex library track.
 
 import argparse
 import json
+import importlib.metadata as importlib_metadata
 from io import BytesIO
 import re
 import shutil
@@ -22,6 +23,407 @@ from typing import Optional, Dict, List, Tuple
 from urllib.parse import urlparse, unquote
 from html import unescape
 
+
+REQUIREMENTS_FILE = (
+    Path(__file__).resolve().with_name(
+        "requirements.txt"
+    )
+)
+
+
+def _requirement_version_tuple(
+    value: str,
+) -> Tuple[int, ...]:
+    """
+    Convert a normal package version to a comparable numeric tuple.
+
+    Playlist Bridge's requirements currently use simple >= minimum versions,
+    so a lightweight stdlib-only comparison is sufficient during bootstrap.
+    """
+    numbers = re.findall(
+        r"\d+",
+        str(value or ""),
+    )
+
+    if not numbers:
+        return ()
+
+    return tuple(
+        int(number)
+        for number in numbers[:6]
+    )
+
+
+def _version_meets_minimum(
+    installed: str,
+    minimum: str,
+) -> bool:
+    """Return whether an installed version satisfies a >= minimum."""
+    installed_parts = list(
+        _requirement_version_tuple(
+            installed
+        )
+    )
+    minimum_parts = list(
+        _requirement_version_tuple(
+            minimum
+        )
+    )
+
+    if (
+        not installed_parts
+        or not minimum_parts
+    ):
+        return True
+
+    width = max(
+        len(installed_parts),
+        len(minimum_parts),
+    )
+
+    installed_parts.extend(
+        [0]
+        * (
+            width
+            - len(installed_parts)
+        )
+    )
+    minimum_parts.extend(
+        [0]
+        * (
+            width
+            - len(minimum_parts)
+        )
+    )
+
+    return tuple(
+        installed_parts
+    ) >= tuple(
+        minimum_parts
+    )
+
+
+def _parse_requirements_file(
+    requirements_path: Path,
+) -> List[dict]:
+    """Parse Playlist Bridge requirements.txt entries."""
+    requirements = []
+
+    for raw_line in requirements_path.read_text(
+        encoding="utf-8"
+    ).splitlines():
+        line = raw_line.split(
+            "#",
+            1,
+        )[0].strip()
+
+        if not line:
+            continue
+
+        if line.startswith("-"):
+            continue
+
+        line = line.split(
+            ";",
+            1,
+        )[0].strip()
+
+        match = re.fullmatch(
+            r"([A-Za-z0-9_.-]+)"
+            r"(?:\[[^\]]+\])?"
+            r"\s*"
+            r"(?:(>=|==|<=|>|<|~=)\s*([^\s]+))?",
+            line,
+        )
+
+        if not match:
+            requirements.append(
+                {
+                    "name": line,
+                    "operator": "",
+                    "version": "",
+                    "parse_error": True,
+                }
+            )
+            continue
+
+        requirements.append(
+            {
+                "name": match.group(1),
+                "operator": (
+                    match.group(2)
+                    or ""
+                ),
+                "version": (
+                    match.group(3)
+                    or ""
+                ),
+                "parse_error": False,
+            }
+        )
+
+    return requirements
+
+
+def _check_requirements(
+    requirements_path: Path = None,
+    version_lookup=None,
+) -> dict:
+    """
+    Check requirements.txt before importing third-party packages.
+
+    This uses importlib.metadata from the Python standard library, allowing
+    Playlist Bridge to report all missing/outdated dependencies at once.
+    """
+    path = (
+        Path(requirements_path)
+        if requirements_path is not None
+        else REQUIREMENTS_FILE
+    )
+
+    if version_lookup is None:
+        version_lookup = (
+            importlib_metadata.version
+        )
+
+    result = {
+        "ok": False,
+        "requirements_file": str(
+            path
+        ),
+        "file_missing": False,
+        "missing": [],
+        "outdated": [],
+        "unparsed": [],
+        "checked": [],
+    }
+
+    if not path.is_file():
+        result[
+            "file_missing"
+        ] = True
+        return result
+
+    try:
+        requirements = (
+            _parse_requirements_file(
+                path
+            )
+        )
+    except (
+        OSError,
+        UnicodeError,
+    ):
+        result[
+            "file_missing"
+        ] = True
+        return result
+
+    for requirement in requirements:
+        if requirement[
+            "parse_error"
+        ]:
+            result[
+                "unparsed"
+            ].append(
+                requirement["name"]
+            )
+            continue
+
+        name = requirement[
+            "name"
+        ]
+
+        try:
+            installed = str(
+                version_lookup(
+                    name
+                )
+            )
+        except (
+            importlib_metadata.PackageNotFoundError,
+            KeyError,
+        ):
+            result[
+                "missing"
+            ].append(
+                {
+                    "name": name,
+                    "required": (
+                        f"{requirement['operator']}"
+                        f"{requirement['version']}"
+                    ),
+                }
+            )
+            continue
+        except Exception:
+            result[
+                "missing"
+            ].append(
+                {
+                    "name": name,
+                    "required": (
+                        f"{requirement['operator']}"
+                        f"{requirement['version']}"
+                    ),
+                }
+            )
+            continue
+
+        result[
+            "checked"
+        ].append(
+            {
+                "name": name,
+                "installed": installed,
+                "required": (
+                    f"{requirement['operator']}"
+                    f"{requirement['version']}"
+                ),
+            }
+        )
+
+        operator = requirement[
+            "operator"
+        ]
+        required_version = requirement[
+            "version"
+        ]
+
+        if (
+            operator == ">="
+            and required_version
+            and not _version_meets_minimum(
+                installed,
+                required_version,
+            )
+        ):
+            result[
+                "outdated"
+            ].append(
+                {
+                    "name": name,
+                    "installed": installed,
+                    "required": (
+                        f">={required_version}"
+                    ),
+                }
+            )
+
+    result["ok"] = not (
+        result[
+            "file_missing"
+        ]
+        or result[
+            "missing"
+        ]
+        or result[
+            "outdated"
+        ]
+        or result[
+            "unparsed"
+        ]
+    )
+
+    return result
+
+
+def _ensure_requirements():
+    """Stop startup with install instructions when requirements fail."""
+    result = (
+        _check_requirements()
+    )
+
+    if result["ok"]:
+        return
+
+    print(
+        "\n✗ Playlist Bridge cannot start because "
+        "its Python requirements are not satisfied."
+    )
+
+    if result[
+        "file_missing"
+    ]:
+        print(
+            f"\n  requirements.txt was not found at:\n"
+            f"  {result['requirements_file']}"
+        )
+        print(
+            "\n  Restore requirements.txt next to sync.py "
+            "and try again."
+        )
+        raise SystemExit(
+            1
+        )
+
+    if result[
+        "missing"
+    ]:
+        print(
+            "\nMissing packages:"
+        )
+
+        for item in result[
+            "missing"
+        ]:
+            print(
+                f"  - "
+                f"{item['name']}"
+                f"{item['required']}"
+            )
+
+    if result[
+        "outdated"
+    ]:
+        print(
+            "\nPackages that need to be upgraded:"
+        )
+
+        for item in result[
+            "outdated"
+        ]:
+            print(
+                f"  - "
+                f"{item['name']} "
+                f"{item['installed']} "
+                f"(requires "
+                f"{item['required']})"
+            )
+
+    if result[
+        "unparsed"
+    ]:
+        print(
+            "\nRequirements that could not be checked:"
+        )
+
+        for item in result[
+            "unparsed"
+        ]:
+            print(
+                f"  - {item}"
+            )
+
+    print(
+        "\nInstall/update dependencies with:\n"
+    )
+    print(
+        f'  "{sys.executable}" -m pip install '
+        f'-r "{REQUIREMENTS_FILE}"'
+    )
+    print()
+
+    raise SystemExit(
+        1
+    )
+
+
+# Run dependency validation before importing requests/BeautifulSoup/
+# FuzzyWuzzy/Pillow below.
+_ensure_requirements()
+
+
 import requests
 from bs4 import BeautifulSoup # type: ignore
 from fuzzywuzzy import fuzz # type: ignore
@@ -33,7 +435,7 @@ except ImportError:
     Image = None
 
 APP_NAME = "Playlist Bridge"
-VERSION = "1.3.5"
+VERSION = "1.3.6"
 
 # Color codes for terminal output
 class Colors:
@@ -8240,73 +8642,186 @@ class Syncer:
         """
         Resolve missing tracks for a specific playlist.
 
-        Always show the top five Plex candidates with scores, even when all
-        candidates are below PROMPT_THRESHOLD. Automatic matching remains
-        conservative; this is only for human review.
+        The overview supports two workflows:
+        - choose a track number to review only that one unresolved item;
+        - choose [t] to start the existing sequential triage flow.
+
+        Single-track review returns to this list afterward and leaves every
+        other unresolved track untouched.
         """
 
         mapping_key = (
             f"{playlist['source']}:{playlist['source_id']}"
         )
 
-        unmatched = list(
+        while True:
+            unmatched = list(
+                self.config.missing.get(
+                    mapping_key,
+                    [],
+                )
+            )
+
+            if not unmatched:
+                print(
+                    "✓ No unmatched tracks"
+                )
+                return
+
+            print(
+                f"\nMissing tracks for "
+                f"'{playlist['plex_playlist_name']}' "
+                f"({len(unmatched)} total):\n"
+            )
+
+            for i, track in enumerate(
+                unmatched,
+                1,
+            ):
+                lost_prefix = ""
+
+                if track.get(
+                    "status"
+                ) == "lost":
+                    lost_prefix = (
+                        f"{colored('LOST', Colors.RED)} "
+                    )
+
+                print(
+                    f"[{i}] "
+                    f"{lost_prefix}"
+                    f"{colored(track['title'], Colors.CYAN)} - "
+                    f"{colored(track['artist'], Colors.GREEN)} "
+                    f"{source_album_display(track)}"
+                )
+
+                if track.get(
+                    "status"
+                ) == "lost":
+                    self._print_previous_lost_match(
+                        track,
+                        indent="    ",
+                    )
+
+            print(
+                "\n[number] Review one track"
+            )
+            print("[t] Start triage")
+            print("[b] Back")
+            print("[x] Exit")
+
+            triage_choice = input(
+                "\nSelect: "
+            ).strip().lower()
+
+            if triage_choice in (
+                "",
+                "b",
+            ):
+                return
+
+            if triage_choice == "x":
+                sys.exit(0)
+
+            if triage_choice == "t":
+                self._triage_playlist_missing(
+                    playlist,
+                )
+                return
+
+            try:
+                selected_index = (
+                    int(
+                        triage_choice
+                    )
+                    - 1
+                )
+            except ValueError:
+                print(
+                    "✗ Invalid choice"
+                )
+                continue
+
+            if not (
+                0
+                <= selected_index
+                < len(unmatched)
+            ):
+                print(
+                    "✗ Invalid choice"
+                )
+                continue
+
+            self._triage_playlist_missing(
+                playlist,
+                selected_index=selected_index,
+            )
+
+    def _triage_playlist_missing(
+        self,
+        playlist: dict,
+        selected_index: int = None,
+    ):
+        """
+        Run Option 5 matching for either the full unresolved list or one item.
+
+        selected_index=None keeps the existing sequential triage behavior.
+        A numeric selected_index reviews only that item and returns to the
+        missing-track overview when finished.
+        """
+
+        mapping_key = (
+            f"{playlist['source']}:{playlist['source_id']}"
+        )
+
+        all_unmatched = list(
             self.config.missing.get(
                 mapping_key,
                 [],
             )
         )
 
-        if not unmatched:
-            print("✓ No unmatched tracks")
+        if not all_unmatched:
+            print(
+                "✓ No unmatched tracks"
+            )
             return
 
-        # Show the complete list before doing any Plex scan or source refresh.
-        # This lets the user review what is missing and back out immediately.
-        print(
-            f"\nMissing tracks for "
-            f"'{playlist['plex_playlist_name']}' "
-            f"({len(unmatched)} total):\n"
+        single_track_mode = (
+            selected_index is not None
         )
 
-        for i, track in enumerate(unmatched, 1):
-            lost_prefix = ""
-
-            if track.get("status") == "lost":
-                lost_prefix = (
-                    f"{colored('LOST', Colors.RED)} "
+        if single_track_mode:
+            if not (
+                0
+                <= selected_index
+                < len(all_unmatched)
+            ):
+                print(
+                    "✗ Invalid track selection"
                 )
+                return
 
-            print(
-                f"[{i}] "
-                f"{lost_prefix}"
-                f"{colored(track['title'], Colors.CYAN)} - "
-                f"{colored(track['artist'], Colors.GREEN)} "
-                f"{source_album_display(track)}"
+            untouched_before = (
+                all_unmatched[
+                    :selected_index
+                ]
             )
-
-            if track.get("status") == "lost":
-                self._print_previous_lost_match(
-                    track,
-                    indent="    ",
-                )
-
-        print("\n[t] Start triage")
-        print("[b] Back")
-        print("[x] Exit")
-
-        triage_choice = input(
-            "\nSelect: "
-        ).strip().lower()
-
-        if triage_choice in ("", "b"):
-            return
-
-        if triage_choice == "x":
-            sys.exit(0)
-
-        if triage_choice != "t":
-            print("✗ Invalid choice")
-            return
+            untouched_after = (
+                all_unmatched[
+                    selected_index + 1:
+                ]
+            )
+            unmatched = [
+                all_unmatched[
+                    selected_index
+                ]
+            ]
+        else:
+            selected_index = None
+            untouched_before = []
+            untouched_after = []
+            unmatched = all_unmatched
 
         # Count this as a match-fixing attempt only after the user explicitly
         # starts triage. Simply viewing the missing-track list does not update
@@ -8395,12 +8910,21 @@ class Syncer:
                 f"Option 5: {e}"
             )
 
-        print(
-            f"\nResolving {len(unmatched)} "
-            "unmatched tracks:\n"
-        )
+        if single_track_mode:
+            print(
+                "\nReviewing selected unmatched track:\n"
+            )
+        else:
+            print(
+                f"\nResolving {len(unmatched)} "
+                "unmatched tracks:\n"
+            )
 
-        still_unmatched = []
+        # In single-track mode, preserve all untouched unresolved tracks in
+        # their original positions. Only the chosen track is reviewed.
+        still_unmatched = list(
+            untouched_before
+        )
         track_index = 0
 
         while track_index < len(unmatched):
@@ -8451,8 +8975,19 @@ class Syncer:
                     f"{colored('LOST', Colors.RED)} "
                 )
 
+            display_position = (
+                selected_index + 1
+                if single_track_mode
+                else track_index + 1
+            )
+            display_total = (
+                len(all_unmatched)
+                if single_track_mode
+                else len(unmatched)
+            )
+
             print(
-                f"\n[{track_index + 1}/{len(unmatched)}] "
+                f"\n[{display_position}/{display_total}] "
                 f"{lost_prefix}"
                 f"{colored(track['title'], Colors.CYAN)} - "
                 f"{colored(track['artist'], Colors.GREEN)} "
@@ -8550,14 +9085,32 @@ class Syncer:
             print("  [s] Skip")
             print("  [m] Manual search")
             print("  [i] Ignore permanently")
-            print("  [f] Finish triage & sync now")
+
+            if single_track_mode:
+                print("  [b] Back to missing-track list")
+            else:
+                print("  [f] Finish triage & sync now")
+
             print("  [x] Exit")
 
             choice = input(
                 "  Select: "
             ).strip().lower()
 
-            if choice == "f":
+            if (
+                single_track_mode
+                and choice in ("", "b")
+            ):
+                still_unmatched.append(
+                    track
+                )
+                track_index += 1
+                continue
+
+            if (
+                choice == "f"
+                and not single_track_mode
+            ):
                 # End this triage session without losing our place.
                 # Keep the current track plus everything not yet reviewed.
                 still_unmatched.extend(
@@ -8607,6 +9160,12 @@ class Syncer:
                 still_unmatched.extend(
                     unmatched[track_index:]
                 )
+
+                if single_track_mode:
+                    still_unmatched.extend(
+                        untouched_after
+                    )
+
                 self.config.mapping[mapping_key] = (
                     playlist_mapping
                 )
@@ -8913,6 +9472,11 @@ class Syncer:
 
             track_index += 1
 
+        if single_track_mode:
+            still_unmatched.extend(
+                untouched_after
+            )
+
         self.config.mapping[mapping_key] = (
             playlist_mapping
         )
@@ -8941,6 +9505,13 @@ class Syncer:
                 "✓ All previously unmatched tracks "
                 "have been resolved"
             )
+
+        if single_track_mode:
+            print(
+                "✓ Single-track review complete. "
+                "Returning to the missing-track list."
+            )
+            return
 
         # Offer to immediately rebuild the Plex playlist using the mappings
         # that were just saved in Option 5.
