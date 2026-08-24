@@ -1,6 +1,6 @@
 # Playlist Bridge
 
-**Version 1.2**
+**Version 1.3**
 
 Playlist Bridge syncs public **Spotify** and **Apple Music** playlists to your local music library through Plex.
 
@@ -40,164 +40,105 @@ It matches source tracks against your Plex library, preserves manual match decis
 - Automatic cleanup of common text-encoding glitches
 - Predictable one-level Back behavior throughout submenus
 
-## What's New in 1.2
+## What's New in 1.3
 
-Version 1.2 expands matching safety, synchronization visibility, state management, and interactive workflow.
+Version 1.3 adds two workflow controls: permanent per-playlist track ignores and per-playlist automatic-sync participation.
 
-### Sync change tracking
+### Permanently ignore a source track
 
-Playlist Bridge now remembers the previous source playlist contents and can distinguish:
-
-```text
-ADDED
-REMOVED
-```
-
-from matching-state changes:
+While resolving missing tracks in Option 5 or fixing an existing match in Option 6, you can now choose:
 
 ```text
-NEW
-LOST
+[i] Ignore permanently
 ```
 
-These labels describe different things:
+An ignored track is scoped to that source playlist. Playlist Bridge:
 
-- `ADDED` — the track is new in the source playlist since the previous snapshot.
-- `REMOVED` — the track was present in the previous source snapshot but is no longer present.
-- `NEW` — the source track did not previously have a saved mapping and was matched during this sync.
-- `LOST` — a previously saved Plex target is no longer safely usable.
+- stops trying to match it automatically
+- removes any existing saved mapping/provenance
+- stops listing it as unresolved
+- excludes it from the destination Plex playlist on future syncs
+- remembers the ignore until you explicitly restore it
 
-At the end of a normal sync, Playlist Bridge prints:
+Ignored tracks are stored in:
 
 ```text
-=== SYNC SUMMARY ===
-Source tracks:
-Matched:
-New matches:
-Lost matches:
-Source ADDED:
-Source REMOVED:
-Unresolved:
+ignored_tracks.json
 ```
 
-Existing installations establish a source-content baseline on their first tracked 1.2 sync rather than incorrectly reporting every existing source track as newly added.
-
-### Safer match provenance
-
-Saved mappings can now be identified as:
+Manage them from:
 
 ```text
-automatic
-manual
-legacy
+[9] Settings
+[4] Manage ignored tracks
 ```
 
-`legacy` means the mapping existed before provenance tracking was introduced. Playlist Bridge does not guess whether an older mapping was automatic or manual.
+You can restore individual ignored tracks or restore all ignored tracks for a playlist.
 
-Manual and legacy mappings are protected from **Clear automatic matches**.
+### One-time / manual-only playlists
 
-If a saved manual or legacy Plex ID becomes stale, Playlist Bridge does not silently replace it with a new automatic guess. It is surfaced for review instead.
-
-### Improved recording/version matching
-
-Explicit source recording intent is now handled more carefully.
-
-Examples of distinct recording intent include:
+Each registered playlist can now have:
 
 ```text
-Song (Demo)
-Song (Acoustic)
-Song (iTunes Session)
-Song (Apple Music Session)
-Song (Spotify Sessions)
-Song (Named Remix)
-Song (Somebody Mix)
-Song (Live ...)
+Auto sync: ON
 ```
 
-A source that explicitly requests one of those versions will not automatically collapse to a plain studio recording that lacks the requested intent.
-
-Generic album-era provenance is treated differently. For example:
+or:
 
 ```text
-Time is Precious (Evolver Sessions)
+Auto sync: OFF
 ```
 
-can correctly match:
+A playlist with Auto sync OFF remains fully registered. Its mappings, ignored tracks, source snapshots, match history, and Plex playlist are retained.
+
+The difference is only automatic participation:
 
 ```text
-Time Is Precious (Evolver sessions – 2003)
+python sync.py --sync-all
 ```
 
-without treating `Evolver Sessions` as the same kind of distinct performance marker as `iTunes Session`.
+skips Auto sync OFF playlists, which also means normal cron jobs using `--sync-all` skip them.
 
-Featured-artist credits remain flexible metadata. A source such as:
+Manual actions remain available:
+
+- interactive **Sync all playlists** still syncs every registered playlist
+- **Sync specific playlist** can sync an Auto sync OFF playlist at any time
+
+New playlists ask after the initial import whether they should participate in automatic `--sync-all` / cron runs. Choosing no gives you the one-time/manual-only behavior while still keeping the playlist registered.
+
+Manage this later from:
 
 ```text
-Good Vibes (feat. Lutan Fyah) - Rebelution
+[9] Settings
+[5] Manage auto-sync
 ```
 
-can match a destination such as:
+Existing pre-1.3 playlists default to Auto sync ON.
+
+### State schema 2
+
+Version 1.3 uses state schema 2.
+
+Schema 2 adds `ignored_tracks.json` and the optional per-playlist `auto_sync` flag. Existing schema-0 and schema-1 data migrates without changing its payload semantics.
+
+Before rewriting older state, Playlist Bridge creates one-time backups such as:
 
 ```text
-Good Vibes - Rebelution feat. Lutan Fyah
+config.json.pre-schema-2.bak
+mapping.json.pre-schema-2.bak
 ```
 
-without incorrectly preferring an acoustic copy simply because the album name is similar.
+Dry run remains read-only and does not perform schema migration.
 
-### Better playlist selection and navigation
+### Also included from the 1.22 line
 
-Option 3 supports multiple selections:
+The current 1.3 code also includes the 1.22 improvements:
 
-```text
-1,3,5
-```
-
-and ranges:
-
-```text
-1-3
-```
-
-Playlists shown with a **Last sync** timestamp are ordered with:
-
-```text
-Never
-oldest
-...
-newest
-```
-
-Option 5 is similarly ordered by **Last match attempt**, with `Never` first.
-
-Where `[b] Back` is shown, both `b` and an empty Enter return exactly one menu level.
-
-### State-file schema versioning
-
-Playlist Bridge now versions its persistent JSON structure independently from the application version.
-
-Current state files use schema 1:
-
-```json
-{
-  "_schema_version": 1,
-  "data": {
-    "...": "..."
-  }
-}
-```
-
-Existing unversioned Playlist Bridge state is treated as legacy schema 0 and loads normally.
-
-On the next normal save, legacy files are migrated to schema 1. Before an existing file is rewritten, Playlist Bridge makes a one-time byte-for-byte backup such as:
-
-```text
-mapping.json.pre-schema-1.bak
-```
-
-A dry run does not perform the migration or write any state.
-
-If an older Playlist Bridge build encounters a newer unsupported schema, it stops instead of risking corruption of the newer state.
+- LOST tracks retain and display the previous Plex match details when available
+- LOST status remains visible during manual review
+- legacy mappings are revalidated only when they are legacy; if the current automatic matcher independently chooses the exact same Plex track, the mapping is promoted to `automatic`
+- manual and already-automatic mappings are not subjected to that legacy validation
+- Developer tools includes a read-only report showing Plex albums with zero tracks on any Plex audio playlist
 
 ## Requirements
 
@@ -271,7 +212,7 @@ opens:
 
 ```text
 ==================================================
-Playlist Bridge v1.2 - Spotify/Apple Music to Plex
+Playlist Bridge v1.3 - Spotify/Apple Music to Plex
 ==================================================
 [1] Add new Spotify/Apple Music playlist
 [2] Sync all playlists
@@ -485,10 +426,38 @@ Controls include:
 - numbered choice — select a displayed Plex candidate
 - `s` — leave the track unresolved
 - `m` — manually search Plex by title, artist, or album
+- `i` — permanently ignore this source track for this playlist
 - `f` — save triage progress and sync the playlist now
 - `x` — save progress and exit
 
 A match explicitly selected during triage is stored as a **manual** mapping.
+
+## Permanently Ignoring Tracks
+
+Playlist Bridge can permanently ignore a source track for one playlist.
+
+In Option 5 and Option 6, choose:
+
+```text
+[i] Ignore permanently
+```
+
+An ignored track:
+
+- is not automatically matched
+- does not appear as unresolved
+- is not added to the Plex destination playlist
+- remains ignored across future syncs
+- does not affect the same song in other source playlists
+
+Manage ignored tracks from:
+
+```text
+[9] Settings
+[4] Manage ignored tracks
+```
+
+Restoring an ignored track makes it eligible for normal matching on the next sync.
 
 ## Editing Existing Matches
 
@@ -518,6 +487,7 @@ Controls include:
 - numbered choice — choose or confirm a Plex match
 - `s` — leave the current match unchanged
 - `d` — unlink the saved mapping
+- `i` — permanently ignore this source track for this playlist
 - `b` or Enter — go back one level
 - `x` — exit
 
@@ -681,6 +651,7 @@ The list includes:
 - Source service
 - Source URL
 - Last sync time
+- Auto sync ON/OFF
 
 ## Sync History
 
@@ -718,6 +689,8 @@ The Settings menu includes:
 [1] Configure Plex
 [2] Clear all matching for a playlist
 [3] Clear automatic matches
+[4] Manage ignored tracks
+[5] Manage auto-sync
 [b] Back
 [x] Exit
 ```
@@ -747,15 +720,39 @@ It preserves:
 
 The cleared tracks are matched again on the next sync.
 
+### Manage ignored tracks
+
+Use **Manage ignored tracks** to review permanent per-playlist ignores.
+
+You can restore one ignored track at a time or restore all ignored tracks for a playlist.
+
+### Manage auto-sync
+
+Use **Manage auto-sync** to toggle whether a registered playlist participates in automated `--sync-all` runs.
+
+```text
+Auto sync: ON
+```
+
+means the playlist participates in cron / `--sync-all`.
+
+```text
+Auto sync: OFF
+```
+
+means it remains registered but automated `--sync-all` skips it.
+
+Manual interactive synchronization is still allowed.
+
 ## Automated Sync
 
-Sync every registered playlist non-interactively:
+Sync every registered playlist whose Auto sync setting is ON:
 
 ```bash
 python sync.py --sync-all
 ```
 
-This uses saved mappings, refreshes source contents, updates Plex playlists, records unresolved tracks, updates change-tracking state, and updates last-sync timestamps.
+This uses saved mappings, refreshes source contents, updates Plex playlists, records unresolved tracks, updates change-tracking state, and updates last-sync timestamps. Playlists with Auto sync OFF are skipped.
 
 If Plex is not already configured, `--sync-all` exits rather than opening interactive setup.
 
@@ -776,7 +773,7 @@ Dry run:
 - does not clear or rebuild Plex playlists
 - does not update Plex metadata/artwork
 - does not update timestamps
-- does not write any JSON state
+- does not write any JSON state, including ignored-track state
 - does not perform legacy schema migration
 
 `--dry-run` must be used together with `--sync-all`.
@@ -817,6 +814,7 @@ mapping.json
 missing_tracks.json
 match_metadata.json
 source_snapshots.json
+ignored_tracks.json
 ```
 
 Purpose:
@@ -826,55 +824,54 @@ Purpose:
 - `missing_tracks.json` — unresolved source tracks
 - `match_metadata.json` — automatic/manual provenance for mappings
 - `source_snapshots.json` — previous source playlist contents for `ADDED` / `REMOVED` comparison
+- `ignored_tracks.json` — per-playlist source tracks that should never be matched or added unless restored
 
 ### JSON schema
 
-Schema 1 uses:
+Schema 2 uses:
 
 ```json
 {
-  "_schema_version": 1,
+  "_schema_version": 2,
   "data": {
     "...": "..."
   }
 }
 ```
 
-Older unwrapped Playlist Bridge JSON loads as schema 0.
+Older unwrapped Playlist Bridge JSON loads as schema 0. Versioned schema-1 state also upgrades automatically.
 
-The first normal save under 1.2 migrates those existing files and creates one-time backups such as:
-
-```text
-config.json.pre-schema-1.bak
-mapping.json.pre-schema-1.bak
-missing_tracks.json.pre-schema-1.bak
-```
-
-New state files that did not previously exist do not need a migration backup.
-
-If the file declares a schema newer than this Playlist Bridge build understands, the application stops rather than overwriting it.
-
-## Upgrading from 1.1
-
-You can replace the old `sync.py` with 1.2 and keep your existing:
+The first normal save under 1.3 migrates older state and creates one-time backups such as:
 
 ```text
-config.json
-mapping.json
-missing_tracks.json
+config.json.pre-schema-2.bak
+mapping.json.pre-schema-2.bak
+missing_tracks.json.pre-schema-2.bak
 ```
+
+The new `ignored_tracks.json` file is created as needed and does not require a migration backup when it did not previously exist.
+
+If a file declares a schema newer than this Playlist Bridge build understands, the application stops rather than overwriting it.
+
+## Upgrading
+
+You can replace the old `sync.py` with 1.3 and keep your existing state files.
 
 No reset is required.
 
-Existing saved mappings load normally and are classified as `legacy` until you explicitly confirm/change them or new automatic mappings are created.
+Existing playlists that do not yet have an `auto_sync` field default to Auto sync ON.
 
-If you want to verify the upgrade without writing anything first:
+Existing saved mappings continue to load normally. Legacy provenance behavior remains conservative, with one exception: during a normal sync, a valid legacy mapping is independently checked by the current matcher. If the matcher chooses the exact same Plex track, that mapping can be promoted to `automatic`. If it chooses something else or cannot confidently match, the saved mapping remains unchanged and stays `legacy`.
+
+If you want to verify source fetching and matching before writing state:
 
 ```bash
 python sync.py --sync-all --dry-run
 ```
 
-Then run a normal sync when ready. The first normal state save performs the schema-1 migration and creates the one-time backups.
+Dry run does not modify Plex or write/migrate JSON state.
+
+The first normal state save performs any required schema-2 migration and creates one-time backups.
 
 ## Public Playlist Requirement
 
@@ -975,6 +972,32 @@ python sync.py
 ```
 
 configure Plex interactively, then run `--sync-all` again.
+
+### An ignored track is missing from Plex
+
+That is expected. Permanently ignored tracks are deliberately excluded from the destination playlist.
+
+Restore it from:
+
+```text
+[9] Settings
+[4] Manage ignored tracks
+```
+
+Then sync the playlist again.
+
+### A playlist is not running from cron
+
+Check its Auto sync setting:
+
+```text
+[9] Settings
+[5] Manage auto-sync
+```
+
+Auto sync OFF playlists are intentionally skipped by `python sync.py --sync-all`.
+
+They can still be synchronized manually from the interactive menu.
 
 ## Security
 

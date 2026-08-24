@@ -27,7 +27,7 @@ from fuzzywuzzy import fuzz # type: ignore
 from fuzzywuzzy import process # type: ignore
 
 APP_NAME = "Playlist Bridge"
-VERSION = "1.22"
+VERSION = "1.3"
 
 # Color codes for terminal output
 class Colors:
@@ -253,12 +253,13 @@ MAPPING_FILE = CONFIG_DIR / "mapping.json"
 MISSING_FILE = CONFIG_DIR / "missing_tracks.json"
 MATCH_METADATA_FILE = CONFIG_DIR / "match_metadata.json"
 SOURCE_SNAPSHOTS_FILE = CONFIG_DIR / "source_snapshots.json"
+IGNORED_TRACKS_FILE = CONFIG_DIR / "ignored_tracks.json"
 
 # Persistent JSON schema version.
 #
 # This is intentionally independent from Playlist Bridge's app VERSION.
 # Increment only when the on-disk JSON structure changes.
-STATE_SCHEMA_VERSION = 1
+STATE_SCHEMA_VERSION = 2
 
 # Requested square Apple Music playlist artwork size for Plex.
 APPLE_ARTWORK_SIZE = 3000
@@ -273,6 +274,7 @@ class Config:
         "missing": MISSING_FILE,
         "match_metadata": MATCH_METADATA_FILE,
         "source_snapshots": SOURCE_SNAPSHOTS_FILE,
+        "ignored_tracks": IGNORED_TRACKS_FILE,
     }
 
     def __init__(self):
@@ -290,6 +292,10 @@ class Config:
         )
         self.source_snapshots = self._load_state_dict(
             "source_snapshots",
+            {},
+        )
+        self.ignored_tracks = self._load_state_dict(
+            "ignored_tracks",
             {},
         )
 
@@ -341,6 +347,13 @@ class Config:
         while version < STATE_SCHEMA_VERSION:
             if version == 0:
                 version = 1
+                continue
+
+            if version == 1:
+                # Schema 2 adds ignored_tracks.json and the optional
+                # per-playlist auto_sync flag. Existing payloads need no
+                # transformation; absent values use compatible defaults.
+                version = 2
                 continue
 
             raise RuntimeError(
@@ -525,6 +538,7 @@ class Config:
             "missing": self.missing,
             "match_metadata": self.match_metadata,
             "source_snapshots": self.source_snapshots,
+            "ignored_tracks": self.ignored_tracks,
         }
 
         for name, data in state.items():
@@ -607,6 +621,7 @@ class Config:
             "plex_playlist_name": plex_playlist_name,
             "last_synced": None,
             "last_match_attempt": None,
+            "auto_sync": True,
         }
 
         self.config["playlists"].append(playlist_entry)
@@ -3549,6 +3564,205 @@ class Syncer:
         self.config = config
         self.plex = None
 
+    @staticmethod
+    def _auto_sync_enabled(
+        playlist: dict,
+    ) -> bool:
+        """Missing auto_sync means ON for pre-1.3 playlists."""
+        return playlist.get(
+            "auto_sync",
+            True,
+        ) is not False
+
+    @staticmethod
+    def _ignored_track_keys(
+        track: dict,
+    ) -> List[str]:
+        """
+        Return stable permanent-ignore identities.
+
+        Prefer source track ID, with normalized title+artist as a fallback.
+        """
+        keys = []
+
+        source_id = str(
+            track.get("source_id", "")
+            or ""
+        ).strip()
+
+        if source_id:
+            keys.append(
+                f"id:{source_id}"
+            )
+
+        title = Matcher._normalize_match_text(
+            track.get("title", "")
+        )
+        artist = Matcher._normalize_match_text(
+            track.get("artist", "")
+        )
+
+        if title or artist:
+            keys.append(
+                f"meta:{title}|{artist}"
+            )
+
+        return keys
+
+    def _get_ignored_bucket(
+        self,
+        mapping_key: str,
+        create: bool = True,
+    ) -> dict:
+        """Return permanent-ignore records for one source playlist."""
+        if create:
+            return self.config.ignored_tracks.setdefault(
+                mapping_key,
+                {},
+            )
+
+        value = self.config.ignored_tracks.get(
+            mapping_key,
+            {},
+        )
+        return value if isinstance(value, dict) else {}
+
+    def _find_ignored_track_key(
+        self,
+        mapping_key: str,
+        track: dict,
+    ) -> Optional[str]:
+        """Return the stored ignore key matching a source track."""
+        bucket = self._get_ignored_bucket(
+            mapping_key,
+            create=False,
+        )
+
+        candidate_keys = self._ignored_track_keys(
+            track
+        )
+
+        for key in candidate_keys:
+            if key in bucket:
+                return key
+
+        meta_key = next(
+            (
+                key
+                for key in candidate_keys
+                if key.startswith("meta:")
+            ),
+            None,
+        )
+
+        if meta_key:
+            for stored_key, record in bucket.items():
+                if not isinstance(record, dict):
+                    continue
+
+                if meta_key in self._ignored_track_keys(
+                    record
+                ):
+                    return stored_key
+
+        return None
+
+    def _is_track_ignored(
+        self,
+        mapping_key: str,
+        track: dict,
+    ) -> bool:
+        """Return whether a source track is permanently ignored."""
+        return (
+            self._find_ignored_track_key(
+                mapping_key,
+                track,
+            )
+            is not None
+        )
+
+    def _ignore_track(
+        self,
+        mapping_key: str,
+        track: dict,
+    ):
+        """
+        Permanently ignore a source track for one playlist.
+
+        Remove any mapping/provenance so the next real sync removes the track
+        from the destination Plex playlist.
+        """
+        keys = self._ignored_track_keys(
+            track
+        )
+
+        if not keys:
+            return
+
+        bucket = self._get_ignored_bucket(
+            mapping_key,
+            create=True,
+        )
+
+        bucket[keys[0]] = {
+            "source_id": str(
+                track.get("source_id", "")
+                or ""
+            ),
+            "title": repair_text(
+                track.get("title", "")
+            ),
+            "artist": repair_text(
+                track.get("artist", "")
+            ),
+            "album": repair_text(
+                track.get("album", "")
+            ),
+            "ignored_at": datetime.now().isoformat(),
+        }
+
+        search_key = (
+            f"{track.get('title', '')}|"
+            f"{track.get('artist', '')}"
+        )
+
+        self.config.mapping.get(
+            mapping_key,
+            {},
+        ).pop(
+            search_key,
+            None,
+        )
+
+        self._remove_match_provenance(
+            mapping_key,
+            search_key,
+        )
+
+    def _restore_ignored_track(
+        self,
+        mapping_key: str,
+        ignored_key: str,
+    ) -> bool:
+        """Restore one permanently ignored source track."""
+        bucket = self._get_ignored_bucket(
+            mapping_key,
+            create=False,
+        )
+
+        if ignored_key not in bucket:
+            return False
+
+        del bucket[ignored_key]
+
+        if not bucket:
+            self.config.ignored_tracks.pop(
+                mapping_key,
+                None,
+            )
+
+        return True
+
     def _get_match_metadata_bucket(
         self,
         mapping_key: str,
@@ -4017,6 +4231,7 @@ class Syncer:
                         "new_matches": [],
                         "lost_matches": [],
                         "stale_mappings": [],
+                        "ignored_tracks": [],
                     },
                 )
 
@@ -4037,6 +4252,7 @@ class Syncer:
         new_matches = []
         lost_matches = []
         stale_mappings = []
+        ignored_matches = []
 
         for i, track in enumerate(
             source_tracks,
@@ -4049,6 +4265,49 @@ class Syncer:
             source_added = (
                 i - 1
             ) in source_added_indices
+
+            if self._is_track_ignored(
+                mapping_key,
+                track,
+            ):
+                ignored_matches.append(
+                    dict(track)
+                )
+
+                if record_provenance:
+                    playlist_mapping.pop(
+                        search_key,
+                        None,
+                    )
+                    self._remove_match_provenance(
+                        mapping_key,
+                        search_key,
+                    )
+
+                status_bits = [
+                    colored(
+                        "IGNORED",
+                        Colors.YELLOW,
+                    )
+                ]
+
+                if source_added:
+                    status_bits.append(
+                        colored(
+                            "ADDED",
+                            Colors.BLUE,
+                        )
+                    )
+
+                print(
+                    f"  [{i}/{len(source_tracks)}] "
+                    f"{colored('○', Colors.YELLOW)} "
+                    f"{' '.join(status_bits)} "
+                    f"{colored(track['title'], Colors.CYAN)} - "
+                    f"{colored(track['artist'], Colors.GREEN)} "
+                    f"{source_album_display(track)}"
+                )
+                continue
 
             matched_track = None
             plex_id = None
@@ -4401,6 +4660,7 @@ class Syncer:
                 "new_matches": new_matches,
                 "lost_matches": lost_matches,
                 "stale_mappings": stale_mappings,
+                "ignored_tracks": ignored_matches,
             },
         )
 
@@ -4659,6 +4919,19 @@ class Syncer:
             mapping_key,
             tracks,
         )
+
+        auto_choice = input(
+            "\nInclude this playlist in automatic "
+            "--sync-all/cron syncs? [Y/n] "
+            "(n = one-time/manual only): "
+        ).strip().lower()
+
+        playlist_entry["auto_sync"] = (
+            auto_choice not in (
+                "n",
+                "no",
+            )
+        )
         self.config.save()
 
         print(
@@ -4666,11 +4939,21 @@ class Syncer:
             "and configured for sync!"
         )
 
+        if not playlist_entry["auto_sync"]:
+            print(
+                "  Auto sync is OFF. The playlist stays "
+                "registered and can still be synced manually."
+            )
+
         print("\n=== SYNC SUMMARY ===")
         print(f"Source tracks:   {len(tracks)}")
         print(f"Matched:         {len(matched_tracks)}")
         print("New matches:     baseline")
         print("Lost matches:    0")
+        print(
+            f"Ignored:         "
+            f"{len(match_stats.get('ignored_tracks', []))}"
+        )
         print("Source ADDED:    baseline")
         print("Source REMOVED:  baseline")
         print(f"Unresolved:      {len(unmatched)}")
@@ -4781,6 +5064,17 @@ class Syncer:
                                 new_mapping_key
                             ] = existing_snapshot
 
+                    if old_mapping_key in self.config.ignored_tracks:
+                        existing_ignored = (
+                            self.config.ignored_tracks.pop(
+                                old_mapping_key
+                            )
+                        )
+                        self.config.ignored_tracks.setdefault(
+                            new_mapping_key,
+                            {},
+                        ).update(existing_ignored)
+
                 playlist_entry["source_id"] = playlist_id
                 changed = True
 
@@ -4875,6 +5169,10 @@ class Syncer:
             print(
                 f"Lost matches:   {len(match_stats['lost_matches'])}"
             )
+            print(
+                f"Ignored:        "
+                f"{len(match_stats.get('ignored_tracks', []))}"
+            )
 
             if source_changes["baseline"]:
                 print("Source ADDED:   baseline")
@@ -4906,8 +5204,9 @@ class Syncer:
             )
             print(
                 "  config.json, mapping.json, missing_tracks.json, "
-                "match_metadata.json, source_snapshots.json, schema state, "
-                "and last sync times were also left unchanged."
+                "match_metadata.json, source_snapshots.json, "
+                "ignored_tracks.json, schema state, and last sync times "
+                "were also left unchanged."
             )
             return
 
@@ -5009,6 +5308,10 @@ class Syncer:
         print(
             f"Lost matches:    {len(match_stats['lost_matches'])}"
         )
+        print(
+            f"Ignored:         "
+            f"{len(match_stats.get('ignored_tracks', []))}"
+        )
 
         if source_changes["baseline"]:
             print("Source ADDED:    baseline")
@@ -5028,10 +5331,21 @@ class Syncer:
     def sync_all(
         self,
         dry_run: bool = False,
+        respect_auto_sync: bool = False,
     ):
-        """Sync all registered playlists, or preview them in dry-run mode."""
+        """
+        Sync registered playlists.
 
-        if not self.config.config["playlists"]:
+        The interactive "Sync all playlists" command is an explicit manual
+        action and includes every registered playlist. Automated --sync-all
+        passes respect_auto_sync=True so cron skips Auto sync: OFF playlists.
+        """
+
+        playlists = self.config.config[
+            "playlists"
+        ]
+
+        if not playlists:
             print("✗ No playlists registered")
             return
 
@@ -5044,7 +5358,34 @@ class Syncer:
                 "but nothing will be changed or saved.\n"
             )
 
-        for playlist in self.config.config["playlists"]:
+        selected = []
+
+        for playlist in playlists:
+            if (
+                respect_auto_sync
+                and not self._auto_sync_enabled(
+                    playlist
+                )
+            ):
+                print(
+                    f"Skipping "
+                    f"'{playlist['plex_playlist_name']}' "
+                    "- auto sync disabled"
+                )
+                continue
+
+            selected.append(
+                playlist
+            )
+
+        if not selected:
+            if respect_auto_sync:
+                print(
+                    "✓ No playlists have automatic sync enabled."
+                )
+            return
+
+        for playlist in selected:
             self.sync_playlist(
                 playlist,
                 dry_run=dry_run,
@@ -6019,6 +6360,7 @@ class Syncer:
 
         print("\n[s] Skip")
         print("[d] Unlink this match")
+        print("[i] Ignore permanently")
         print("[b] Back")
         print("[x] Exit")
 
@@ -6032,6 +6374,25 @@ class Syncer:
             return False, True
         if choice == "s":
             return False, False
+
+        if choice == "i":
+            self._ignore_track(
+                mapping_key,
+                src,
+            )
+            playlist_mapping.pop(
+                current_match["search_key"],
+                None,
+            )
+            self.config.mapping[
+                mapping_key
+            ] = playlist_mapping
+            self.config.save()
+            print(
+                f"✓ Permanently ignored: "
+                f"{src['title']} - {src['artist']}"
+            )
+            return True, False
 
         if choice == "d":
             if current_match["search_key"] in playlist_mapping:
@@ -6416,6 +6777,272 @@ class Syncer:
             "Cleared tracks will be matched again on the next sync."
         )
 
+    def manage_ignored_tracks_interactive(
+        self,
+    ):
+        """Review and restore permanently ignored tracks."""
+
+        playlists = self.config.config.get(
+            "playlists",
+            [],
+        )
+
+        while True:
+            available = []
+
+            for playlist in playlists:
+                mapping_key = (
+                    f"{playlist['source']}:"
+                    f"{playlist['source_id']}"
+                )
+                bucket = self._get_ignored_bucket(
+                    mapping_key,
+                    create=False,
+                )
+
+                if bucket:
+                    available.append(
+                        (
+                            playlist,
+                            mapping_key,
+                            bucket,
+                        )
+                    )
+
+            if not available:
+                print(
+                    "\n✓ No permanently ignored tracks."
+                )
+                return
+
+            print(
+                "\nPlaylists with ignored tracks:\n"
+            )
+
+            for i, (
+                playlist,
+                _mapping_key,
+                bucket,
+            ) in enumerate(
+                available,
+                1,
+            ):
+                print(
+                    f"[{i}] "
+                    f"{playlist['plex_playlist_name']} "
+                    f"({source_display_name(playlist['source'])}) "
+                    f"- {len(bucket)} ignored"
+                )
+
+            print("[b] Back")
+            print("[x] Exit")
+
+            choice = input(
+                "\nSelect playlist: "
+            ).strip().lower()
+
+            if choice in ("", "b"):
+                return
+
+            if choice == "x":
+                sys.exit(0)
+
+            try:
+                index = int(choice) - 1
+                if not 0 <= index < len(available):
+                    raise ValueError
+            except ValueError:
+                print("✗ Invalid choice")
+                continue
+
+            playlist, mapping_key, _bucket = (
+                available[index]
+            )
+
+            while True:
+                bucket = self._get_ignored_bucket(
+                    mapping_key,
+                    create=False,
+                )
+
+                if not bucket:
+                    print(
+                        "\n✓ No ignored tracks remain for "
+                        f"'{playlist['plex_playlist_name']}'."
+                    )
+                    break
+
+                items = sorted(
+                    bucket.items(),
+                    key=lambda item: (
+                        repair_text(
+                            item[1].get("artist", "")
+                        ).casefold(),
+                        repair_text(
+                            item[1].get("title", "")
+                        ).casefold(),
+                    ),
+                )
+
+                print(
+                    f"\nIgnored tracks for "
+                    f"'{playlist['plex_playlist_name']}':\n"
+                )
+
+                for i, (
+                    _ignored_key,
+                    track,
+                ) in enumerate(
+                    items,
+                    1,
+                ):
+                    print(
+                        f"[{i}] "
+                        f"{track.get('title', '')} - "
+                        f"{track.get('artist', '')} "
+                        f"{source_album_display(track)}"
+                    )
+
+                print(
+                    "\nSelect a track number to restore it."
+                )
+                print("[a] Restore all")
+                print("[b] Back")
+                print("[x] Exit")
+
+                sub_choice = input(
+                    "\nSelect: "
+                ).strip().lower()
+
+                if sub_choice in ("", "b"):
+                    break
+
+                if sub_choice == "x":
+                    sys.exit(0)
+
+                if sub_choice == "a":
+                    confirm = input(
+                        f"Restore all {len(items)} ignored "
+                        "tracks for this playlist? (y/n): "
+                    ).strip().lower()
+
+                    if confirm in (
+                        "y",
+                        "yes",
+                    ):
+                        self.config.ignored_tracks.pop(
+                            mapping_key,
+                            None,
+                        )
+                        self.config.save()
+                        print(
+                            "✓ Restored all ignored tracks. "
+                            "They are eligible for matching "
+                            "on the next sync."
+                        )
+                    continue
+
+                try:
+                    item_index = (
+                        int(sub_choice) - 1
+                    )
+                    if not 0 <= item_index < len(items):
+                        raise ValueError
+                except ValueError:
+                    print("✗ Invalid choice")
+                    continue
+
+                ignored_key, track = items[
+                    item_index
+                ]
+
+                if self._restore_ignored_track(
+                    mapping_key,
+                    ignored_key,
+                ):
+                    self.config.save()
+                    print(
+                        f"✓ Restored: "
+                        f"{track.get('title', '')} - "
+                        f"{track.get('artist', '')}"
+                    )
+
+    def manage_auto_sync_interactive(
+        self,
+    ):
+        """Toggle cron/--sync-all participation per playlist."""
+
+        playlists = self.config.config.get(
+            "playlists",
+            [],
+        )
+
+        if not playlists:
+            print("✗ No playlists registered")
+            return
+
+        while True:
+            print(
+                "\nAutomatic sync settings:\n"
+            )
+            print(
+                "OFF playlists stay registered and can still "
+                "be synced manually.\n"
+            )
+
+            for i, playlist in enumerate(
+                playlists,
+                1,
+            ):
+                state = (
+                    "ON"
+                    if self._auto_sync_enabled(
+                        playlist
+                    )
+                    else "OFF"
+                )
+
+                print(
+                    f"[{i}] "
+                    f"{playlist['plex_playlist_name']} "
+                    f"({source_display_name(playlist['source'])}) "
+                    f"- Auto sync: {state}"
+                )
+
+            print("[b] Back")
+            print("[x] Exit")
+
+            choice = input(
+                "\nSelect playlist to toggle: "
+            ).strip().lower()
+
+            if choice in ("", "b"):
+                return
+
+            if choice == "x":
+                sys.exit(0)
+
+            try:
+                index = int(choice) - 1
+                if not 0 <= index < len(playlists):
+                    raise ValueError
+            except ValueError:
+                print("✗ Invalid choice")
+                continue
+
+            playlist = playlists[index]
+            new_state = not self._auto_sync_enabled(
+                playlist
+            )
+            playlist["auto_sync"] = new_state
+            self.config.save()
+
+            print(
+                f"✓ Auto sync "
+                f"{'enabled' if new_state else 'disabled'} "
+                f"for '{playlist['plex_playlist_name']}'."
+            )
+
     def settings_interactive(self):
         """Settings submenu with predictable one-level Back behavior."""
 
@@ -6423,6 +7050,8 @@ class Syncer:
             print("\n[1] Configure Plex")
             print("[2] Clear all matching for a playlist")
             print("[3] Clear automatic matches")
+            print("[4] Manage ignored tracks")
+            print("[5] Manage auto-sync")
             print("[b] Back")
             print("[x] Exit")
 
@@ -6447,6 +7076,14 @@ class Syncer:
 
             if choice == "3":
                 self.clear_automatic_matching_interactive()
+                continue
+
+            if choice == "4":
+                self.manage_ignored_tracks_interactive()
+                continue
+
+            if choice == "5":
+                self.manage_auto_sync_interactive()
                 continue
 
             print("✗ Invalid choice")
@@ -7128,6 +7765,7 @@ class Syncer:
 
             print("  [s] Skip")
             print("  [m] Manual search")
+            print("  [i] Ignore permanently")
             print("  [f] Finish triage & sync now")
             print("  [x] Exit")
 
@@ -7193,6 +7831,18 @@ class Syncer:
                 )
                 self.config.save()
                 sys.exit(0)
+
+            if choice == "i":
+                self._ignore_track(
+                    mapping_key,
+                    track,
+                )
+                print(
+                    f"  ✓ Permanently ignored: "
+                    f"{track['title']} - {track['artist']}"
+                )
+                track_index += 1
+                continue
 
             if choice == "m":
                 manual_choice = input(
@@ -7585,7 +8235,11 @@ def show_playlists(config: Config):
         )
         print(
             f"    Last sync: "
-            f"{format_timestamp(p.get('last_synced'))}\n"
+            f"{format_timestamp(p.get('last_synced'))}"
+        )
+        print(
+            f"    Auto sync: "
+            f"{'ON' if Syncer._auto_sync_enabled(p) else 'OFF'}\n"
         )
 
 
@@ -7724,7 +8378,9 @@ def pick_playlists_to_sync(
             f"[{i}] {playlist['plex_playlist_name']} "
             f"({source_display_name(playlist['source'])}) "
             f"- Last sync: "
-            f"{format_timestamp(playlist.get('last_synced'))}"
+            f"{format_timestamp(playlist.get('last_synced'))} "
+            f"- Auto sync: "
+            f"{'ON' if Syncer._auto_sync_enabled(playlist) else 'OFF'}"
         )
 
     print(
@@ -7871,8 +8527,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--sync-all",
         action="store_true",
         help=(
-            "Sync all registered playlists to Plex non-interactively "
-            "using saved mappings."
+            "Sync registered playlists whose auto-sync setting is ON "
+            "to Plex non-interactively using saved mappings."
         ),
     )
 
@@ -7926,6 +8582,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         syncer = Syncer(config)
         syncer.sync_all(
             dry_run=args.dry_run,
+            respect_auto_sync=True,
         )
         return 0
 

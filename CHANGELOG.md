@@ -2,6 +2,59 @@
 
 All notable changes to Playlist Bridge are documented here.
 
+## [1.3] - 2026-08-24
+
+### Added
+
+- Added per-playlist permanent track ignores in Option 5 and Option 6.
+- Added `[i] Ignore permanently` while resolving missing tracks or editing an existing match.
+- Added `ignored_tracks.json` for persistent per-playlist ignore state.
+- Added Settings → **Manage ignored tracks** to restore individual ignored tracks or all ignored tracks for a playlist.
+- Added per-playlist `Auto sync` ON/OFF state.
+- Added Settings → **Manage auto-sync**.
+- Added one-time/manual-only playlist behavior while keeping the playlist fully registered.
+- New playlists now ask whether they should participate in automatic `--sync-all` / cron runs.
+- Added Auto sync status to registered-playlist and manual-sync displays.
+- Added `Ignored` count to sync summaries.
+
+### Changed
+
+- Automated `python sync.py --sync-all` now skips playlists whose Auto sync setting is OFF.
+- Interactive **Sync all playlists** remains an explicit manual action and continues to sync every registered playlist.
+- Interactive **Sync specific playlist** remains available regardless of Auto sync state.
+- Existing playlists with no `auto_sync` field default to Auto sync ON.
+- Permanently ignored tracks no longer participate in matching, unresolved lists, or destination Plex playlist construction.
+- Ignoring an already-matched track removes its saved mapping and provenance.
+- Restoring an ignored track makes it eligible for normal matching on the next sync.
+- State schema advanced from 1 to 2.
+- Schema 2 adds ignored-track state and optional per-playlist automatic-sync state.
+- Existing schema-0 and schema-1 state migrate to schema 2 using the existing one-time backup mechanism.
+- Dry run remains fully read-only, including ignored-track state and schema migration.
+
+### Compatibility
+
+- No reset is required when upgrading.
+- Existing playlists default to Auto sync ON.
+- Existing matching, missing-track, provenance, and source-snapshot data remains compatible.
+- Older state files receive `.pre-schema-2.bak` backups before the first schema-2 rewrite.
+
+## [1.22] - 2026-08-24
+
+### Added
+
+- LOST tracks now retain the previous Plex track ID and, when known, previous title, artist, album, and provenance.
+- LOST status and previous-match details remain visible during manual unmatched-track review.
+- Existing valid mappings learn a destination metadata snapshot for future LOST reporting.
+- Added a read-only Developer Tools report for Plex albums with zero tracks on any Plex audio playlist.
+
+### Changed
+
+- Legacy mapping validation now runs only for mappings whose provenance is actually `legacy`.
+- When the current automatic matcher independently chooses the exact same Plex track as a valid legacy mapping, that mapping is promoted to `automatic`.
+- Legacy mappings remain unchanged when the current matcher disagrees or cannot confidently match.
+- Manual and already-automatic mappings are not reclassified by the legacy-validation path.
+- Dry run does not promote legacy mappings or write provenance changes.
+
 ## [1.2] - 2026-08-22
 
 ### Added

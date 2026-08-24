@@ -1,6 +1,9 @@
 config.json
 mapping.json
 missing_tracks.json
+ignored_tracks.json
+match_metadata.json
+source_snapshots.json
 
 *.bak
 
