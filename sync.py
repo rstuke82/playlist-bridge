@@ -10,6 +10,7 @@ successfully matched to a Plex library track.
 
 import argparse
 import json
+from io import BytesIO
 import re
 import shutil
 import sys
@@ -26,13 +27,19 @@ from bs4 import BeautifulSoup # type: ignore
 from fuzzywuzzy import fuzz # type: ignore
 from fuzzywuzzy import process # type: ignore
 
+try:
+    from PIL import Image # type: ignore
+except ImportError:
+    Image = None
+
 APP_NAME = "Playlist Bridge"
-VERSION = "1.3"
+VERSION = "1.3.5"
 
 # Color codes for terminal output
 class Colors:
     RESET = '\033[0m'
     BOLD = '\033[1m'
+    DIM = '\033[2m'
     RED = '\033[91m'
     GREEN = '\033[92m'
     CYAN = '\033[96m'
@@ -41,9 +48,54 @@ class Colors:
     BLUE = '\033[94m'
     WHITE = '\033[97m'
 
+    # Brand-appropriate 24-bit terminal colors.
+    SPOTIFY = '\033[38;2;29;185;84m'       # #1DB954
+    APPLE_MUSIC = '\033[38;2;250;45;72m'   # #FA2D48
+
+
 def colored(text: str, color: str) -> str:
-    """Add color to text for terminal output."""
+    """Add color/style to text for terminal output."""
     return f"{color}{text}{Colors.RESET}"
+
+
+def dimmed(text) -> str:
+    """Render secondary terminal metadata with lower visual emphasis."""
+    return colored(str(text), Colors.DIM)
+
+
+def section_header(title: str) -> str:
+    """Return one consistent lightweight section divider."""
+    rule = colored("─" * 50, Colors.DIM)
+    heading = colored(title, Colors.BOLD + Colors.CYAN)
+    return f"\n{rule}\n{heading}\n{rule}"
+
+
+def auto_sync_display(
+    enabled: bool,
+    *,
+    symbol: bool = False,
+) -> str:
+    """Color automatic-sync state consistently."""
+    if enabled:
+        label = "● ON" if symbol else "ON"
+        return colored(label, Colors.GREEN)
+
+    label = "● OFF" if symbol else "OFF"
+    return colored(label, Colors.RED)
+
+
+def provenance_display(value: str) -> str:
+    """Color automatic/manual/legacy provenance consistently."""
+    normalized = str(value or "legacy").strip().lower()
+    colors = {
+        "automatic": Colors.GREEN,
+        "manual": Colors.CYAN,
+        "legacy": Colors.YELLOW,
+    }
+    return colored(
+        normalized,
+        colors.get(normalized, Colors.WHITE),
+    )
 
 
 def repair_text(value) -> str:
@@ -139,7 +191,7 @@ def clean_playlist_description(value) -> str:
 
 
 def source_display_name(source_type: str) -> str:
-    """Return one consistent user-facing service name."""
+    """Return one consistent uncolored user-facing service name."""
     names = {
         "spotify": "Spotify",
         "applemusic": "Apple Music",
@@ -148,15 +200,31 @@ def source_display_name(source_type: str) -> str:
     return names.get(value, str(source_type or "").title())
 
 
+def source_display_label(source_type: str) -> str:
+    """Return a brand-colored service label for terminal display."""
+    value = str(source_type or "").lower()
+    name = source_display_name(source_type)
+
+    if value == "spotify":
+        return colored(name, Colors.SPOTIFY)
+
+    if value == "applemusic":
+        return colored(name, Colors.APPLE_MUSIC)
+
+    return name
+
 
 def source_album_display(track: dict) -> str:
-    """Return source album using the same format as Plex album output."""
+    """Return source album as subdued secondary match metadata."""
     album = repair_text(track.get("album", "") or "").strip()
 
     if album:
-        return colored(f"({album})", Colors.YELLOW)
+        return colored(
+            f"({album})",
+            Colors.DIM + Colors.YELLOW,
+        )
 
-    return "(N/A)"
+    return dimmed("(N/A)")
 
 
 def parse_timestamp(value):
@@ -2419,55 +2487,161 @@ class PlexAPI:
         return None, None
 
     @staticmethod
-    def _apple_artwork_variants(url: str) -> List[str]:
+    def _apple_artwork_variants(
+        url: str,
+    ) -> List[str]:
         """
-        Generate safer Apple CDN alternatives.
+        Generate Apple CDN artwork alternatives.
 
-        "bb" preserves the original aspect ratio. For a wide social card,
-        Apple's CDN may therefore return 3000x750 even when the request says
-        3000x3000bb. A "cc" variant asks the CDN for a square crop and is
-        useful as a fallback when no true square playlist artwork was found.
+        Query strings such as ?l=en-US are preserved. The rendition regex is
+        applied only to parsed.path so those query parameters no longer block
+        creation of Apple's square "cc" crop URLs.
         """
         variants = [url]
 
         try:
-            host = (urlparse(url).hostname or "").lower()
+            parsed = urlparse(url)
+            host = (
+                parsed.hostname
+                or ""
+            ).lower()
         except ValueError:
             return variants
 
         if "mzstatic" not in host:
             return variants
 
+        path = parsed.path
         size = APPLE_ARTWORK_SIZE
 
-        # Replace a fixed final Apple rendition with square crop variants.
         match = re.search(
             r"/\d+x\d+[A-Za-z0-9._-]*\.(?:jpe?g|png|webp)$",
-            url,
+            path,
             re.IGNORECASE,
         )
 
         if match:
-            base = url[:match.start()]
-            for suffix in (
-                f"/{size}x{size}cc.jpg",
-                f"/{size}x{size}bb-999.jpg",
-            ):
-                candidate = base + suffix
-                if candidate not in variants:
-                    variants.append(candidate)
+            base_path = path[:match.start()]
 
-        # If already using bb, explicitly try cc.
-        cc = re.sub(
+            for candidate_path in (
+                f"{base_path}/{size}x{size}cc.jpg",
+                f"{base_path}/{size}x{size}bb-999.jpg",
+            ):
+                candidate = parsed._replace(
+                    path=candidate_path
+                ).geturl()
+
+                if candidate not in variants:
+                    variants.append(
+                        candidate
+                    )
+
+        cc_path = re.sub(
             r"/(\d+)x(\d+)bb(?:-\d+)?\.(jpe?g|png|webp)$",
             r"/\1x\2cc.\3",
-            url,
+            path,
             flags=re.IGNORECASE,
         )
-        if cc != url and cc not in variants:
-            variants.append(cc)
+
+        if cc_path != path:
+            candidate = parsed._replace(
+                path=cc_path
+            ).geturl()
+
+            if candidate not in variants:
+                variants.append(candidate)
 
         return variants
+
+    @staticmethod
+    def _center_crop_square(
+        image_data: bytes,
+        content_type: str,
+    ) -> Tuple[
+        Optional[bytes],
+        Optional[str],
+        Optional[int],
+    ]:
+        """
+        Center-crop an image to the largest possible square.
+
+        A 1200x630 image becomes 630x630 by removing 285 pixels from
+        each horizontal side. No stretching is performed.
+        """
+        if Image is None:
+            return None, None, None
+
+        try:
+            with Image.open(
+                BytesIO(image_data)
+            ) as image:
+                width, height = image.size
+                side = min(
+                    width,
+                    height,
+                )
+
+                if side < 600:
+                    return None, None, side
+
+                left = max(
+                    0,
+                    (width - side) // 2,
+                )
+                top = max(
+                    0,
+                    (height - side) // 2,
+                )
+
+                cropped = image.crop(
+                    (
+                        left,
+                        top,
+                        left + side,
+                        top + side,
+                    )
+                )
+
+                output = BytesIO()
+                normalized_type = (
+                    str(content_type or "")
+                    .split(";", 1)[0]
+                    .strip()
+                    .lower()
+                )
+
+                if normalized_type == "image/png":
+                    cropped.save(
+                        output,
+                        format="PNG",
+                        optimize=True,
+                    )
+                    output_type = "image/png"
+                else:
+                    if cropped.mode not in (
+                        "RGB",
+                        "L",
+                    ):
+                        cropped = cropped.convert(
+                            "RGB"
+                        )
+
+                    cropped.save(
+                        output,
+                        format="JPEG",
+                        quality=95,
+                        optimize=True,
+                    )
+                    output_type = "image/jpeg"
+
+                return (
+                    output.getvalue(),
+                    output_type,
+                    side,
+                )
+
+        except Exception:
+            return None, None, None
 
     def _update_playlist_artwork(
         self,
@@ -2475,8 +2649,12 @@ class PlexAPI:
         artwork_url: str,
     ) -> bool:
         """
-        Download source artwork, verify its real pixel dimensions, and upload
-        only a suitable square poster to Plex.
+        Upload square artwork to Plex.
+
+        Preference order:
+        1. already-square source artwork;
+        2. Apple CDN square crop variants;
+        3. local center crop of the first large non-square image.
         """
 
         if not artwork_url:
@@ -2487,8 +2665,12 @@ class PlexAPI:
         )
 
         last_error = None
+        crop_fallback = None
 
-        for index, candidate_url in enumerate(variants, 1):
+        for index, candidate_url in enumerate(
+            variants,
+            1,
+        ):
             try:
                 image_resp = requests.get(
                     candidate_url,
@@ -2523,7 +2705,9 @@ class PlexAPI:
                     .lower()
                 )
 
-                if not content_type.startswith("image/"):
+                if not content_type.startswith(
+                    "image/"
+                ):
                     last_error = (
                         f"variant {index} returned "
                         f"{content_type or 'unknown content type'}"
@@ -2536,8 +2720,10 @@ class PlexAPI:
                     )
                     continue
 
-                width, height = self._detect_image_dimensions(
-                    image_resp.content
+                width, height = (
+                    self._detect_image_dimensions(
+                        image_resp.content
+                    )
                 )
 
                 if width and height:
@@ -2546,33 +2732,67 @@ class PlexAPI:
                         f"{width}x{height} actual pixels"
                     )
 
-                    ratio = width / height if height else 0
+                    ratio = (
+                        width / height
+                        if height
+                        else 0
+                    )
 
-                    if not (0.95 <= ratio <= 1.05):
-                        print(
-                            "    ↳ rejected: not square enough "
-                            "for a Plex playlist poster"
-                        )
+                    if not (
+                        0.95
+                        <= ratio
+                        <= 1.05
+                    ):
+                        if (
+                            min(
+                                width,
+                                height,
+                            )
+                            >= 600
+                            and crop_fallback is None
+                        ):
+                            crop_fallback = {
+                                "data": image_resp.content,
+                                "content_type": content_type,
+                                "width": width,
+                                "height": height,
+                            }
+
+                            print(
+                                "    ↳ not square; saved as "
+                                "center-crop fallback"
+                            )
+                        else:
+                            print(
+                                "    ↳ rejected: not square enough "
+                                "for direct Plex upload"
+                            )
+
                         last_error = (
                             f"variant {index} was {width}x{height}"
                         )
                         continue
 
-                    # Avoid tiny thumbnails masquerading as high-res art.
-                    if min(width, height) < 600:
+                    if min(
+                        width,
+                        height,
+                    ) < 600:
                         print(
                             "    ↳ rejected: artwork is below "
                             "600x600"
                         )
                         last_error = (
-                            f"variant {index} was only {width}x{height}"
+                            f"variant {index} was only "
+                            f"{width}x{height}"
                         )
                         continue
+
                 else:
-                    # Unknown format: still allow it only for non-Apple art.
                     try:
                         host = (
-                            urlparse(candidate_url).hostname
+                            urlparse(
+                                candidate_url
+                            ).hostname
                             or ""
                         ).lower()
                     except ValueError:
@@ -2596,7 +2816,9 @@ class PlexAPI:
                 )
 
                 if upload_resp.status_code in [
-                    200, 201, 204
+                    200,
+                    201,
+                    204,
                 ]:
                     if width and height:
                         print(
@@ -2623,11 +2845,93 @@ class PlexAPI:
                     f"artwork variant {index} error: {e}"
                 )
 
+        if crop_fallback is not None:
+            original_width = crop_fallback[
+                "width"
+            ]
+            original_height = crop_fallback[
+                "height"
+            ]
+
+            cropped_data, cropped_type, side = (
+                self._center_crop_square(
+                    crop_fallback["data"],
+                    crop_fallback[
+                        "content_type"
+                    ],
+                )
+            )
+
+            if (
+                cropped_data
+                and cropped_type
+                and side
+            ):
+                print(
+                    f"  → Local center crop: "
+                    f"{original_width}x{original_height} "
+                    f"→ {side}x{side}"
+                )
+
+                try:
+                    upload_resp = requests.post(
+                        f"{self.base_url}/library/metadata/"
+                        f"{playlist_id}/posters",
+                        headers={
+                            "X-Plex-Token": self.token,
+                            "Content-Type": cropped_type,
+                        },
+                        data=cropped_data,
+                        timeout=20,
+                    )
+
+                    if upload_resp.status_code in [
+                        200,
+                        201,
+                        204,
+                    ]:
+                        print(
+                            f"  ✓ Plex poster uploaded at "
+                            f"{side}x{side} "
+                            "(center crop)"
+                        )
+                        return True
+
+                    last_error = (
+                        "center-cropped Plex poster upload "
+                        f"HTTP {upload_resp.status_code}"
+                    )
+
+                except requests.exceptions.Timeout:
+                    last_error = (
+                        "center-cropped Plex poster upload "
+                        "timed out"
+                    )
+                except requests.exceptions.RequestException as e:
+                    last_error = (
+                        "center-cropped Plex poster upload "
+                        f"request error: {e}"
+                    )
+
+            elif Image is None:
+                last_error = (
+                    "local center crop requires Pillow "
+                    "(pip install pillow)"
+                )
+            else:
+                last_error = (
+                    "local center crop could not process "
+                    f"{original_width}x{original_height} artwork"
+                )
+
         print(
             "  ⚠ No suitable square artwork was uploaded"
         )
+
         if last_error:
-            print(f"    Last artwork issue: {last_error}")
+            print(
+                f"    Last artwork issue: {last_error}"
+            )
 
         return False
 
@@ -4144,7 +4448,11 @@ class Syncer:
             )
             return
 
-        print("\nSource playlist changes:")
+        print(
+            section_header(
+                "SOURCE PLAYLIST CHANGES"
+            )
+        )
 
         for track in added:
             print(
@@ -4641,14 +4949,14 @@ class Syncer:
                     print(
                         "      Previous Plex match: "
                         f"{previous_text} "
-                        f"[{previous_provenance}]"
+                        f"[{provenance_display(previous_provenance)}]"
                     )
                 elif previous_id:
                     print(
                         "      Previous Plex match: "
                         f"metadata unavailable "
                         f"(Plex ID {previous_id}) "
-                        f"[{previous_provenance}]"
+                        f"[{provenance_display(previous_provenance)}]"
                     )
 
         return (
@@ -4827,7 +5135,7 @@ class Syncer:
             return
 
         print(
-            f"Fetching {source_display_name(source_type)} playlist "
+            f"Fetching {source_display_label(source_type)} playlist "
             f"(ID: {playlist_id})..."
         )
 
@@ -4945,7 +5253,7 @@ class Syncer:
                 "registered and can still be synced manually."
             )
 
-        print("\n=== SYNC SUMMARY ===")
+        print(section_header("SYNC SUMMARY"))
         print(f"Source tracks:   {len(tracks)}")
         print(f"Matched:         {len(matched_tracks)}")
         print("New matches:     baseline")
@@ -5104,12 +5412,12 @@ class Syncer:
         if dry_run:
             print(
                 f"\n=== DRY RUN: '{playlist_name}' "
-                f"({source_display_name(source_type)}) ==="
+                f"({source_display_label(source_type)}) ==="
             )
         else:
             print(
                 f"\n→ Syncing '{playlist_name}' from "
-                f"{source_display_name(source_type)}..."
+                f"{source_display_label(source_type)}..."
             )
 
         try:
@@ -5156,7 +5464,7 @@ class Syncer:
         )
 
         if dry_run:
-            print("\n=== DRY RUN SUMMARY ===")
+            print(section_header("DRY RUN SUMMARY"))
             print(
                 f"Source tracks: {len(source_tracks)}"
             )
@@ -5219,7 +5527,11 @@ class Syncer:
             playlist_mapping
         )
 
-        print("\n→ Syncing to Plex...")
+        print(
+            section_header(
+                "SYNCING TO PLEX"
+            )
+        )
 
         if matched_tracks:
             print(
@@ -5299,7 +5611,7 @@ class Syncer:
                 "added because they are unmatched."
             )
 
-        print("\n=== SYNC SUMMARY ===")
+        print(section_header("SYNC SUMMARY"))
         print(f"Source tracks:   {len(source_tracks)}")
         print(f"Matched:         {len(matched_tracks)}")
         print(
@@ -5351,7 +5663,9 @@ class Syncer:
 
         if dry_run:
             print(
-                "\n=== PLAYLIST BRIDGE DRY RUN ==="
+                section_header(
+                    "PLAYLIST BRIDGE DRY RUN"
+                )
             )
             print(
                 "Matching will be tested against Plex, "
@@ -5397,8 +5711,9 @@ class Syncer:
         while True:
             print("\nDeveloper tools:\n")
             print("[1] Dry run matching")
-            print("[2] Check manual source track")
-            print("[3] Albums with no playlist tracks")
+            print("[2] Dry run new playlist")
+            print("[3] Check manual source track")
+            print("[4] Album playlist coverage")
             print("[b] Back")
             print("[x] Exit")
 
@@ -5417,32 +5732,244 @@ class Syncer:
                 continue
 
             if choice == "2":
-                self.manual_match_check_interactive()
+                self.dry_run_new_playlist_interactive()
                 continue
 
             if choice == "3":
-                self.show_albums_without_playlist_tracks()
+                self.manual_match_check_interactive()
+                continue
+
+            if choice == "4":
+                self.show_album_playlist_coverage()
                 continue
 
             print("✗ Invalid choice")
 
-    def find_albums_without_playlist_tracks(
+    def dry_run_new_playlist_interactive(
+        self,
+    ):
+        """
+        Test a new Spotify/Apple Music playlist without registering it.
+
+        This deliberately uses an isolated temporary mapping key so the test
+        behaves like a first-time import. It does not reuse saved mappings,
+        permanent ignores, provenance, source snapshots, or missing state.
+
+        No Plex playlist is created or modified and no local state is saved.
+        """
+
+        print(
+            "\nDry run new playlist"
+        )
+        print(
+            "Paste a Spotify or Apple Music playlist URL to test "
+            "first-time matching without registering it."
+        )
+        print(
+            "Type [b] to go back."
+        )
+
+        source_url = input(
+            "\nPlaylist URL: "
+        ).strip()
+
+        if (
+            not source_url
+            or source_url.casefold() == "b"
+        ):
+            return
+
+        source_url = Config._normalize_url_input(
+            source_url
+        )
+
+        lower_url = source_url.lower()
+
+        if (
+            "spotify.com" in lower_url
+            or lower_url.startswith(
+                "spotify:playlist:"
+            )
+        ):
+            source_type = "spotify"
+        elif (
+            "music.apple.com" in lower_url
+            or "itunes.apple.com" in lower_url
+        ):
+            source_type = "applemusic"
+        else:
+            print(
+                "✗ Invalid URL. Must be Spotify or Apple Music"
+            )
+            return
+
+        playlist_id = Config._extract_id(
+            source_url,
+            source_type,
+        )
+
+        if not playlist_id:
+            print(
+                "✗ Could not extract playlist ID from URL"
+            )
+            return
+
+        existing = self.config.find_playlist(
+            source_url
+        )
+
+        if existing:
+            print(
+                "✗ This playlist is already registered."
+            )
+            print(
+                "  Use Developer Tools → Dry run matching "
+                "to test the registered playlist."
+            )
+            return
+
+        api = (
+            SpotifyAPI()
+            if source_type == "spotify"
+            else AppleMusicAPI()
+        )
+
+        print(
+            f"\n→ Fetching "
+            f"{source_display_label(source_type)} playlist "
+            f"(ID: {playlist_id})..."
+        )
+
+        try:
+            tracks, metadata = (
+                api.get_playlist_tracks(
+                    source_url,
+                    fetch_artwork=False,
+                )
+            )
+        except Exception as e:
+            print(
+                f"✗ Failed to fetch playlist: {e}"
+            )
+            return
+
+        playlist_name = repair_text(
+            metadata.get(
+                "name",
+                "Unknown Playlist",
+            )
+        )
+
+        print(
+            f"✓ Found playlist: "
+            f"{playlist_name} "
+            f"({len(tracks)} tracks)"
+        )
+
+        if not tracks:
+            print(
+                "✗ Source playlist contains no tracks."
+            )
+            return
+
+        # Isolated dev-only key guarantees the test behaves like a completely
+        # new import even if stale state with the same source ID exists in a
+        # local JSON file.
+        mapping_key = (
+            f"dev-new:{source_type}:{playlist_id}"
+        )
+
+        (
+            matched_tracks,
+            unmatched,
+            _playlist_mapping,
+            _plex_library,
+            match_stats,
+        ) = self._match_source_tracks(
+            tracks,
+            mapping_key,
+            record_provenance=False,
+            mark_new_matches=False,
+        )
+
+        print(
+            section_header(
+                "NEW PLAYLIST DRY RUN SUMMARY"
+            )
+        )
+        print(
+            f"Playlist:      {playlist_name}"
+        )
+        print(
+            f"Source:        "
+            f"{source_display_label(source_type)}"
+        )
+        print(
+            f"Source tracks: {len(tracks)}"
+        )
+        print(
+            f"Would match:   {len(matched_tracks)}"
+        )
+        print(
+            f"Unmatched:     {len(unmatched)}"
+        )
+
+        if match_stats.get(
+            "lost_matches"
+        ):
+            print(
+                f"Lost matches:  "
+                f"{len(match_stats['lost_matches'])}"
+            )
+
+        if unmatched:
+            print(
+                "\nUnmatched tracks:\n"
+            )
+
+            for track in unmatched:
+                print(
+                    f"  {colored('✗', Colors.RED)} "
+                    f"{colored(track['title'], Colors.CYAN)} - "
+                    f"{colored(track['artist'], Colors.GREEN)} "
+                    f"{source_album_display(track)}"
+                )
+
+        print(
+            "\n✓ New-playlist dry run complete. "
+            "Nothing was registered or changed."
+        )
+        print(
+            "  No Plex playlist was created or modified, "
+            "and no local JSON state was written."
+        )
+
+    def _find_album_playlist_coverage(
         self,
     ) -> dict:
         """
-        Find Plex albums with zero tracks on any Plex audio playlist.
+        Scan Plex album coverage across Playlist Bridge playlists only.
 
-        "Any playlist" means every Plex audio playlist visible to the current
-        Plex server/token, not only playlists registered with Playlist Bridge.
+        A library track counts as covered when its Plex ratingKey appears on
+        at least one Plex playlist registered in config.json. Unrelated Plex
+        playlists, smart playlists, and generated playlists are ignored unless
+        they are explicitly registered with Playlist Bridge.
 
-        Returns diagnostic data so the interactive view can remain simple and
-        the logic can be regression-tested independently.
+        Repeated appearances on multiple registered playlists still count as
+        one covered library track.
+
+        Albums are grouped by album artist + album title so two artists with
+        the same album title remain separate.
         """
 
         plex = self._get_plex()
 
-        print("\n→ Scanning Plex music library...")
-        plex_library = plex.search_library("")
+        print(
+            "\n→ Scanning Plex music library..."
+        )
+        plex_library = plex.search_library(
+            ""
+        )
 
         if not plex_library:
             return {
@@ -5454,11 +5981,62 @@ class Syncer:
             }
 
         print(
-            f"  Found {len(plex_library)} tracks in Plex library"
+            f"  Found {len(plex_library)} tracks "
+            "in Plex library"
         )
 
-        print("→ Scanning Plex audio playlists...")
-        playlists = plex.get_audio_playlists()
+        print(
+            "→ Scanning Playlist Bridge Plex playlists..."
+        )
+
+        registered_playlists = (
+            self.config.config.get(
+                "playlists",
+                [],
+            )
+        )
+
+        # Deduplicate by destination Plex playlist ID in case config contains
+        # duplicate registrations pointing at the same Plex playlist.
+        playlists = []
+        seen_playlist_ids = set()
+
+        for playlist in registered_playlists:
+            playlist_id = playlist.get(
+                "plex_playlist_id"
+            )
+
+            if playlist_id is None:
+                continue
+
+            playlist_id = str(
+                playlist_id
+            )
+
+            if (
+                not playlist_id
+                or playlist_id in seen_playlist_ids
+            ):
+                continue
+
+            seen_playlist_ids.add(
+                playlist_id
+            )
+
+            playlists.append(
+                {
+                    "plex_id": playlist_id,
+                    "title": (
+                        repair_text(
+                            playlist.get(
+                                "plex_playlist_name",
+                                "",
+                            )
+                        ).strip()
+                        or f"Playlist {playlist_id}"
+                    ),
+                }
+            )
 
         playlist_track_ids = set()
 
@@ -5466,13 +6044,12 @@ class Syncer:
             playlists,
             1,
         ):
-            playlist_id = playlist.get(
+            playlist_id = playlist[
                 "plex_id"
-            )
-            playlist_name = (
-                playlist.get("title")
-                or f"Playlist {playlist_id}"
-            )
+            ]
+            playlist_name = playlist[
+                "title"
+            ]
 
             print(
                 f"  [{i}/{len(playlists)}] "
@@ -5480,7 +6057,7 @@ class Syncer:
             )
 
             items = plex.get_playlist_items(
-                str(playlist_id)
+                playlist_id
             )
 
             for item in items:
@@ -5497,17 +6074,25 @@ class Syncer:
 
         for track in plex_library:
             album = repair_text(
-                track.get("album", "")
+                track.get(
+                    "album",
+                    "",
+                )
             ).strip()
 
-            # A track with no Plex album metadata is not useful in an
-            # album-level report.
+            # Albumless tracks are omitted from album-level reporting.
             if not album:
                 continue
 
             album_artist = repair_text(
-                track.get("album_artist", "")
-                or track.get("artist", "")
+                track.get(
+                    "album_artist",
+                    "",
+                )
+                or track.get(
+                    "artist",
+                    "",
+                )
             ).strip()
 
             key = (
@@ -5539,13 +6124,10 @@ class Syncer:
                     "playlist_track_count"
                 ] += 1
 
-        unused_albums = [
-            album
-            for album in albums.values()
-            if album["playlist_track_count"] == 0
-        ]
-
-        unused_albums.sort(
+        album_list = list(
+            albums.values()
+        )
+        album_list.sort(
             key=lambda item: (
                 item["artist"].casefold(),
                 item["album"].casefold(),
@@ -5553,8 +6135,10 @@ class Syncer:
         )
 
         return {
-            "albums": unused_albums,
-            "playlist_count": len(playlists),
+            "albums": album_list,
+            "playlist_count": len(
+                playlists
+            ),
             "playlist_track_count": len(
                 playlist_track_ids
             ),
@@ -5566,33 +6150,106 @@ class Syncer:
             ),
         }
 
-    def show_albums_without_playlist_tracks(
+    def find_albums_without_playlist_tracks(
+        self,
+    ) -> dict:
+        """
+        Return albums with zero tracks on Playlist Bridge playlists.
+        """
+
+        result = (
+            self._find_album_playlist_coverage()
+        )
+
+        result = dict(
+            result
+        )
+        result["albums"] = [
+            album
+            for album in result["albums"]
+            if album[
+                "playlist_track_count"
+            ] == 0
+        ]
+
+        return result
+
+    def find_albums_with_playlist_tracks(
+        self,
+    ) -> dict:
+        """
+        Return albums with at least one track on a Playlist Bridge playlist.
+        """
+
+        result = (
+            self._find_album_playlist_coverage()
+        )
+
+        result = dict(
+            result
+        )
+        result["albums"] = [
+            album
+            for album in result["albums"]
+            if album[
+                "playlist_track_count"
+            ] > 0
+        ]
+
+        return result
+
+    def show_album_playlist_coverage(
         self,
     ):
         """
-        Read-only developer report of albums unused by every Plex playlist.
+        Read-only developer report of every Plex album grouped by artist.
+
+        Each artist is shown once as a header. Every album for that artist is
+        listed beneath it and marked according to whether at least one track
+        from that album appears on a Plex playlist registered with
+        Playlist Bridge.
         """
 
         print(
-            "\nAlbums with no tracks on any Plex playlist"
+            "\nAlbum playlist coverage"
         )
         print(
-            "This checks every Plex audio playlist visible to "
-            "the current server/token."
+            "This checks only Plex playlists registered "
+            "with Playlist Bridge."
         )
 
         result = (
-            self.find_albums_without_playlist_tracks()
+            self._find_album_playlist_coverage()
         )
 
-        if not result["library_track_count"]:
-            print("✗ No Plex music tracks were found.")
+        if not result[
+            "library_track_count"
+        ]:
+            print(
+                "✗ No Plex music tracks were found."
+            )
             return
 
-        albums = result["albums"]
+        albums = result[
+            "albums"
+        ]
+
+        covered_count = sum(
+            1
+            for album in albums
+            if album[
+                "playlist_track_count"
+            ] > 0
+        )
+        uncovered_count = (
+            len(albums)
+            - covered_count
+        )
 
         print(
-            "\n=== UNUSED ALBUM SUMMARY ==="
+            section_header(
+                "ALBUM PLAYLIST COVERAGE"
+            )
         )
         print(
             f"Library tracks:          "
@@ -5603,7 +6260,7 @@ class Syncer:
             f"{result['library_album_count']}"
         )
         print(
-            f"Audio playlists scanned: "
+            f"Bridge playlists scanned: "
             f"{result['playlist_count']}"
         )
         print(
@@ -5611,39 +6268,86 @@ class Syncer:
             f"{result['playlist_track_count']}"
         )
         print(
-            f"Albums with zero tracks "
-            f"on any playlist: {len(albums)}"
+            f"Albums on playlists:     "
+            f"{covered_count}"
+        )
+        print(
+            f"Albums not on playlists: "
+            f"{uncovered_count}"
         )
 
         if not albums:
             print(
-                "\n✓ Every Plex album has at least one track "
-                "on a Plex audio playlist."
+                "\n✗ No Plex albums were found."
             )
             return
 
-        print(
-            "\nAlbums with zero playlist coverage:\n"
-        )
+        # Group already-sorted albums by album artist while preserving the
+        # artist/album alphabetical order established by the scanner.
+        artists = {}
 
-        for i, album in enumerate(
-            albums,
-            1,
-        ):
+        for album in albums:
             artist = (
                 album["artist"]
                 or "Unknown Artist"
             )
 
-            print(
-                f"[{i}] "
-                f"{colored(artist, Colors.GREEN)} - "
-                f"{colored(album['album'], Colors.YELLOW)} "
-                f"({album['track_count']} tracks)"
+            artists.setdefault(
+                artist,
+                [],
+            ).append(
+                album
             )
 
         print(
-            "\n✓ Developer report complete. "
+            "\nAlbum coverage by artist:\n"
+        )
+
+        for artist, artist_albums in artists.items():
+            print(
+                colored(
+                    artist,
+                    Colors.BOLD + Colors.GREEN,
+                )
+            )
+
+            for album in artist_albums:
+                covered = album[
+                    "playlist_track_count"
+                ]
+                total = album[
+                    "track_count"
+                ]
+                is_covered = (
+                    covered > 0
+                )
+
+                status = (
+                    colored(
+                        "● ON PLAYLIST",
+                        Colors.GREEN,
+                    )
+                    if is_covered
+                    else colored(
+                        "● NOT ON PLAYLIST",
+                        Colors.RED,
+                    )
+                )
+
+                coverage_text = (
+                    f"{covered}/{total} tracks"
+                )
+
+                print(
+                    f"  {colored(album['album'], Colors.DIM + Colors.YELLOW)} "
+                    f"- {status} "
+                    f"{dimmed(f'({coverage_text})')}"
+                )
+
+            print()
+
+        print(
+            "✓ Developer report complete. "
             "No Plex or local state was changed."
         )
 
@@ -5909,9 +6613,9 @@ class Syncer:
             print(
                 f"[{i}] "
                 f"{playlist['plex_playlist_name']} "
-                f"({source_display_name(playlist['source'])}) "
+                f"({source_display_label(playlist['source'])}) "
                 f"- Last sync: "
-                f"{format_timestamp(playlist.get('last_synced'))}"
+                f"{dimmed(format_timestamp(playlist.get('last_synced')))}"
             )
 
         print("[a] All playlists")
@@ -5961,10 +6665,9 @@ class Syncer:
         while True:
             print("\nSelect playlist to edit matches:\n")
 
-            for i, p in enumerate(
-                playlists,
-                1,
-            ):
+            rows = []
+
+            for p in playlists:
                 mapping_key = (
                     f"{p['source']}:{p['source_id']}"
                 )
@@ -5979,14 +6682,66 @@ class Syncer:
                         mapping_key
                     )
                 )
+                rows.append(
+                    (
+                        p,
+                        match_count,
+                        provenance,
+                    )
+                )
+
+            match_width = max(
+                len(str(row[1]))
+                for row in rows
+            )
+            auto_width = max(
+                len(str(row[2]["automatic"]))
+                for row in rows
+            )
+            manual_width = max(
+                len(str(row[2]["manual"]))
+                for row in rows
+            )
+            legacy_width = max(
+                len(str(row[2]["legacy"]))
+                for row in rows
+            )
+
+            print(
+                "  "
+                f"{provenance_display('automatic')} | "
+                f"{provenance_display('manual')} | "
+                f"{provenance_display('legacy')}\n"
+            )
+
+            for i, (
+                p,
+                match_count,
+                provenance,
+            ) in enumerate(
+                rows,
+                1,
+            ):
+                auto_text = colored(
+                    f"{provenance['automatic']:>{auto_width}} auto",
+                    Colors.GREEN,
+                )
+                manual_text = colored(
+                    f"{provenance['manual']:>{manual_width}} manual",
+                    Colors.CYAN,
+                )
+                legacy_text = colored(
+                    f"{provenance['legacy']:>{legacy_width}} legacy",
+                    Colors.YELLOW,
+                )
 
                 print(
                     f"[{i}] {p['plex_playlist_name']} "
-                    f"({source_display_name(p['source'])}) "
-                    f"- {match_count} current matches "
-                    f"({provenance['automatic']} auto, "
-                    f"{provenance['manual']} manual, "
-                    f"{provenance['legacy']} legacy)"
+                    f"({source_display_label(p['source'])}) "
+                    f"- {match_count:>{match_width}} matches | "
+                    f"{auto_text} | "
+                    f"{manual_text} | "
+                    f"{legacy_text}"
                 )
 
             print("[b] Back")
@@ -6048,7 +6803,7 @@ class Syncer:
 
         print(
             f"\n→ Fetching "
-            f"{source_display_name(source_type)} playlist..."
+            f"{source_display_label(source_type)} playlist..."
         )
 
         try:
@@ -6131,7 +6886,7 @@ class Syncer:
                 matched = match["matched"]
                 album = matched.get("album", "")
                 album_str = (
-                    f" {colored(f'({album})', Colors.YELLOW)}"
+                    f" {colored(f'({album})', Colors.DIM + Colors.YELLOW)}"
                     if album
                     else ""
                 )
@@ -6166,7 +6921,7 @@ class Syncer:
                 print(
                     f"    → {matched_title} - "
                     f"{matched_artist}{album_str} "
-                    f"[{provenance}]"
+                    f"[{provenance_display(provenance)}]"
                 )
 
             print("\n[b] Back")
@@ -6270,7 +7025,7 @@ class Syncer:
         current_display = f"{current_title} - {current_artist}"
         if current_album:
             current_display += (
-                f" {colored(f'({current_album})', Colors.YELLOW)}"
+                f" {colored(f'({current_album})', Colors.DIM + Colors.YELLOW)}"
             )
 
         print(f"  Current match: {current_display}")
@@ -6304,7 +7059,7 @@ class Syncer:
             cand_title = colored(cand["title"], Colors.CYAN)
             cand_artist = colored(cand["artist"], Colors.GREEN)
             album_str = (
-                f" {colored(f'({album})', Colors.YELLOW)}"
+                f" {colored(f'({album})', Colors.DIM + Colors.YELLOW)}"
                 if album
                 else ""
             )
@@ -6435,12 +7190,14 @@ class Syncer:
 
                 if same_match:
                     print(
-                        "✓ Match confirmed and marked manual"
+                        "✓ Match confirmed and marked "
+                        f"{provenance_display('manual')}"
                     )
                 else:
                     print(
                         f"✓ Updated to: {selected['title']} - "
-                        f"{selected['artist']} [manual]"
+                        f"{selected['artist']} "
+                        f"[{provenance_display('manual')}]"
                     )
 
                 return True, False
@@ -6480,7 +7237,7 @@ class Syncer:
 
             print(
                 f"[{i}] {playlist['plex_playlist_name']} "
-                f"({source_display_name(playlist['source'])}) "
+                f"({source_display_label(playlist['source'])}) "
                 f"- {match_count} saved matches, "
                 f"{missing_count} unresolved"
             )
@@ -6643,17 +7400,43 @@ class Syncer:
                 )
             )
 
+        auto_width = max(
+            len(str(row[2]["automatic"]))
+            for row in rows
+        )
+        manual_width = max(
+            len(str(row[2]["manual"]))
+            for row in rows
+        )
+        legacy_width = max(
+            len(str(row[2]["legacy"]))
+            for row in rows
+        )
+
         for i, (
             playlist,
             _mapping_key,
             counts,
         ) in enumerate(rows, 1):
+            automatic_text = colored(
+                f"{counts['automatic']:>{auto_width}} automatic",
+                Colors.GREEN,
+            )
+            manual_text = colored(
+                f"{counts['manual']:>{manual_width}} manual",
+                Colors.CYAN,
+            )
+            legacy_text = colored(
+                f"{counts['legacy']:>{legacy_width}} legacy",
+                Colors.YELLOW,
+            )
+
             print(
                 f"[{i}] {playlist['plex_playlist_name']} "
-                f"({source_display_name(playlist['source'])}) "
-                f"- {counts['automatic']} automatic, "
-                f"{counts['manual']} manual, "
-                f"{counts['legacy']} legacy"
+                f"({source_display_label(playlist['source'])}) "
+                f"- {automatic_text} | "
+                f"{manual_text} | "
+                f"{legacy_text}"
             )
 
         print("[a] All playlists")
@@ -6830,7 +7613,7 @@ class Syncer:
                 print(
                     f"[{i}] "
                     f"{playlist['plex_playlist_name']} "
-                    f"({source_display_name(playlist['source'])}) "
+                    f"({source_display_label(playlist['source'])}) "
                     f"- {len(bucket)} ignored"
                 )
 
@@ -6986,27 +7769,23 @@ class Syncer:
                 "\nAutomatic sync settings:\n"
             )
             print(
-                "OFF playlists stay registered and can still "
-                "be synced manually.\n"
+                f"{colored('OFF', Colors.RED)} playlists stay registered "
+                "and can still be synced manually.\n"
             )
 
             for i, playlist in enumerate(
                 playlists,
                 1,
             ):
-                state = (
-                    "ON"
-                    if self._auto_sync_enabled(
-                        playlist
-                    )
-                    else "OFF"
+                enabled = self._auto_sync_enabled(
+                    playlist
                 )
 
                 print(
                     f"[{i}] "
                     f"{playlist['plex_playlist_name']} "
-                    f"({source_display_name(playlist['source'])}) "
-                    f"- Auto sync: {state}"
+                    f"({source_display_label(playlist['source'])}) "
+                    f"- Auto sync: {auto_sync_display(enabled)}"
                 )
 
             print("[b] Back")
@@ -7037,9 +7816,14 @@ class Syncer:
             playlist["auto_sync"] = new_state
             self.config.save()
 
+            state_word = (
+                colored("enabled", Colors.GREEN)
+                if new_state
+                else colored("disabled", Colors.RED)
+            )
+
             print(
-                f"✓ Auto sync "
-                f"{'enabled' if new_state else 'disabled'} "
+                f"✓ Auto sync {state_word} "
                 f"for '{playlist['plex_playlist_name']}'."
             )
 
@@ -7136,7 +7920,7 @@ class Syncer:
 
             print(
                 f"{indent}Previous Plex match: "
-                f"{text} [{provenance}]"
+                f"{text} [{provenance_display(provenance)}]"
             )
             return
 
@@ -7145,7 +7929,7 @@ class Syncer:
                 f"{indent}Previous Plex match: "
                 f"metadata unavailable "
                 f"(Plex ID {plex_id}) "
-                f"[{provenance}]"
+                f"[{provenance_display(provenance)}]"
             )
             return
 
@@ -7234,9 +8018,9 @@ class Syncer:
                 print(
                     f"[{display_idx}] "
                     f"{playlist['plex_playlist_name']} "
-                    f"({source_display_name(playlist['source'])}) "
+                    f"({source_display_label(playlist['source'])}) "
                     f"- {unmatched_count} unmatched "
-                    f"- Last match attempt: {attempt_text}"
+                    f"- Last match attempt: {dimmed(attempt_text)}"
                 )
 
             print("[a] All missing tracks (deduped)")
@@ -7703,7 +8487,7 @@ class Syncer:
                         Colors.GREEN,
                     )
                     album_str = (
-                        f" {colored(f'({album})', Colors.YELLOW)}"
+                        f" {colored(f'({album})', Colors.DIM + Colors.YELLOW)}"
                         if album
                         else ""
                     )
@@ -7931,7 +8715,7 @@ class Syncer:
                         )
                         album_str = (
                             f" "
-                            f"{colored(f'({album})', Colors.YELLOW)}"
+                            f"{colored(f'({album})', Colors.DIM + Colors.YELLOW)}"
                             if album
                             else ""
                         )
@@ -8228,18 +9012,18 @@ def show_playlists(config: Config):
             f"[{i}] {p['plex_playlist_name']}"
         )
         print(
-            f"    Source: {source_display_name(p['source'])}"
+            f"    Source: {source_display_label(p['source'])}"
         )
         print(
-            f"    URL: {p['source_url'][:60]}..."
+            f"    URL: {dimmed(p['source_url'][:60] + '...')}"
         )
         print(
             f"    Last sync: "
-            f"{format_timestamp(p.get('last_synced'))}"
+            f"{dimmed(format_timestamp(p.get('last_synced')))}"
         )
         print(
             f"    Auto sync: "
-            f"{'ON' if Syncer._auto_sync_enabled(p) else 'OFF'}\n"
+            f"{auto_sync_display(Syncer._auto_sync_enabled(p), symbol=True)}\n"
         )
 
 
@@ -8279,7 +9063,7 @@ def show_sync_history(config: Config):
     for i, h in enumerate(history[:10], 1):
         print(
             f"{i}. {h['name']} - "
-            f"{h['time'].strftime('%Y-%m-%d %H:%M')}"
+            f"{dimmed(h['time'].strftime('%Y-%m-%d %H:%M'))}"
         )
 
 
@@ -8312,13 +9096,13 @@ def pick_playlist(
     for i, p in enumerate(playlists, 1):
         line = (
             f"[{i}] {p['plex_playlist_name']} "
-            f"({source_display_name(p['source'])})"
+            f"({source_display_label(p['source'])})"
         )
 
         if action == "sync":
             line += (
                 f" - Last sync: "
-                f"{format_timestamp(p.get('last_synced'))}"
+                f"{dimmed(format_timestamp(p.get('last_synced')))}"
             )
 
         print(line)
@@ -8376,11 +9160,11 @@ def pick_playlists_to_sync(
     ):
         print(
             f"[{i}] {playlist['plex_playlist_name']} "
-            f"({source_display_name(playlist['source'])}) "
+            f"({source_display_label(playlist['source'])}) "
             f"- Last sync: "
-            f"{format_timestamp(playlist.get('last_synced'))} "
+            f"{dimmed(format_timestamp(playlist.get('last_synced')))} "
             f"- Auto sync: "
-            f"{'ON' if Syncer._auto_sync_enabled(playlist) else 'OFF'}"
+            f"{auto_sync_display(Syncer._auto_sync_enabled(playlist))}"
         )
 
     print(

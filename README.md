@@ -1,6 +1,6 @@
 # Playlist Bridge
 
-**Version 1.3**
+**Version 1.3.5**
 
 Playlist Bridge syncs public **Spotify** and **Apple Music** playlists to your local music library through Plex.
 
@@ -39,6 +39,54 @@ It matches source tracks against your Plex library, preserves manual match decis
 - Read-only `--sync-all --dry-run` mode
 - Automatic cleanup of common text-encoding glitches
 - Predictable one-level Back behavior throughout submenus
+
+## What's New in 1.3.5
+
+Version 1.3.5 focuses on terminal presentation, Apple Music artwork handling, and read-only diagnostic improvements.
+
+### Terminal UI polish
+
+Playlist Bridge now uses more consistent terminal styling:
+
+- Spotify service labels use Spotify green
+- Apple Music service labels use Apple Music red/pink
+- Auto sync `ON` is green and `OFF` is red
+- registered-playlist status uses a filled status dot for both states
+- match provenance is color-coded consistently: automatic, manual, and legacy
+- match/provenance summaries are aligned for easier scanning
+- secondary metadata such as timestamps, URLs, albums, and `N/A` values is visually subdued
+- long sync operations use consistent section dividers
+
+These are presentation-only changes and do not alter matching or sync behavior.
+
+### Better Apple Music playlist artwork
+
+Apple Music sometimes exposes a wide social-preview image such as `1200x630` instead of square playlist artwork.
+
+Version 1.3.5 improves that flow by:
+
+- correctly generating Apple CDN artwork alternatives even when the source URL contains query parameters such as `?l=en-US`
+- preferring Apple's square `cc` crop rendition when available
+- preserving URL query parameters when generating alternate Apple artwork URLs
+- falling back to a local center crop when Apple does not provide a usable square image
+- preserving the full shorter image dimension without stretching
+
+For example, a `1200x630` source image can be center-cropped to a true `630x630` Plex playlist poster.
+
+Local center cropping uses Pillow.
+
+### Internal read-only diagnostics
+
+The read-only diagnostic tools were expanded to support:
+
+- testing the matching behavior of an unregistered Spotify or Apple Music playlist without creating or registering it
+- a consolidated album playlist-coverage report
+- artist-grouped album coverage with per-album covered/total track counts
+- album coverage scoped only to Plex playlists registered with Playlist Bridge
+
+Unrelated Plex playlists, smart playlists, and generated playlists no longer affect Playlist Bridge's album-coverage diagnostic unless that Plex playlist is actually registered in Playlist Bridge.
+
+No state-schema change is required for 1.3.5.
 
 ## What's New in 1.3
 
@@ -138,7 +186,6 @@ The current 1.3 code also includes the 1.22 improvements:
 - LOST status remains visible during manual review
 - legacy mappings are revalidated only when they are legacy; if the current automatic matcher independently chooses the exact same Plex track, the mapping is promoted to `automatic`
 - manual and already-automatic mappings are not subjected to that legacy validation
-- Developer tools includes a read-only report showing Plex albums with zero tracks on any Plex audio playlist
 
 ## Requirements
 
@@ -146,6 +193,7 @@ The current 1.3 code also includes the 1.22 improvements:
 - A Plex Media Server containing your music library
 - A Plex authentication token
 - Public Spotify and/or Apple Music playlist URLs
+- Pillow (installed from `requirements.txt`) for local square artwork cropping
 
 Install dependencies with:
 
@@ -212,7 +260,7 @@ opens:
 
 ```text
 ==================================================
-Playlist Bridge v1.3 - Spotify/Apple Music to Plex
+Playlist Bridge v1.3.5 - Spotify/Apple Music to Plex
 ==================================================
 [1] Add new Spotify/Apple Music playlist
 [2] Sync all playlists
@@ -631,9 +679,11 @@ Apple Music can expose wide social-preview images instead of square playlist art
 Playlist Bridge checks actual image dimensions and can:
 
 - prefer playlist-level square artwork
-- reject wide banner/social-preview images
 - reject very small images
-- try alternate square Apple artwork renditions
+- generate Apple CDN square-crop alternatives even when the source URL contains query parameters
+- prefer Apple's square `cc` rendition when available
+- locally center-crop a sufficiently large wide image when no suitable square rendition is available
+- upload the resulting square poster to Plex without stretching the artwork
 
 ## Registered Playlists
 
@@ -961,7 +1011,7 @@ Playlist Bridge suppresses that generic source-generated metadata. A meaningful 
 
 Watch the artwork messages during sync.
 
-Playlist Bridge validates actual image dimensions and rejects unsuitable wide or low-resolution artwork.
+Playlist Bridge validates actual image dimensions. Wide Apple Music artwork is first retried through square Apple CDN variants and, when necessary, center-cropped locally to a square poster. Very small artwork is still rejected.
 
 ### `--sync-all` stops because Plex is not configured
 

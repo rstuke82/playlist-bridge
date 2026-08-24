@@ -1,16 +1,29 @@
+# Playlist Bridge local state / credentials
 config.json
 mapping.json
 missing_tracks.json
-ignored_tracks.json
 match_metadata.json
 source_snapshots.json
+ignored_tracks.json
 
+# Ignore all backup files
 *.bak
 
+# Local logs
+cron.log
+*.log
+
+# Local/testing scripts
+spotify-test.py
+sync copy.py
+
+# Python
 __pycache__/
 *.pyc
-
 .venv/
 venv/
-.DS_Store
+
+# Local environment / OS files
 .env
+.DS_Store
+

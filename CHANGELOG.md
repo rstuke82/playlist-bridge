@@ -2,6 +2,44 @@
 
 All notable changes to Playlist Bridge are documented here.
 
+## [1.3.5] - 2026-08-24
+
+### Added
+
+- Added brand-appropriate terminal colors for Spotify and Apple Music service labels.
+- Added consistent color treatment for Auto sync ON/OFF and automatic/manual/legacy match provenance.
+- Added aligned provenance summaries and subdued secondary metadata for easier terminal scanning.
+- Added consistent section dividers for long sync and dry-run output.
+- Added Pillow-based local center cropping for sufficiently large non-square playlist artwork.
+- Added read-only matching diagnostics for an unregistered Spotify or Apple Music playlist.
+- Added a consolidated read-only album playlist-coverage diagnostic grouped by artist and album.
+- Album coverage now reports the number of covered tracks versus total tracks for each album.
+
+### Changed
+
+- Auto sync status now uses a filled status dot for both ON and OFF; color communicates the state.
+- Apple Music artwork URL handling now preserves query parameters while generating alternate CDN renditions.
+- Apple Music artwork now prefers square `cc` CDN crops before falling back to a local center crop.
+- A wide `1200x630` source image can now be center-cropped to a true `630x630` poster without stretching.
+- Album playlist coverage now compares only against Plex playlists registered with Playlist Bridge.
+- Unrelated Plex playlists, smart playlists, and generated playlists no longer affect Playlist Bridge album-coverage diagnostics unless explicitly registered with Playlist Bridge.
+- The two separate positive/negative album-coverage views were consolidated into one artist-grouped report.
+
+### Fixed
+
+- Fixed Apple artwork URLs with query strings such as `?l=en-US` failing to generate square CDN variants.
+- Fixed wide Apple social-preview images being rejected without a usable square fallback.
+
+### Dependencies
+
+- Added `Pillow>=9.0.0` for local artwork center cropping.
+
+### Compatibility
+
+- State schema remains 2.
+- No JSON reset or migration is required.
+- Matching, permanent-ignore, auto-sync, provenance, source-snapshot, and LOST behavior remain compatible with 1.3.
+
 ## [1.3] - 2026-08-24
 
 ### Added
