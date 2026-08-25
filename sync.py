@@ -10,7 +10,6 @@ successfully matched to a Plex library track.
 
 import argparse
 import json
-import importlib.metadata as importlib_metadata
 from io import BytesIO
 import re
 import shutil
@@ -22,407 +21,6 @@ from pathlib import Path
 from typing import Optional, Dict, List, Tuple
 from urllib.parse import urlparse, unquote
 from html import unescape
-
-
-REQUIREMENTS_FILE = (
-    Path(__file__).resolve().with_name(
-        "requirements.txt"
-    )
-)
-
-
-def _requirement_version_tuple(
-    value: str,
-) -> Tuple[int, ...]:
-    """
-    Convert a normal package version to a comparable numeric tuple.
-
-    Playlist Bridge's requirements currently use simple >= minimum versions,
-    so a lightweight stdlib-only comparison is sufficient during bootstrap.
-    """
-    numbers = re.findall(
-        r"\d+",
-        str(value or ""),
-    )
-
-    if not numbers:
-        return ()
-
-    return tuple(
-        int(number)
-        for number in numbers[:6]
-    )
-
-
-def _version_meets_minimum(
-    installed: str,
-    minimum: str,
-) -> bool:
-    """Return whether an installed version satisfies a >= minimum."""
-    installed_parts = list(
-        _requirement_version_tuple(
-            installed
-        )
-    )
-    minimum_parts = list(
-        _requirement_version_tuple(
-            minimum
-        )
-    )
-
-    if (
-        not installed_parts
-        or not minimum_parts
-    ):
-        return True
-
-    width = max(
-        len(installed_parts),
-        len(minimum_parts),
-    )
-
-    installed_parts.extend(
-        [0]
-        * (
-            width
-            - len(installed_parts)
-        )
-    )
-    minimum_parts.extend(
-        [0]
-        * (
-            width
-            - len(minimum_parts)
-        )
-    )
-
-    return tuple(
-        installed_parts
-    ) >= tuple(
-        minimum_parts
-    )
-
-
-def _parse_requirements_file(
-    requirements_path: Path,
-) -> List[dict]:
-    """Parse Playlist Bridge requirements.txt entries."""
-    requirements = []
-
-    for raw_line in requirements_path.read_text(
-        encoding="utf-8"
-    ).splitlines():
-        line = raw_line.split(
-            "#",
-            1,
-        )[0].strip()
-
-        if not line:
-            continue
-
-        if line.startswith("-"):
-            continue
-
-        line = line.split(
-            ";",
-            1,
-        )[0].strip()
-
-        match = re.fullmatch(
-            r"([A-Za-z0-9_.-]+)"
-            r"(?:\[[^\]]+\])?"
-            r"\s*"
-            r"(?:(>=|==|<=|>|<|~=)\s*([^\s]+))?",
-            line,
-        )
-
-        if not match:
-            requirements.append(
-                {
-                    "name": line,
-                    "operator": "",
-                    "version": "",
-                    "parse_error": True,
-                }
-            )
-            continue
-
-        requirements.append(
-            {
-                "name": match.group(1),
-                "operator": (
-                    match.group(2)
-                    or ""
-                ),
-                "version": (
-                    match.group(3)
-                    or ""
-                ),
-                "parse_error": False,
-            }
-        )
-
-    return requirements
-
-
-def _check_requirements(
-    requirements_path: Path = None,
-    version_lookup=None,
-) -> dict:
-    """
-    Check requirements.txt before importing third-party packages.
-
-    This uses importlib.metadata from the Python standard library, allowing
-    Playlist Bridge to report all missing/outdated dependencies at once.
-    """
-    path = (
-        Path(requirements_path)
-        if requirements_path is not None
-        else REQUIREMENTS_FILE
-    )
-
-    if version_lookup is None:
-        version_lookup = (
-            importlib_metadata.version
-        )
-
-    result = {
-        "ok": False,
-        "requirements_file": str(
-            path
-        ),
-        "file_missing": False,
-        "missing": [],
-        "outdated": [],
-        "unparsed": [],
-        "checked": [],
-    }
-
-    if not path.is_file():
-        result[
-            "file_missing"
-        ] = True
-        return result
-
-    try:
-        requirements = (
-            _parse_requirements_file(
-                path
-            )
-        )
-    except (
-        OSError,
-        UnicodeError,
-    ):
-        result[
-            "file_missing"
-        ] = True
-        return result
-
-    for requirement in requirements:
-        if requirement[
-            "parse_error"
-        ]:
-            result[
-                "unparsed"
-            ].append(
-                requirement["name"]
-            )
-            continue
-
-        name = requirement[
-            "name"
-        ]
-
-        try:
-            installed = str(
-                version_lookup(
-                    name
-                )
-            )
-        except (
-            importlib_metadata.PackageNotFoundError,
-            KeyError,
-        ):
-            result[
-                "missing"
-            ].append(
-                {
-                    "name": name,
-                    "required": (
-                        f"{requirement['operator']}"
-                        f"{requirement['version']}"
-                    ),
-                }
-            )
-            continue
-        except Exception:
-            result[
-                "missing"
-            ].append(
-                {
-                    "name": name,
-                    "required": (
-                        f"{requirement['operator']}"
-                        f"{requirement['version']}"
-                    ),
-                }
-            )
-            continue
-
-        result[
-            "checked"
-        ].append(
-            {
-                "name": name,
-                "installed": installed,
-                "required": (
-                    f"{requirement['operator']}"
-                    f"{requirement['version']}"
-                ),
-            }
-        )
-
-        operator = requirement[
-            "operator"
-        ]
-        required_version = requirement[
-            "version"
-        ]
-
-        if (
-            operator == ">="
-            and required_version
-            and not _version_meets_minimum(
-                installed,
-                required_version,
-            )
-        ):
-            result[
-                "outdated"
-            ].append(
-                {
-                    "name": name,
-                    "installed": installed,
-                    "required": (
-                        f">={required_version}"
-                    ),
-                }
-            )
-
-    result["ok"] = not (
-        result[
-            "file_missing"
-        ]
-        or result[
-            "missing"
-        ]
-        or result[
-            "outdated"
-        ]
-        or result[
-            "unparsed"
-        ]
-    )
-
-    return result
-
-
-def _ensure_requirements():
-    """Stop startup with install instructions when requirements fail."""
-    result = (
-        _check_requirements()
-    )
-
-    if result["ok"]:
-        return
-
-    print(
-        "\n✗ Playlist Bridge cannot start because "
-        "its Python requirements are not satisfied."
-    )
-
-    if result[
-        "file_missing"
-    ]:
-        print(
-            f"\n  requirements.txt was not found at:\n"
-            f"  {result['requirements_file']}"
-        )
-        print(
-            "\n  Restore requirements.txt next to sync.py "
-            "and try again."
-        )
-        raise SystemExit(
-            1
-        )
-
-    if result[
-        "missing"
-    ]:
-        print(
-            "\nMissing packages:"
-        )
-
-        for item in result[
-            "missing"
-        ]:
-            print(
-                f"  - "
-                f"{item['name']}"
-                f"{item['required']}"
-            )
-
-    if result[
-        "outdated"
-    ]:
-        print(
-            "\nPackages that need to be upgraded:"
-        )
-
-        for item in result[
-            "outdated"
-        ]:
-            print(
-                f"  - "
-                f"{item['name']} "
-                f"{item['installed']} "
-                f"(requires "
-                f"{item['required']})"
-            )
-
-    if result[
-        "unparsed"
-    ]:
-        print(
-            "\nRequirements that could not be checked:"
-        )
-
-        for item in result[
-            "unparsed"
-        ]:
-            print(
-                f"  - {item}"
-            )
-
-    print(
-        "\nInstall/update dependencies with:\n"
-    )
-    print(
-        f'  "{sys.executable}" -m pip install '
-        f'-r "{REQUIREMENTS_FILE}"'
-    )
-    print()
-
-    raise SystemExit(
-        1
-    )
-
-
-# Run dependency validation before importing requests/BeautifulSoup/
-# FuzzyWuzzy/Pillow below.
-_ensure_requirements()
-
 
 import requests
 from bs4 import BeautifulSoup # type: ignore
@@ -1032,8 +630,243 @@ class Config:
                 name
             )
 
+    @staticmethod
+    def _get_plex_music_libraries(
+        plex_url: str,
+        plex_token: str,
+    ) -> List[dict]:
+        """Return Plex music libraries available to this server/token."""
+        resp = requests.get(
+            f"{plex_url.rstrip('/')}/library/sections",
+            headers={
+                "X-Plex-Token": plex_token,
+                "Accept": "application/json",
+            },
+            timeout=15,
+        )
+
+        if resp.status_code != 200:
+            raise RuntimeError(
+                "Failed to get Plex library sections: "
+                f"HTTP {resp.status_code}"
+            )
+
+        sections = (
+            resp.json()
+            .get("MediaContainer", {})
+            .get("Directory", [])
+        )
+
+        libraries = []
+
+        for section in sections:
+            if section.get("type") != "artist":
+                continue
+
+            key = section.get("key")
+
+            if key is None:
+                continue
+
+            libraries.append(
+                {
+                    "key": str(key),
+                    "name": repair_text(
+                        section.get("title", "")
+                    ).strip()
+                    or f"Music Library {key}",
+                }
+            )
+
+        return libraries
+
+    @staticmethod
+    def _prompt_for_music_library(
+        libraries: List[dict],
+    ) -> Optional[dict]:
+        """Ask the user which Plex music library Playlist Bridge should use."""
+        if not libraries:
+            print("✗ No music libraries were found in Plex.")
+            return None
+
+        if len(libraries) == 1:
+            selected = libraries[0]
+            print(
+                "✓ Music library: "
+                f"{selected['name']}"
+            )
+            return selected
+
+        print("\nPlex music libraries:\n")
+
+        for index, library in enumerate(
+            libraries,
+            1,
+        ):
+            print(
+                f"[{index}] {library['name']}"
+            )
+
+        while True:
+            choice = input(
+                "\nSelect music library: "
+            ).strip().lower()
+
+            if choice == "x":
+                return None
+
+            try:
+                index = int(choice) - 1
+            except ValueError:
+                print("✗ Invalid choice")
+                continue
+
+            if 0 <= index < len(libraries):
+                return libraries[index]
+
+            print("✗ Invalid choice")
+
+    def ensure_plex_music_library(
+        self,
+        interactive: bool = True,
+        save: bool = True,
+    ) -> bool:
+        """
+        Ensure a specific Plex music library is selected.
+
+        Existing configs from older Playlist Bridge releases are handled
+        safely. A single available music library is selected automatically.
+        If multiple libraries exist, interactive use prompts the user while
+        automated use fails clearly instead of guessing.
+        """
+        plex_cfg = self.config.get(
+            "plex",
+            {},
+        )
+
+        plex_url = str(
+            plex_cfg.get("url", "")
+        ).strip().rstrip("/")
+        plex_token = str(
+            plex_cfg.get("token", "")
+        ).strip()
+
+        if not plex_url or not plex_token:
+            return False
+
+        try:
+            libraries = self._get_plex_music_libraries(
+                plex_url,
+                plex_token,
+            )
+        except Exception as e:
+            print(
+                f"✗ Could not read Plex music libraries: {e}"
+            )
+            return False
+
+        if not libraries:
+            print(
+                "✗ No music libraries were found in Plex."
+            )
+            return False
+
+        saved_key = str(
+            plex_cfg.get(
+                "music_library_key",
+                "",
+            )
+        ).strip()
+
+        if saved_key:
+            selected = next(
+                (
+                    library
+                    for library in libraries
+                    if library["key"] == saved_key
+                ),
+                None,
+            )
+
+            if selected:
+                changed = (
+                    plex_cfg.get(
+                        "music_library_name"
+                    )
+                    != selected["name"]
+                )
+
+                plex_cfg[
+                    "music_library_key"
+                ] = selected["key"]
+                plex_cfg[
+                    "music_library_name"
+                ] = selected["name"]
+
+                if changed and save:
+                    self.save()
+
+                return True
+
+            print(
+                "⚠ Previously selected Plex music library "
+                "is no longer available."
+            )
+
+        if len(libraries) == 1:
+            selected = libraries[0]
+            plex_cfg[
+                "music_library_key"
+            ] = selected["key"]
+            plex_cfg[
+                "music_library_name"
+            ] = selected["name"]
+
+            if save:
+                self.save()
+
+            print(
+                "✓ Music library: "
+                f"{selected['name']}"
+            )
+            return True
+
+        if not interactive:
+            print(
+                "✗ Multiple Plex music libraries were found, but no "
+                "library is selected."
+            )
+            print(
+                "  Run Playlist Bridge without arguments, then use "
+                "Settings → Configure Plex to choose one."
+            )
+            return False
+
+        selected = self._prompt_for_music_library(
+            libraries
+        )
+
+        if not selected:
+            return False
+
+        plex_cfg[
+            "music_library_key"
+        ] = selected["key"]
+        plex_cfg[
+            "music_library_name"
+        ] = selected["name"]
+
+        if save:
+            self.save()
+
+        print(
+            "✓ Music library selected: "
+            f"{selected['name']}"
+        )
+        return True
+
     def setup_plex(self):
-        """Interactive Plex authentication"""
+        """Interactive Plex authentication and music-library selection."""
         print("\n=== Plex Setup ===")
         plex_url = input(
             "Plex server URL (e.g., http://localhost:32400): "
@@ -1047,30 +880,66 @@ class Config:
                 timeout=5,
             )
 
-            if resp.status_code == 200:
-                print("✓ Connected to Plex")
-                self.config["plex"] = {
-                    "url": plex_url,
-                    "token": plex_token,
-                }
-                self.save()
-                return True
+            if resp.status_code != 200:
+                print(
+                    f"✗ Failed to connect. HTTP {resp.status_code}. "
+                    "Check URL and token."
+                )
+                return False
 
-            print(
-                f"✗ Failed to connect. HTTP {resp.status_code}. "
-                "Check URL and token."
+            print("✓ Connected to Plex")
+
+            libraries = self._get_plex_music_libraries(
+                plex_url,
+                plex_token,
             )
-            return False
+            selected = self._prompt_for_music_library(
+                libraries
+            )
+
+            if not selected:
+                return False
+
+            self.config["plex"] = {
+                "url": plex_url,
+                "token": plex_token,
+                "music_library_key": selected["key"],
+                "music_library_name": selected["name"],
+            }
+            self.save()
+
+            if len(libraries) > 1:
+                print(
+                    "✓ Music library selected: "
+                    f"{selected['name']}"
+                )
+
+            return True
 
         except Exception as e:
             print(f"✗ Error: {e}")
             return False
 
     def get_plex(self):
-        """Get Plex config, prompt setup if missing"""
-        if not self.config.get("plex", {}).get("token"):
+        """Get Plex config, prompting setup/library selection when needed."""
+        plex_cfg = self.config.get(
+            "plex",
+            {},
+        )
+
+        if (
+            not plex_cfg.get("url")
+            or not plex_cfg.get("token")
+        ):
             if not self.setup_plex():
                 raise Exception("Plex setup required")
+        elif not self.ensure_plex_music_library(
+            interactive=True,
+            save=True,
+        ):
+            raise Exception(
+                "Plex music-library selection required"
+            )
 
         return self.config["plex"]
 
@@ -2305,13 +2174,31 @@ class AppleMusicAPI:
 class PlexAPI:
     """Plex API wrapper"""
 
-    def __init__(self, plex_url: str, plex_token: str):
+    def __init__(
+        self,
+        plex_url: str,
+        plex_token: str,
+        music_library_key: str,
+        music_library_name: str = "",
+    ):
         self.base_url = plex_url.rstrip("/")
         self.token = plex_token
+        self.music_library_key = str(
+            music_library_key
+        ).strip()
+        self.music_library_name = str(
+            music_library_name or ""
+        ).strip()
         self.headers = {
             "X-Plex-Token": plex_token,
             "Accept": "application/json",
         }
+
+        if not self.music_library_key:
+            raise ValueError(
+                "Plex music library is not configured"
+            )
+
         self.machine_identifier = self._get_machine_identifier()
 
     def _get_machine_identifier(self) -> str:
@@ -2363,48 +2250,26 @@ class PlexAPI:
     def search_library(
         self, title: str = "", artist: str = ""
     ) -> List[dict]:
-        """Load all tracks from the first Plex music library."""
+        """Load tracks only from the configured Plex music library."""
 
         try:
             resp = requests.get(
-                f"{self.base_url}/library/sections",
-                headers=self.headers,
-                timeout=15,
-            )
-
-            if resp.status_code != 200:
-                print(
-                    f"Failed to get library sections: "
-                    f"{resp.status_code}"
-                )
-                return []
-
-            sections = (
-                resp.json()
-                .get("MediaContainer", {})
-                .get("Directory", [])
-            )
-
-            music_sections = [
-                s for s in sections if s.get("type") == "artist"
-            ]
-
-            if not music_sections:
-                print("No music library found in Plex")
-                return []
-
-            section_id = music_sections[0]["key"]
-
-            resp = requests.get(
-                f"{self.base_url}/library/sections/{section_id}/all",
+                f"{self.base_url}/library/sections/"
+                f"{self.music_library_key}/all",
                 headers=self.headers,
                 params={"type": 10},
                 timeout=30,
             )
 
             if resp.status_code != 200:
+                library_label = (
+                    f" '{self.music_library_name}'"
+                    if self.music_library_name
+                    else ""
+                )
                 print(
-                    f"Failed to fetch tracks: {resp.status_code}"
+                    f"Failed to fetch tracks from Plex music library"
+                    f"{library_label}: {resp.status_code}"
                 )
                 return []
 
@@ -4878,6 +4743,11 @@ class Syncer:
             self.plex = PlexAPI(
                 plex_cfg["url"],
                 plex_cfg["token"],
+                plex_cfg["music_library_key"],
+                plex_cfg.get(
+                    "music_library_name",
+                    "",
+                ),
             )
 
         return self.plex
@@ -8642,186 +8512,73 @@ class Syncer:
         """
         Resolve missing tracks for a specific playlist.
 
-        The overview supports two workflows:
-        - choose a track number to review only that one unresolved item;
-        - choose [t] to start the existing sequential triage flow.
-
-        Single-track review returns to this list afterward and leaves every
-        other unresolved track untouched.
+        Always show the top five Plex candidates with scores, even when all
+        candidates are below PROMPT_THRESHOLD. Automatic matching remains
+        conservative; this is only for human review.
         """
 
         mapping_key = (
             f"{playlist['source']}:{playlist['source_id']}"
         )
 
-        while True:
-            unmatched = list(
-                self.config.missing.get(
-                    mapping_key,
-                    [],
-                )
-            )
-
-            if not unmatched:
-                print(
-                    "✓ No unmatched tracks"
-                )
-                return
-
-            print(
-                f"\nMissing tracks for "
-                f"'{playlist['plex_playlist_name']}' "
-                f"({len(unmatched)} total):\n"
-            )
-
-            for i, track in enumerate(
-                unmatched,
-                1,
-            ):
-                lost_prefix = ""
-
-                if track.get(
-                    "status"
-                ) == "lost":
-                    lost_prefix = (
-                        f"{colored('LOST', Colors.RED)} "
-                    )
-
-                print(
-                    f"[{i}] "
-                    f"{lost_prefix}"
-                    f"{colored(track['title'], Colors.CYAN)} - "
-                    f"{colored(track['artist'], Colors.GREEN)} "
-                    f"{source_album_display(track)}"
-                )
-
-                if track.get(
-                    "status"
-                ) == "lost":
-                    self._print_previous_lost_match(
-                        track,
-                        indent="    ",
-                    )
-
-            print(
-                "\n[number] Review one track"
-            )
-            print("[t] Start triage")
-            print("[b] Back")
-            print("[x] Exit")
-
-            triage_choice = input(
-                "\nSelect: "
-            ).strip().lower()
-
-            if triage_choice in (
-                "",
-                "b",
-            ):
-                return
-
-            if triage_choice == "x":
-                sys.exit(0)
-
-            if triage_choice == "t":
-                self._triage_playlist_missing(
-                    playlist,
-                )
-                return
-
-            try:
-                selected_index = (
-                    int(
-                        triage_choice
-                    )
-                    - 1
-                )
-            except ValueError:
-                print(
-                    "✗ Invalid choice"
-                )
-                continue
-
-            if not (
-                0
-                <= selected_index
-                < len(unmatched)
-            ):
-                print(
-                    "✗ Invalid choice"
-                )
-                continue
-
-            self._triage_playlist_missing(
-                playlist,
-                selected_index=selected_index,
-            )
-
-    def _triage_playlist_missing(
-        self,
-        playlist: dict,
-        selected_index: int = None,
-    ):
-        """
-        Run Option 5 matching for either the full unresolved list or one item.
-
-        selected_index=None keeps the existing sequential triage behavior.
-        A numeric selected_index reviews only that item and returns to the
-        missing-track overview when finished.
-        """
-
-        mapping_key = (
-            f"{playlist['source']}:{playlist['source_id']}"
-        )
-
-        all_unmatched = list(
+        unmatched = list(
             self.config.missing.get(
                 mapping_key,
                 [],
             )
         )
 
-        if not all_unmatched:
-            print(
-                "✓ No unmatched tracks"
-            )
+        if not unmatched:
+            print("✓ No unmatched tracks")
             return
 
-        single_track_mode = (
-            selected_index is not None
+        # Show the complete list before doing any Plex scan or source refresh.
+        # This lets the user review what is missing and back out immediately.
+        print(
+            f"\nMissing tracks for "
+            f"'{playlist['plex_playlist_name']}' "
+            f"({len(unmatched)} total):\n"
         )
 
-        if single_track_mode:
-            if not (
-                0
-                <= selected_index
-                < len(all_unmatched)
-            ):
-                print(
-                    "✗ Invalid track selection"
-                )
-                return
+        for i, track in enumerate(unmatched, 1):
+            lost_prefix = ""
 
-            untouched_before = (
-                all_unmatched[
-                    :selected_index
-                ]
+            if track.get("status") == "lost":
+                lost_prefix = (
+                    f"{colored('LOST', Colors.RED)} "
+                )
+
+            print(
+                f"[{i}] "
+                f"{lost_prefix}"
+                f"{colored(track['title'], Colors.CYAN)} - "
+                f"{colored(track['artist'], Colors.GREEN)} "
+                f"{source_album_display(track)}"
             )
-            untouched_after = (
-                all_unmatched[
-                    selected_index + 1:
-                ]
-            )
-            unmatched = [
-                all_unmatched[
-                    selected_index
-                ]
-            ]
-        else:
-            selected_index = None
-            untouched_before = []
-            untouched_after = []
-            unmatched = all_unmatched
+
+            if track.get("status") == "lost":
+                self._print_previous_lost_match(
+                    track,
+                    indent="    ",
+                )
+
+        print("\n[t] Start triage")
+        print("[b] Back")
+        print("[x] Exit")
+
+        triage_choice = input(
+            "\nSelect: "
+        ).strip().lower()
+
+        if triage_choice in ("", "b"):
+            return
+
+        if triage_choice == "x":
+            sys.exit(0)
+
+        if triage_choice != "t":
+            print("✗ Invalid choice")
+            return
 
         # Count this as a match-fixing attempt only after the user explicitly
         # starts triage. Simply viewing the missing-track list does not update
@@ -8910,21 +8667,12 @@ class Syncer:
                 f"Option 5: {e}"
             )
 
-        if single_track_mode:
-            print(
-                "\nReviewing selected unmatched track:\n"
-            )
-        else:
-            print(
-                f"\nResolving {len(unmatched)} "
-                "unmatched tracks:\n"
-            )
-
-        # In single-track mode, preserve all untouched unresolved tracks in
-        # their original positions. Only the chosen track is reviewed.
-        still_unmatched = list(
-            untouched_before
+        print(
+            f"\nResolving {len(unmatched)} "
+            "unmatched tracks:\n"
         )
+
+        still_unmatched = []
         track_index = 0
 
         while track_index < len(unmatched):
@@ -8975,19 +8723,8 @@ class Syncer:
                     f"{colored('LOST', Colors.RED)} "
                 )
 
-            display_position = (
-                selected_index + 1
-                if single_track_mode
-                else track_index + 1
-            )
-            display_total = (
-                len(all_unmatched)
-                if single_track_mode
-                else len(unmatched)
-            )
-
             print(
-                f"\n[{display_position}/{display_total}] "
+                f"\n[{track_index + 1}/{len(unmatched)}] "
                 f"{lost_prefix}"
                 f"{colored(track['title'], Colors.CYAN)} - "
                 f"{colored(track['artist'], Colors.GREEN)} "
@@ -9085,32 +8822,14 @@ class Syncer:
             print("  [s] Skip")
             print("  [m] Manual search")
             print("  [i] Ignore permanently")
-
-            if single_track_mode:
-                print("  [b] Back to missing-track list")
-            else:
-                print("  [f] Finish triage & sync now")
-
+            print("  [f] Finish triage & sync now")
             print("  [x] Exit")
 
             choice = input(
                 "  Select: "
             ).strip().lower()
 
-            if (
-                single_track_mode
-                and choice in ("", "b")
-            ):
-                still_unmatched.append(
-                    track
-                )
-                track_index += 1
-                continue
-
-            if (
-                choice == "f"
-                and not single_track_mode
-            ):
+            if choice == "f":
                 # End this triage session without losing our place.
                 # Keep the current track plus everything not yet reviewed.
                 still_unmatched.extend(
@@ -9160,12 +8879,6 @@ class Syncer:
                 still_unmatched.extend(
                     unmatched[track_index:]
                 )
-
-                if single_track_mode:
-                    still_unmatched.extend(
-                        untouched_after
-                    )
-
                 self.config.mapping[mapping_key] = (
                     playlist_mapping
                 )
@@ -9472,11 +9185,6 @@ class Syncer:
 
             track_index += 1
 
-        if single_track_mode:
-            still_unmatched.extend(
-                untouched_after
-            )
-
         self.config.mapping[mapping_key] = (
             playlist_mapping
         )
@@ -9505,13 +9213,6 @@ class Syncer:
                 "✓ All previously unmatched tracks "
                 "have been resolved"
             )
-
-        if single_track_mode:
-            print(
-                "✓ Single-track review complete. "
-                "Returning to the missing-track list."
-            )
-            return
 
         # Offer to immediately rebuild the Plex playlist using the mappings
         # that were just saved in Option 5.
@@ -9928,6 +9629,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "✗ Plex is not configured. "
                 "Run without arguments and configure Plex first."
             )
+            return 1
+
+        if not config.ensure_plex_music_library(
+            interactive=False,
+            save=not args.dry_run,
+        ):
             return 1
 
         if not config.config.get("playlists"):
