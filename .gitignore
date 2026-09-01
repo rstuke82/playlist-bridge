@@ -5,6 +5,7 @@ missing_tracks.json
 match_metadata.json
 source_snapshots.json
 ignored_tracks.json
+artist_aliases.json
 
 # Ignore all backup files
 *.bak
@@ -27,3 +28,4 @@ venv/
 .env
 .DS_Store
 
+artist_aliases.json
