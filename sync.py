@@ -10,6 +10,7 @@ successfully matched to a Plex library track.
 
 import argparse
 import json
+import importlib.metadata as importlib_metadata
 from io import BytesIO
 import re
 import shutil
@@ -22,6 +23,407 @@ from typing import Optional, Dict, List, Tuple
 from urllib.parse import urlparse, unquote
 from html import unescape
 
+
+REQUIREMENTS_FILE = (
+    Path(__file__).resolve().with_name(
+        "requirements.txt"
+    )
+)
+
+
+def _requirement_version_tuple(
+    value: str,
+) -> Tuple[int, ...]:
+    """
+    Convert a normal package version to a comparable numeric tuple.
+
+    Playlist Bridge's requirements currently use simple >= minimum versions,
+    so a lightweight stdlib-only comparison is sufficient during bootstrap.
+    """
+    numbers = re.findall(
+        r"\d+",
+        str(value or ""),
+    )
+
+    if not numbers:
+        return ()
+
+    return tuple(
+        int(number)
+        for number in numbers[:6]
+    )
+
+
+def _version_meets_minimum(
+    installed: str,
+    minimum: str,
+) -> bool:
+    """Return whether an installed version satisfies a >= minimum."""
+    installed_parts = list(
+        _requirement_version_tuple(
+            installed
+        )
+    )
+    minimum_parts = list(
+        _requirement_version_tuple(
+            minimum
+        )
+    )
+
+    if (
+        not installed_parts
+        or not minimum_parts
+    ):
+        return True
+
+    width = max(
+        len(installed_parts),
+        len(minimum_parts),
+    )
+
+    installed_parts.extend(
+        [0]
+        * (
+            width
+            - len(installed_parts)
+        )
+    )
+    minimum_parts.extend(
+        [0]
+        * (
+            width
+            - len(minimum_parts)
+        )
+    )
+
+    return tuple(
+        installed_parts
+    ) >= tuple(
+        minimum_parts
+    )
+
+
+def _parse_requirements_file(
+    requirements_path: Path,
+) -> List[dict]:
+    """Parse Playlist Bridge requirements.txt entries."""
+    requirements = []
+
+    for raw_line in requirements_path.read_text(
+        encoding="utf-8"
+    ).splitlines():
+        line = raw_line.split(
+            "#",
+            1,
+        )[0].strip()
+
+        if not line:
+            continue
+
+        if line.startswith("-"):
+            continue
+
+        line = line.split(
+            ";",
+            1,
+        )[0].strip()
+
+        match = re.fullmatch(
+            r"([A-Za-z0-9_.-]+)"
+            r"(?:\[[^\]]+\])?"
+            r"\s*"
+            r"(?:(>=|==|<=|>|<|~=)\s*([^\s]+))?",
+            line,
+        )
+
+        if not match:
+            requirements.append(
+                {
+                    "name": line,
+                    "operator": "",
+                    "version": "",
+                    "parse_error": True,
+                }
+            )
+            continue
+
+        requirements.append(
+            {
+                "name": match.group(1),
+                "operator": (
+                    match.group(2)
+                    or ""
+                ),
+                "version": (
+                    match.group(3)
+                    or ""
+                ),
+                "parse_error": False,
+            }
+        )
+
+    return requirements
+
+
+def _check_requirements(
+    requirements_path: Path = None,
+    version_lookup=None,
+) -> dict:
+    """
+    Check requirements.txt before importing third-party packages.
+
+    This uses importlib.metadata from the Python standard library, allowing
+    Playlist Bridge to report all missing/outdated dependencies at once.
+    """
+    path = (
+        Path(requirements_path)
+        if requirements_path is not None
+        else REQUIREMENTS_FILE
+    )
+
+    if version_lookup is None:
+        version_lookup = (
+            importlib_metadata.version
+        )
+
+    result = {
+        "ok": False,
+        "requirements_file": str(
+            path
+        ),
+        "file_missing": False,
+        "missing": [],
+        "outdated": [],
+        "unparsed": [],
+        "checked": [],
+    }
+
+    if not path.is_file():
+        result[
+            "file_missing"
+        ] = True
+        return result
+
+    try:
+        requirements = (
+            _parse_requirements_file(
+                path
+            )
+        )
+    except (
+        OSError,
+        UnicodeError,
+    ):
+        result[
+            "file_missing"
+        ] = True
+        return result
+
+    for requirement in requirements:
+        if requirement[
+            "parse_error"
+        ]:
+            result[
+                "unparsed"
+            ].append(
+                requirement["name"]
+            )
+            continue
+
+        name = requirement[
+            "name"
+        ]
+
+        try:
+            installed = str(
+                version_lookup(
+                    name
+                )
+            )
+        except (
+            importlib_metadata.PackageNotFoundError,
+            KeyError,
+        ):
+            result[
+                "missing"
+            ].append(
+                {
+                    "name": name,
+                    "required": (
+                        f"{requirement['operator']}"
+                        f"{requirement['version']}"
+                    ),
+                }
+            )
+            continue
+        except Exception:
+            result[
+                "missing"
+            ].append(
+                {
+                    "name": name,
+                    "required": (
+                        f"{requirement['operator']}"
+                        f"{requirement['version']}"
+                    ),
+                }
+            )
+            continue
+
+        result[
+            "checked"
+        ].append(
+            {
+                "name": name,
+                "installed": installed,
+                "required": (
+                    f"{requirement['operator']}"
+                    f"{requirement['version']}"
+                ),
+            }
+        )
+
+        operator = requirement[
+            "operator"
+        ]
+        required_version = requirement[
+            "version"
+        ]
+
+        if (
+            operator == ">="
+            and required_version
+            and not _version_meets_minimum(
+                installed,
+                required_version,
+            )
+        ):
+            result[
+                "outdated"
+            ].append(
+                {
+                    "name": name,
+                    "installed": installed,
+                    "required": (
+                        f">={required_version}"
+                    ),
+                }
+            )
+
+    result["ok"] = not (
+        result[
+            "file_missing"
+        ]
+        or result[
+            "missing"
+        ]
+        or result[
+            "outdated"
+        ]
+        or result[
+            "unparsed"
+        ]
+    )
+
+    return result
+
+
+def _ensure_requirements():
+    """Stop startup with install instructions when requirements fail."""
+    result = (
+        _check_requirements()
+    )
+
+    if result["ok"]:
+        return
+
+    print(
+        "\n✗ Playlist Bridge cannot start because "
+        "its Python requirements are not satisfied."
+    )
+
+    if result[
+        "file_missing"
+    ]:
+        print(
+            f"\n  requirements.txt was not found at:\n"
+            f"  {result['requirements_file']}"
+        )
+        print(
+            "\n  Restore requirements.txt next to sync.py "
+            "and try again."
+        )
+        raise SystemExit(
+            1
+        )
+
+    if result[
+        "missing"
+    ]:
+        print(
+            "\nMissing packages:"
+        )
+
+        for item in result[
+            "missing"
+        ]:
+            print(
+                f"  - "
+                f"{item['name']}"
+                f"{item['required']}"
+            )
+
+    if result[
+        "outdated"
+    ]:
+        print(
+            "\nPackages that need to be upgraded:"
+        )
+
+        for item in result[
+            "outdated"
+        ]:
+            print(
+                f"  - "
+                f"{item['name']} "
+                f"{item['installed']} "
+                f"(requires "
+                f"{item['required']})"
+            )
+
+    if result[
+        "unparsed"
+    ]:
+        print(
+            "\nRequirements that could not be checked:"
+        )
+
+        for item in result[
+            "unparsed"
+        ]:
+            print(
+                f"  - {item}"
+            )
+
+    print(
+        "\nInstall/update dependencies with:\n"
+    )
+    print(
+        f'  "{sys.executable}" -m pip install '
+        f'-r "{REQUIREMENTS_FILE}"'
+    )
+    print()
+
+    raise SystemExit(
+        1
+    )
+
+
+# Run dependency validation before importing requests/BeautifulSoup/
+# FuzzyWuzzy/Pillow below.
+_ensure_requirements()
+
+
 import requests
 from bs4 import BeautifulSoup # type: ignore
 from fuzzywuzzy import fuzz # type: ignore
@@ -33,7 +435,7 @@ except ImportError:
     Image = None
 
 APP_NAME = "Playlist Bridge"
-VERSION = "1.3.6"
+VERSION = "1.4"
 
 # Color codes for terminal output
 class Colors:
@@ -112,7 +514,7 @@ def repair_text(value) -> str:
 
     text = str(value)
 
-    suspicious_markers = ("Ã", "Â", "â", "ð", "�")
+    suspicious_markers = ("Ã", "Â", "â", "ð", "Å", "�")
 
     def suspicious_count(candidate: str) -> int:
         return (
@@ -322,6 +724,7 @@ MISSING_FILE = CONFIG_DIR / "missing_tracks.json"
 MATCH_METADATA_FILE = CONFIG_DIR / "match_metadata.json"
 SOURCE_SNAPSHOTS_FILE = CONFIG_DIR / "source_snapshots.json"
 IGNORED_TRACKS_FILE = CONFIG_DIR / "ignored_tracks.json"
+ARTIST_ALIASES_FILE = CONFIG_DIR / "artist_aliases.json"
 
 # Persistent JSON schema version.
 #
@@ -366,6 +769,139 @@ class Config:
             "ignored_tracks",
             {},
         )
+        self.artist_aliases = self._load_artist_aliases()
+        Matcher.set_artist_aliases(
+            self.artist_aliases
+        )
+
+    @staticmethod
+    def _load_artist_aliases(
+        path: Path = None,
+    ) -> dict:
+        """Load the global user-editable artist alias map."""
+        alias_path = (
+            Path(path)
+            if path is not None
+            else ARTIST_ALIASES_FILE
+        )
+
+        if not alias_path.exists():
+            return {}
+
+        try:
+            with open(
+                alias_path,
+                encoding="utf-8",
+            ) as f:
+                raw = json.load(f)
+        except (OSError, ValueError) as e:
+            raise RuntimeError(
+                f"Could not read {alias_path.name}: {e}"
+            ) from e
+
+        if not isinstance(raw, dict):
+            raise RuntimeError(
+                f"{alias_path.name} must contain a JSON object "
+                "mapping Plex artist names to alias lists."
+            )
+
+        cleaned = {}
+        seen_aliases = {}
+
+        for canonical, aliases in raw.items():
+            if not isinstance(canonical, str):
+                raise RuntimeError(
+                    f"{alias_path.name} contains a non-string artist name."
+                )
+
+            canonical_name = repair_text(canonical).strip()
+
+            if not canonical_name:
+                raise RuntimeError(
+                    f"{alias_path.name} contains an empty canonical artist."
+                )
+
+            if isinstance(aliases, str):
+                alias_values = [aliases]
+            elif isinstance(aliases, list):
+                alias_values = aliases
+            else:
+                raise RuntimeError(
+                    f"{alias_path.name}: aliases for '{canonical_name}' "
+                    "must be a string or list of strings."
+                )
+
+            cleaned_aliases = []
+            canonical_norm = canonical_name.casefold()
+
+            for alias in alias_values:
+                if not isinstance(alias, str):
+                    raise RuntimeError(
+                        f"{alias_path.name}: aliases for '{canonical_name}' "
+                        "must contain only strings."
+                    )
+
+                alias_name = repair_text(alias).strip()
+                alias_norm = alias_name.casefold()
+
+                if not alias_name or alias_norm == canonical_norm:
+                    continue
+
+                prior = seen_aliases.get(alias_norm)
+                if prior and prior.casefold() != canonical_norm:
+                    raise RuntimeError(
+                        f"{alias_path.name}: alias '{alias_name}' is assigned "
+                        f"to both '{prior}' and '{canonical_name}'."
+                    )
+
+                seen_aliases[alias_norm] = canonical_name
+
+                if alias_norm not in {
+                    value.casefold()
+                    for value in cleaned_aliases
+                }:
+                    cleaned_aliases.append(alias_name)
+
+            cleaned[canonical_name] = cleaned_aliases
+
+        return cleaned
+
+    def reload_artist_aliases(self):
+        """Reload artist aliases and update the matcher immediately."""
+        self.artist_aliases = self._load_artist_aliases()
+        Matcher.set_artist_aliases(
+            self.artist_aliases
+        )
+
+    def save_artist_aliases(self):
+        """Persist the standalone alias file and reload matcher aliases."""
+        with open(
+            ARTIST_ALIASES_FILE,
+            "w",
+            encoding="utf-8",
+        ) as f:
+            json.dump(
+                self.artist_aliases,
+                f,
+                indent=2,
+                ensure_ascii=False,
+            )
+            f.write("\n")
+
+        self.reload_artist_aliases()
+
+    @staticmethod
+    def _ensure_artist_alias_shell():
+        """Create an empty artist_aliases.json shell without overwriting it."""
+        if ARTIST_ALIASES_FILE.exists():
+            return
+
+        with open(
+            ARTIST_ALIASES_FILE,
+            "w",
+            encoding="utf-8",
+        ) as f:
+            f.write("{}\n")
 
     @staticmethod
     def _state_wrapper(data: dict) -> dict:
@@ -594,6 +1130,37 @@ class Config:
             backup_path,
         )
 
+    def _save_state_only(
+        self,
+        name: str,
+        data: dict,
+    ):
+        """Persist one schema-managed state file without rewriting the rest."""
+        self._backup_before_schema_upgrade(
+            name
+        )
+        path = self.STATE_FILES[name]
+
+        with open(path, "w") as f:
+            json.dump(
+                self._state_wrapper(data),
+                f,
+                indent=2,
+            )
+
+        self._loaded_schema_versions[name] = (
+            STATE_SCHEMA_VERSION
+        )
+        self._migration_needed.discard(name)
+
+    def save_missing_only(self):
+        """Persist missing_tracks.json only."""
+        self._save_state_only(
+            "missing",
+            self.missing,
+        )
+        self._ensure_artist_alias_shell()
+
     def save(self):
         """
         Save all state using the current schema.
@@ -629,6 +1196,8 @@ class Config:
             self._migration_needed.discard(
                 name
             )
+
+        self._ensure_artist_alias_shell()
 
     @staticmethod
     def _get_plex_music_libraries(
@@ -2309,6 +2878,112 @@ class PlexAPI:
             print(f"Error searching library: {e}")
             return []
 
+    def search_artists(
+        self,
+        query: str = "",
+        limit: int = 10,
+    ) -> List[dict]:
+        """Search artists only inside the configured Plex music library."""
+        try:
+            resp = requests.get(
+                f"{self.base_url}/library/sections/"
+                f"{self.music_library_key}/all",
+                headers=self.headers,
+                params={"type": 8},
+                timeout=30,
+            )
+
+            if resp.status_code != 200:
+                print(
+                    "Failed to fetch Plex artists: "
+                    f"{resp.status_code}"
+                )
+                return []
+
+            artists = (
+                resp.json()
+                .get("MediaContainer", {})
+                .get("Metadata", [])
+            )
+
+            unique = {}
+
+            for artist in artists:
+                title = repair_text(
+                    artist.get("title", "")
+                ).strip()
+                rating_key = artist.get(
+                    "ratingKey"
+                )
+
+                if not title:
+                    continue
+
+                key = title.casefold()
+                if key not in unique:
+                    unique[key] = {
+                        "name": title,
+                        "plex_id": (
+                            str(rating_key)
+                            if rating_key is not None
+                            else ""
+                        ),
+                    }
+
+            values = list(unique.values())
+            search = repair_text(query).strip()
+
+            if not search:
+                return sorted(
+                    values,
+                    key=lambda item: item["name"].casefold(),
+                )[:limit]
+
+            search_norm = Matcher._normalize_match_text(
+                search
+            )
+            ranked = []
+
+            for artist in values:
+                artist_norm = Matcher._normalize_match_text(
+                    artist["name"]
+                )
+                score = max(
+                    fuzz.ratio(
+                        search_norm,
+                        artist_norm,
+                    ),
+                    fuzz.token_set_ratio(
+                        search_norm,
+                        artist_norm,
+                    ),
+                )
+                ranked.append(
+                    (score, artist["name"].casefold(), artist)
+                )
+
+            ranked.sort(
+                key=lambda item: (
+                    item[0],
+                    item[1],
+                ),
+                reverse=True,
+            )
+
+            return [
+                {
+                    **item[2],
+                    "score": item[0],
+                }
+                for item in ranked[:limit]
+            ]
+
+        except Exception as e:
+            print(
+                f"Error searching Plex artists: {e}"
+            )
+            return []
+
     def get_audio_playlists(self) -> List[dict]:
         """
         Return every Plex audio playlist visible to this server/token.
@@ -2461,6 +3136,49 @@ class PlexAPI:
         except Exception as e:
             print(f"Error getting playlist items: {e}")
             return []
+
+    def get_playlist_item_count(
+        self,
+        playlist_id: str,
+    ) -> Optional[int]:
+        """Return the current Plex playlist item count, or None on failure."""
+        try:
+            resp = requests.get(
+                f"{self.base_url}/playlists/{playlist_id}/items",
+                headers=self.headers,
+                timeout=15,
+            )
+
+            if resp.status_code != 200:
+                print(
+                    "Failed to get Plex playlist item count: "
+                    f"{resp.status_code}"
+                )
+                return None
+
+            container = resp.json().get(
+                "MediaContainer",
+                {},
+            )
+
+            for field in ("totalSize", "size"):
+                value = container.get(field)
+                if isinstance(value, int):
+                    return value
+                if isinstance(value, str) and value.isdigit():
+                    return int(value)
+
+            items = container.get(
+                "Metadata",
+                [],
+            )
+            return len(items) if isinstance(items, list) else 0
+
+        except Exception as e:
+            print(
+                f"Error getting Plex playlist item count: {e}"
+            )
+            return None
 
     def create_playlist(
         self,
@@ -3207,6 +3925,9 @@ class PlexAPI:
 class Matcher:
     """Track matching logic with title/artist identity + album preference."""
 
+    # Normalized artist -> every normalized name in the same global alias group.
+    ARTIST_ALIAS_LOOKUP = {}
+
     MATCH_THRESHOLD = 90
     PROMPT_THRESHOLD = 70
     MIN_DISPLAY_SCORE = 50
@@ -3220,8 +3941,6 @@ class Matcher:
         "acoustic": 10,
         "demo": 16,
         "session": 14,
-        "deluxe": 7,
-        "remaster": 5,
     }
 
     # Track-title markers that identify a distinct recording/version.
@@ -3274,13 +3993,13 @@ class Matcher:
             r"\s*[\(\[]\s*"
             r"(?:"
             r"feat(?:uring)?\.?|ft\.?|with|"
-            r"remaster(?:ed)?(?:\s+\d{4})?|"
+            r"(?:\d{4}\s+)?remaster(?:ed)?(?:\s+\d{4})?|"
             r"live\b[^)\]]*|"
             r"acoustic|stripped|"
             r"demo\b[^)\]]*|"
             r"(?:itunes\s+)?sessions?\b[^)\]]*|"
             r"[^)\]]+\s+sessions?\b[^)\]]*|"
-            r"radio\s+edit|single\s+edit|edit|"
+            r"radio\s+(?:edit|mix)|single\s+edit|edit|"
             r"remix(?:ed)?|mix|"
             r"[^)\]]+\s+(?:remix|mix)\b[^)\]]*|"
             r"mono|stereo|"
@@ -3298,12 +4017,12 @@ class Matcher:
             r"\s*[-:]\s*"
             r"(?:"
             r"feat(?:uring)?\.?|ft\.?|with|"
-            r"remaster(?:ed)?(?:\s+\d{4})?|"
+            r"(?:\d{4}\s+)?remaster(?:ed)?(?:\s+\d{4})?|"
             r"live(?:\s+(?:at|from|in|on)\b.*)?|"
             r"acoustic|stripped|"
             r"demo\b.*|"
             r"(?:itunes\s+)?sessions?\b.*|"
-            r"radio\s+edit|single\s+edit|edit|"
+            r"radio\s+(?:edit|mix)|single\s+edit|edit|"
             r"remix(?:ed)?|mix|mono|stereo"
             r")\b.*$",
             "",
@@ -3370,6 +4089,30 @@ class Matcher:
         )
 
         scores = [raw_score]
+
+        # Treat common dotted abbreviations as equivalent display styling:
+        #   3 A.M. <-> 3 am
+        #   H.O.V.A. <-> HOVA
+        abbreviation_pattern = re.compile(
+            r"(?<=[a-z])\.(?=(?:[a-z]\.)|(?:\s|$))",
+            flags=re.IGNORECASE,
+        )
+        source_abbrev = abbreviation_pattern.sub(
+            "",
+            source_raw,
+        )
+        plex_abbrev = abbreviation_pattern.sub(
+            "",
+            plex_raw,
+        )
+
+        if source_abbrev and plex_abbrev:
+            scores.append(
+                fuzz.token_sort_ratio(
+                    source_abbrev,
+                    plex_abbrev,
+                )
+            )
 
         source_meta = cls._strip_title_metadata(source_raw)
         plex_meta = cls._strip_title_metadata(plex_raw)
@@ -3476,6 +4219,94 @@ class Matcher:
         )
 
     @classmethod
+    def set_artist_aliases(
+        cls,
+        alias_groups: dict,
+    ):
+        """Configure symmetric global artist alias equivalence groups."""
+        graph = {}
+
+        if not isinstance(alias_groups, dict):
+            cls.ARTIST_ALIAS_LOOKUP = {}
+            return
+
+        for canonical, aliases in alias_groups.items():
+            canonical_norm = cls._normalize_match_text(
+                canonical
+            )
+
+            if not canonical_norm:
+                continue
+
+            if isinstance(aliases, str):
+                alias_values = [aliases]
+            elif isinstance(aliases, list):
+                alias_values = aliases
+            else:
+                continue
+
+            members = {canonical_norm}
+
+            for alias in alias_values:
+                alias_norm = cls._normalize_match_text(alias)
+                if alias_norm:
+                    members.add(alias_norm)
+
+            for member in members:
+                graph.setdefault(member, set()).update(
+                    members - {member}
+                )
+
+        lookup = {}
+        visited = set()
+
+        for start in graph:
+            if start in visited:
+                continue
+
+            stack = [start]
+            component = set()
+
+            while stack:
+                current = stack.pop()
+                if current in component:
+                    continue
+
+                component.add(current)
+                stack.extend(
+                    graph.get(current, set()) - component
+                )
+
+            visited.update(component)
+            ordered = sorted(component)
+
+            for member in component:
+                lookup[member] = ordered
+
+        cls.ARTIST_ALIAS_LOOKUP = lookup
+
+    @classmethod
+    def _expand_artist_aliases(
+        cls,
+        variants: List[str],
+    ) -> List[str]:
+        """Expand normalized artist variants through global aliases."""
+        expanded = []
+
+        for variant in variants:
+            if variant and variant not in expanded:
+                expanded.append(variant)
+
+            for alias in cls.ARTIST_ALIAS_LOOKUP.get(
+                variant,
+                [],
+            ):
+                if alias and alias not in expanded:
+                    expanded.append(alias)
+
+        return expanded
+
+    @classmethod
     def _artist_variants(
         cls,
         artist: str,
@@ -3529,7 +4360,9 @@ class Matcher:
                     if candidate and candidate not in variants:
                         variants.append(candidate)
 
-        return variants
+        return cls._expand_artist_aliases(
+            variants
+        )
 
     @classmethod
     def _artist_score(
@@ -3587,7 +4420,22 @@ class Matcher:
 
         kinds = set()
 
-        # Remix and named "Mix" variants.
+        # Remix and named Mix variants. "Radio Mix" / "Radio Edit" are
+        # intentionally treated as equivalent radio-version metadata, not as
+        # remix intent.
+        remix_value = re.sub(
+            r"[\(\[]\s*radio\s+(?:mix|edit)\s*[\)\]]",
+            " ",
+            value,
+            flags=re.IGNORECASE,
+        )
+        remix_value = re.sub(
+            r"\s[-:]\s*radio\s+(?:mix|edit)\s*$",
+            " ",
+            remix_value,
+            flags=re.IGNORECASE,
+        )
+
         remix_patterns = (
             r"\bremix(?:ed|es)?\b",
             r"\bmixes\b",
@@ -3596,7 +4444,7 @@ class Matcher:
         )
 
         if any(
-            re.search(pattern, value, flags=re.IGNORECASE)
+            re.search(pattern, remix_value, flags=re.IGNORECASE)
             for pattern in remix_patterns
         ):
             kinds.add("remix")
@@ -3641,16 +4489,21 @@ class Matcher:
         ):
             kinds.add("demo")
 
-        # Generic album-era labels such as "(Evolver Sessions)" describe
-        # provenance/outtake context and are not automatically a different
-        # recording. Branded platform sessions are distinct performances.
+        # Distinct session recordings include branded platform sessions and
+        # clear broadcast/studio-performance session labels. Generic album-era
+        # provenance such as "(Evolver Sessions)" is deliberately not enough
+        # on its own to create session intent.
+        session_marker = (
+            r"(?:itunes|apple(?:\s+music)?|spotify|bbc|kexp|npr|"
+            r"peel|maida\s+vale|electro[-\s]?vox)"
+        )
         session_patterns = (
-            r"[\(\[][^)\]]*\b"
-            r"(?:itunes|apple(?:\s+music)?|spotify)\s+"
-            r"(?:home\s+)?sessions?\b[^)\]]*[\)\]]",
-            r"\s[-:]\s*[^-:]*\b"
-            r"(?:itunes|apple(?:\s+music)?|spotify)\s+"
-            r"(?:home\s+)?sessions?\b.*$",
+            rf"[\(\[][^)\]]*\b{session_marker}\b[^)\]]*"
+            r"\bsessions?\b[^)\]]*[\)\]]",
+            rf"\s[-:]\s*[^-:]*\b{session_marker}\b.*"
+            r"\bsessions?\b.*$",
+            r"[\(\[][^)\]]*\b(?:live|acoustic)\s+sessions?\b"
+            r"[^)\]]*[\)\]]",
         )
 
         if any(
@@ -3683,6 +4536,43 @@ class Matcher:
 
         value = re.sub(r"[^a-z0-9]+", " ", value)
         return re.sub(r"\s+", " ", value).strip()
+
+    @classmethod
+    def _source_requires_album_provenance(
+        cls,
+        album: str,
+    ) -> bool:
+        """
+        Return True when the source album name carries recording provenance
+        that should not be silently discarded during automatic matching.
+
+        This is deliberately narrow. Normal studio/edition/compilation album
+        names keep the existing canonical-copy behavior. Archive/rarity
+        collections can contain alternate or otherwise specific recordings,
+        so an unrelated album copy should be reviewed instead of substituted.
+        """
+        value = cls._normalize_album(
+            album
+        )
+
+        if not value:
+            return False
+
+        patterns = (
+            r"\barchive\b",
+            r"\brarities?\b",
+            r"\bb sides?\b",
+            r"\bouttakes?\b",
+        )
+
+        return any(
+            re.search(
+                pattern,
+                value,
+                flags=re.IGNORECASE,
+            )
+            for pattern in patterns
+        )
 
     @staticmethod
     def _album_types(album: str) -> set:
@@ -3743,19 +4633,6 @@ class Matcher:
             r"(?:home\s+)?sessions?\b",
         )
 
-        deluxe_patterns = (
-            r"\bdeluxe\b",
-            r"\bexpanded\b",
-            r"\banniversary\b",
-            r"\bbonus track\b",
-            r"\bspecial edition\b",
-            r"\bcollector'?s edition\b",
-        )
-
-        remaster_patterns = (
-            r"\bremaster(?:ed)?\b",
-            r"\b\d{4} remaster\b",
-        )
 
         if any(re.search(p, value) for p in compilation_patterns):
             kinds.add("compilation")
@@ -3769,10 +4646,6 @@ class Matcher:
             kinds.add("demo")
         if any(re.search(p, value) for p in session_patterns):
             kinds.add("session")
-        if any(re.search(p, value) for p in deluxe_patterns):
-            kinds.add("deluxe")
-        if any(re.search(p, value) for p in remaster_patterns):
-            kinds.add("remaster")
 
         return kinds
 
@@ -3852,6 +4725,24 @@ class Matcher:
                         album_bonus = 4
                     elif album_score >= 85:
                         album_bonus = 2
+
+        source_album_requires_provenance = (
+            cls._source_requires_album_provenance(
+                source_album
+            )
+        )
+        album_provenance_mismatch = False
+        album_provenance_penalty = 0
+
+        if source_album_requires_provenance:
+            album_provenance_mismatch = (
+                album_score is None
+                or album_score < 85
+            )
+
+            if album_provenance_mismatch:
+                album_provenance_penalty = 12
+                album_bonus = 0.0
 
         source_types = cls._album_types(source_album)
         plex_types = cls._album_types(plex_album)
@@ -3953,7 +4844,8 @@ class Matcher:
                 + album_bonus
                 - album_penalty
                 - title_variant_penalty
-                - release_intent_penalty,
+                - release_intent_penalty
+                - album_provenance_penalty,
             ),
         )
 
@@ -3968,6 +4860,11 @@ class Matcher:
             "album_penalty": album_penalty,
             "title_variant_penalty": title_variant_penalty,
             "release_intent_penalty": release_intent_penalty,
+            "album_provenance_penalty": album_provenance_penalty,
+            "album_provenance_mismatch": album_provenance_mismatch,
+            "source_album_requires_provenance": (
+                source_album_requires_provenance
+            ),
             "source_album_types": source_types,
             "plex_album_types": plex_types,
             "source_title_release_types": source_title_types,
@@ -4039,6 +4936,7 @@ class Matcher:
                 item[0]["identity_score"],
                 item[0]["title_score"],
                 item[0]["raw_title_score"],
+                item[0]["album_score"] or 0,
             ),
         )
 
@@ -4060,6 +4958,7 @@ class Matcher:
             best_details["identity_score"] >= cls.MATCH_THRESHOLD
             and best_details["title_score"] >= 75
             and not missing_requested_variant_types
+            and not best_details["album_provenance_mismatch"]
         )
 
         strong_adjusted_match = (
@@ -4067,6 +4966,7 @@ class Matcher:
             and best_details["title_score"] >= 95
             and best_details["artist_score"] >= 70
             and not missing_requested_variant_types
+            and not best_details["album_provenance_mismatch"]
         )
 
         if strong_identity_match or strong_adjusted_match:
@@ -4874,8 +5774,8 @@ class Syncer:
                 if source_added:
                     status_bits.append(
                         colored(
-                            "ADDED",
-                            Colors.BLUE,
+                            "NEW",
+                            Colors.MAGENTA,
                         )
                     )
 
@@ -5054,14 +5954,9 @@ class Syncer:
 
                 status_bits = []
 
-                if is_new_match:
-                    status_bits.append(
-                        colored("NEW", Colors.MAGENTA)
-                    )
-
                 if source_added:
                     status_bits.append(
-                        colored("ADDED", Colors.BLUE)
+                        colored("NEW", Colors.MAGENTA)
                     )
 
                 matched_info = ""
@@ -5164,7 +6059,7 @@ class Syncer:
 
             if source_added:
                 status_bits.append(
-                    colored("ADDED", Colors.BLUE)
+                    colored("NEW", Colors.MAGENTA)
                 )
 
             status_text = (
@@ -5912,6 +6807,139 @@ class Syncer:
 
 
 
+    def audit_playlist_without_sync(
+        self,
+        playlist_entry: dict,
+        write_missing: bool = True,
+    ):
+        """
+        Audit an Auto Sync OFF playlist without changing its Plex playlist.
+
+        The source is fetched, source/Plex counts are compared, and matching
+        is run against the selected Plex music library. Only missing_tracks.json
+        may be refreshed. Mappings, provenance, source snapshots, last_synced,
+        playlist metadata, artwork, and Plex playlist contents are untouched.
+        """
+        source_type = playlist_entry["source"]
+        source_url = Config._normalize_url_input(
+            playlist_entry.get("source_url", "")
+        )
+        playlist_id = Config._extract_id(
+            source_url,
+            source_type,
+        ) or str(
+            playlist_entry.get("source_id", "")
+        ).strip()
+        playlist_name = playlist_entry[
+            "plex_playlist_name"
+        ]
+        plex_playlist_id = playlist_entry[
+            "plex_playlist_id"
+        ]
+
+        print(
+            f"\n→ Auditing '{playlist_name}' "
+            f"({source_display_label(source_type)}) - "
+            f"Auto sync: {auto_sync_display(False)}"
+        )
+
+        if not playlist_id:
+            print("✗ Could not determine source playlist ID")
+            return
+
+        if source_type == "spotify":
+            api = SpotifyAPI()
+        else:
+            api = AppleMusicAPI()
+
+        try:
+            source_tracks, _metadata = api.get_playlist_tracks(
+                source_url,
+                fetch_artwork=False,
+            )
+        except Exception as e:
+            print(f"✗ Failed to fetch source playlist: {e}")
+            return
+
+        plex = self._get_plex()
+        plex_count = plex.get_playlist_item_count(
+            plex_playlist_id
+        )
+        mapping_key = f"{source_type}:{playlist_id}"
+
+        (
+            matched_tracks,
+            unmatched,
+            _playlist_mapping,
+            _plex_library,
+            match_stats,
+        ) = self._match_source_tracks(
+            source_tracks,
+            mapping_key,
+            source_added_indices=set(),
+            record_provenance=False,
+            mark_new_matches=False,
+        )
+
+        self._store_unmatched(
+            mapping_key,
+            unmatched,
+        )
+
+        if write_missing:
+            self.config.save_missing_only()
+
+        print(
+            section_header(
+                "AUTO SYNC OFF - AUDIT SUMMARY"
+            )
+        )
+        print(f"Source tracks:      {len(source_tracks)}")
+        print(
+            "Plex playlist:      "
+            + (
+                str(plex_count)
+                if plex_count is not None
+                else "unknown"
+            )
+        )
+        print(f"Matched in library: {len(matched_tracks)}")
+        print(
+            f"Ignored:            "
+            f"{len(match_stats.get('ignored_tracks', []))}"
+        )
+        print(f"Unresolved:         {len(unmatched)}")
+
+        if plex_count is None:
+            print(
+                "⚠ Could not compare source and Plex playlist counts."
+            )
+        elif plex_count != len(source_tracks):
+            difference = len(source_tracks) - plex_count
+            direction = (
+                f"{difference} fewer"
+                if difference > 0
+                else f"{abs(difference)} more"
+            )
+            print(
+                "⚠ Track count mismatch: Plex has "
+                f"{direction} item"
+                f"{'s' if abs(difference) != 1 else ''} than the source."
+            )
+        else:
+            print(
+                f"✓ Source and Plex counts match ({plex_count})."
+            )
+
+        if write_missing:
+            print(
+                "✓ missing_tracks.json refreshed; Plex playlist left unchanged."
+            )
+        else:
+            print(
+                "✓ Dry-run audit complete; no local state or Plex data changed."
+            )
+
     def sync_all(
         self,
         dry_run: bool = False,
@@ -5945,6 +6973,7 @@ class Syncer:
             )
 
         selected = []
+        audited = 0
 
         for playlist in playlists:
             if (
@@ -5953,28 +6982,27 @@ class Syncer:
                     playlist
                 )
             ):
-                print(
-                    f"Skipping "
-                    f"'{playlist['plex_playlist_name']}' "
-                    "- auto sync disabled"
+                self.audit_playlist_without_sync(
+                    playlist,
+                    write_missing=not dry_run,
                 )
+                audited += 1
                 continue
 
             selected.append(
                 playlist
             )
 
-        if not selected:
-            if respect_auto_sync:
-                print(
-                    "✓ No playlists have automatic sync enabled."
-                )
-            return
-
         for playlist in selected:
             self.sync_playlist(
                 playlist,
                 dry_run=dry_run,
+            )
+
+        if respect_auto_sync and not selected and audited:
+            print(
+                "\n✓ Automatic sync is OFF for all registered playlists; "
+                "diagnostic audits completed."
             )
 
     def developer_menu_interactive(self):
@@ -8022,6 +9050,371 @@ class Syncer:
                         f"{track.get('artist', '')}"
                     )
 
+    def _artist_alias_owner(
+        self,
+        artist_name: str,
+    ) -> Optional[str]:
+        """Return the canonical alias group containing an artist name."""
+        target = Matcher._normalize_match_text(
+            artist_name
+        )
+
+        if not target:
+            return None
+
+        for canonical, aliases in self.config.artist_aliases.items():
+            if Matcher._normalize_match_text(canonical) == target:
+                return canonical
+
+            for alias in aliases:
+                if Matcher._normalize_match_text(alias) == target:
+                    return canonical
+
+        return None
+
+    def _select_plex_artist_interactive(
+        self,
+        initial_query: str,
+    ) -> Optional[str]:
+        """Search the selected Plex library and return one artist name."""
+        plex = self._get_plex()
+        query = repair_text(initial_query).strip()
+
+        while True:
+            entered = input(
+                f"Plex artist search [{query}]: "
+            ).strip()
+
+            if entered:
+                query = repair_text(entered).strip()
+
+            if not query:
+                print("✗ Enter an artist search")
+                continue
+
+            results = plex.search_artists(
+                query,
+                limit=10,
+            )
+
+            if not results:
+                print("✗ No Plex artists found")
+            else:
+                print("\nPlex artist matches:\n")
+
+                for index, artist in enumerate(
+                    results,
+                    1,
+                ):
+                    score = artist.get("score")
+                    score_text = (
+                        f" ({score}%)"
+                        if score is not None
+                        else ""
+                    )
+                    print(
+                        f"[{index}] {artist['name']}"
+                        f"{score_text}"
+                    )
+
+            print("[s] Search again")
+            print("[b] Back")
+            print("[x] Exit")
+
+            choice = input(
+                "\nSelect Plex artist: "
+            ).strip().lower()
+
+            if choice in ("", "b"):
+                return None
+
+            if choice == "x":
+                sys.exit(0)
+
+            if choice == "s":
+                continue
+
+            try:
+                index = int(choice) - 1
+                if not 0 <= index < len(results):
+                    raise ValueError
+            except ValueError:
+                print("✗ Invalid choice")
+                continue
+
+            return results[index]["name"]
+
+    def _add_artist_alias_interactive(
+        self,
+        canonical_artist: str = None,
+    ):
+        """Add one source/alternate artist name to a global Plex artist."""
+        alias = input(
+            "Alternate/source artist name: "
+        ).strip()
+        alias = repair_text(alias).strip()
+
+        if not alias:
+            print("✗ Artist name cannot be empty")
+            return
+
+        existing_owner = self._artist_alias_owner(alias)
+
+        if existing_owner:
+            print(
+                f"✗ '{alias}' is already mapped in "
+                f"the '{existing_owner}' alias group."
+            )
+            return
+
+        canonical = canonical_artist
+
+        if not canonical:
+            canonical = self._select_plex_artist_interactive(
+                alias
+            )
+
+        if not canonical:
+            return
+
+        canonical = repair_text(canonical).strip()
+
+        if (
+            Matcher._normalize_match_text(alias)
+            == Matcher._normalize_match_text(canonical)
+        ):
+            print(
+                "✗ The alias and Plex artist are already the same name."
+            )
+            return
+
+        canonical_owner = self._artist_alias_owner(canonical)
+        if canonical_owner and (
+            Matcher._normalize_match_text(canonical_owner)
+            != Matcher._normalize_match_text(canonical)
+        ):
+            print(
+                f"✗ Plex artist '{canonical}' is currently an alias "
+                f"under '{canonical_owner}'. Remove/remap that entry first."
+            )
+            return
+
+        aliases = self.config.artist_aliases.setdefault(
+            canonical,
+            [],
+        )
+        aliases.append(alias)
+        self.config.save_artist_aliases()
+
+        print(
+            f"✓ Global artist alias saved: "
+            f"{alias} → {canonical}"
+        )
+
+    def _manage_artist_alias_group_interactive(
+        self,
+        canonical: str,
+    ):
+        """Manage aliases assigned to one canonical Plex artist."""
+        while canonical in self.config.artist_aliases:
+            aliases = self.config.artist_aliases.get(
+                canonical,
+                [],
+            )
+
+            print(
+                f"\nPlex artist: {colored(canonical, Colors.GREEN)}\n"
+            )
+
+            if aliases:
+                for index, alias in enumerate(
+                    aliases,
+                    1,
+                ):
+                    print(f"[{index}] {alias}")
+            else:
+                print("  No aliases")
+
+            print("\n[a] Add alias to this Plex artist")
+            print("[r] Remove this alias group")
+            print("[b] Back")
+            print("[x] Exit")
+
+            choice = input(
+                "\nSelect: "
+            ).strip().lower()
+
+            if choice in ("", "b"):
+                return
+
+            if choice == "x":
+                sys.exit(0)
+
+            if choice == "a":
+                self._add_artist_alias_interactive(
+                    canonical
+                )
+                continue
+
+            if choice == "r":
+                confirm = input(
+                    f"Remove all aliases mapped to '{canonical}'? (y/n): "
+                ).strip().lower()
+
+                if confirm in ("y", "yes"):
+                    self.config.artist_aliases.pop(
+                        canonical,
+                        None,
+                    )
+                    self.config.save_artist_aliases()
+                    print("✓ Artist alias group removed")
+                    return
+                continue
+
+            try:
+                index = int(choice) - 1
+                if not 0 <= index < len(aliases):
+                    raise ValueError
+            except ValueError:
+                print("✗ Invalid choice")
+                continue
+
+            alias = aliases[index]
+            print(
+                f"\nAlias: {colored(alias, Colors.CYAN)} "
+                f"→ {colored(canonical, Colors.GREEN)}"
+            )
+            print("[m] Map to a different Plex artist")
+            print("[d] Delete alias")
+            print("[b] Back")
+            print("[x] Exit")
+
+            action = input(
+                "Select: "
+            ).strip().lower()
+
+            if action in ("", "b"):
+                continue
+
+            if action == "x":
+                sys.exit(0)
+
+            if action == "d":
+                del aliases[index]
+                if not aliases:
+                    self.config.artist_aliases.pop(
+                        canonical,
+                        None,
+                    )
+                self.config.save_artist_aliases()
+                print(f"✓ Removed alias: {alias}")
+                if canonical not in self.config.artist_aliases:
+                    return
+                continue
+
+            if action == "m":
+                new_canonical = self._select_plex_artist_interactive(
+                    alias
+                )
+
+                if not new_canonical:
+                    continue
+
+                if (
+                    Matcher._normalize_match_text(new_canonical)
+                    == Matcher._normalize_match_text(canonical)
+                ):
+                    print("✓ Alias is already mapped to that Plex artist")
+                    continue
+
+                owner = self._artist_alias_owner(new_canonical)
+                if owner and (
+                    Matcher._normalize_match_text(owner)
+                    != Matcher._normalize_match_text(new_canonical)
+                ):
+                    print(
+                        f"✗ Plex artist '{new_canonical}' is currently an "
+                        f"alias under '{owner}'. Remove/remap it first."
+                    )
+                    continue
+
+                del aliases[index]
+                if not aliases:
+                    self.config.artist_aliases.pop(
+                        canonical,
+                        None,
+                    )
+
+                self.config.artist_aliases.setdefault(
+                    new_canonical,
+                    [],
+                ).append(alias)
+                self.config.save_artist_aliases()
+                print(
+                    f"✓ Remapped: {alias} → {new_canonical}"
+                )
+                if canonical not in self.config.artist_aliases:
+                    return
+                continue
+
+            print("✗ Invalid choice")
+
+    def manage_artist_aliases_interactive(
+        self,
+    ):
+        """Manage global source-artist aliases mapped to Plex artists."""
+        while True:
+            groups = sorted(
+                self.config.artist_aliases.items(),
+                key=lambda item: item[0].casefold(),
+            )
+
+            print("\nGlobal artist aliases:\n")
+
+            if groups:
+                for index, (canonical, aliases) in enumerate(
+                    groups,
+                    1,
+                ):
+                    alias_text = ", ".join(aliases) or "(none)"
+                    print(
+                        f"[{index}] {colored(canonical, Colors.GREEN)} "
+                        f"← {colored(alias_text, Colors.CYAN)}"
+                    )
+            else:
+                print("  No artist aliases configured")
+
+            print("\n[a] Add alias mapping")
+            print("[b] Back")
+            print("[x] Exit")
+
+            choice = input(
+                "\nSelect: "
+            ).strip().lower()
+
+            if choice in ("", "b"):
+                return
+
+            if choice == "x":
+                sys.exit(0)
+
+            if choice == "a":
+                self._add_artist_alias_interactive()
+                continue
+
+            try:
+                index = int(choice) - 1
+                if not 0 <= index < len(groups):
+                    raise ValueError
+            except ValueError:
+                print("✗ Invalid choice")
+                continue
+
+            canonical = groups[index][0]
+            self._manage_artist_alias_group_interactive(
+                canonical
+            )
+
     def manage_auto_sync_interactive(
         self,
     ):
@@ -8108,6 +9501,7 @@ class Syncer:
             print("[3] Clear automatic matches")
             print("[4] Manage ignored tracks")
             print("[5] Manage auto-sync")
+            print("[6] Manage artist aliases")
             print("[b] Back")
             print("[x] Exit")
 
@@ -8140,6 +9534,10 @@ class Syncer:
 
             if choice == "5":
                 self.manage_auto_sync_interactive()
+                continue
+
+            if choice == "6":
+                self.manage_artist_aliases_interactive()
                 continue
 
             print("✗ Invalid choice")
@@ -8512,73 +9910,216 @@ class Syncer:
         """
         Resolve missing tracks for a specific playlist.
 
-        Always show the top five Plex candidates with scores, even when all
-        candidates are below PROMPT_THRESHOLD. Automatic matching remains
-        conservative; this is only for human review.
+        The overview supports two workflows:
+        - choose a track number to review only that one unresolved item;
+        - choose [t] to start the existing sequential triage flow.
+
+        Single-track review returns to this list afterward and leaves every
+        other unresolved track untouched.
         """
 
         mapping_key = (
             f"{playlist['source']}:{playlist['source_id']}"
         )
 
-        unmatched = list(
+        while True:
+            unmatched = list(
+                self.config.missing.get(
+                    mapping_key,
+                    [],
+                )
+            )
+
+            if not unmatched:
+                print(
+                    "✓ No unmatched tracks"
+                )
+                return
+
+            print(
+                f"\nMissing tracks for "
+                f"'{playlist['plex_playlist_name']}' "
+                f"({len(unmatched)} total):\n"
+            )
+
+            for i, track in enumerate(
+                unmatched,
+                1,
+            ):
+                lost_prefix = ""
+
+                if track.get(
+                    "status"
+                ) == "lost":
+                    lost_prefix = (
+                        f"{colored('LOST', Colors.RED)} "
+                    )
+
+                print(
+                    f"[{i}] "
+                    f"{lost_prefix}"
+                    f"{colored(track['title'], Colors.CYAN)} - "
+                    f"{colored(track['artist'], Colors.GREEN)} "
+                    f"{source_album_display(track)}"
+                )
+
+                if track.get(
+                    "status"
+                ) == "lost":
+                    self._print_previous_lost_match(
+                        track,
+                        indent="    ",
+                    )
+
+            print(
+                "\n[number] Review one track"
+            )
+            print("[t] Start triage")
+            print("[b] Back")
+            print("[x] Exit")
+
+            triage_choice = input(
+                "\nSelect: "
+            ).strip().lower()
+
+            if triage_choice in (
+                "",
+                "b",
+            ):
+                return
+
+            if triage_choice == "x":
+                sys.exit(0)
+
+            if triage_choice == "t":
+                sync_first = input(
+                    "Sync this playlist before reviewing missing tracks? "
+                    "[Y/n]: "
+                ).strip().lower()
+
+                if sync_first not in ("n", "no"):
+                    self.sync_playlist(
+                        playlist
+                    )
+                    mapping_key = (
+                        f"{playlist['source']}:"
+                        f"{playlist['source_id']}"
+                    )
+                    refreshed = self.config.missing.get(
+                        mapping_key,
+                        [],
+                    )
+
+                    if not refreshed:
+                        print(
+                            "✓ Sync refreshed the playlist and there are "
+                            "no unmatched tracks left to triage."
+                        )
+                        return
+
+                    print(
+                        f"✓ Sync complete. {len(refreshed)} unmatched "
+                        "tracks remain for triage."
+                    )
+
+                self._triage_playlist_missing(
+                    playlist,
+                )
+                return
+
+            try:
+                selected_index = (
+                    int(
+                        triage_choice
+                    )
+                    - 1
+                )
+            except ValueError:
+                print(
+                    "✗ Invalid choice"
+                )
+                continue
+
+            if not (
+                0
+                <= selected_index
+                < len(unmatched)
+            ):
+                print(
+                    "✗ Invalid choice"
+                )
+                continue
+
+            self._triage_playlist_missing(
+                playlist,
+                selected_index=selected_index,
+            )
+
+    def _triage_playlist_missing(
+        self,
+        playlist: dict,
+        selected_index: int = None,
+    ):
+        """
+        Run Option 5 matching for either the full unresolved list or one item.
+
+        selected_index=None keeps the existing sequential triage behavior.
+        A numeric selected_index reviews only that item and returns to the
+        missing-track overview when finished.
+        """
+
+        mapping_key = (
+            f"{playlist['source']}:{playlist['source_id']}"
+        )
+
+        all_unmatched = list(
             self.config.missing.get(
                 mapping_key,
                 [],
             )
         )
 
-        if not unmatched:
-            print("✓ No unmatched tracks")
+        if not all_unmatched:
+            print(
+                "✓ No unmatched tracks"
+            )
             return
 
-        # Show the complete list before doing any Plex scan or source refresh.
-        # This lets the user review what is missing and back out immediately.
-        print(
-            f"\nMissing tracks for "
-            f"'{playlist['plex_playlist_name']}' "
-            f"({len(unmatched)} total):\n"
+        single_track_mode = (
+            selected_index is not None
         )
 
-        for i, track in enumerate(unmatched, 1):
-            lost_prefix = ""
-
-            if track.get("status") == "lost":
-                lost_prefix = (
-                    f"{colored('LOST', Colors.RED)} "
+        if single_track_mode:
+            if not (
+                0
+                <= selected_index
+                < len(all_unmatched)
+            ):
+                print(
+                    "✗ Invalid track selection"
                 )
+                return
 
-            print(
-                f"[{i}] "
-                f"{lost_prefix}"
-                f"{colored(track['title'], Colors.CYAN)} - "
-                f"{colored(track['artist'], Colors.GREEN)} "
-                f"{source_album_display(track)}"
+            untouched_before = (
+                all_unmatched[
+                    :selected_index
+                ]
             )
-
-            if track.get("status") == "lost":
-                self._print_previous_lost_match(
-                    track,
-                    indent="    ",
-                )
-
-        print("\n[t] Start triage")
-        print("[b] Back")
-        print("[x] Exit")
-
-        triage_choice = input(
-            "\nSelect: "
-        ).strip().lower()
-
-        if triage_choice in ("", "b"):
-            return
-
-        if triage_choice == "x":
-            sys.exit(0)
-
-        if triage_choice != "t":
-            print("✗ Invalid choice")
-            return
+            untouched_after = (
+                all_unmatched[
+                    selected_index + 1:
+                ]
+            )
+            unmatched = [
+                all_unmatched[
+                    selected_index
+                ]
+            ]
+        else:
+            selected_index = None
+            untouched_before = []
+            untouched_after = []
+            unmatched = all_unmatched
 
         # Count this as a match-fixing attempt only after the user explicitly
         # starts triage. Simply viewing the missing-track list does not update
@@ -8667,12 +10208,21 @@ class Syncer:
                 f"Option 5: {e}"
             )
 
-        print(
-            f"\nResolving {len(unmatched)} "
-            "unmatched tracks:\n"
-        )
+        if single_track_mode:
+            print(
+                "\nReviewing selected unmatched track:\n"
+            )
+        else:
+            print(
+                f"\nResolving {len(unmatched)} "
+                "unmatched tracks:\n"
+            )
 
-        still_unmatched = []
+        # In single-track mode, preserve all untouched unresolved tracks in
+        # their original positions. Only the chosen track is reviewed.
+        still_unmatched = list(
+            untouched_before
+        )
         track_index = 0
 
         while track_index < len(unmatched):
@@ -8710,6 +10260,7 @@ class Syncer:
                     item[2]["title_score"],
                     item[2]["raw_title_score"],
                     item[2]["artist_score"],
+                    item[2]["album_score"] or 0,
                 ),
                 reverse=True,
             )
@@ -8723,8 +10274,19 @@ class Syncer:
                     f"{colored('LOST', Colors.RED)} "
                 )
 
+            display_position = (
+                selected_index + 1
+                if single_track_mode
+                else track_index + 1
+            )
+            display_total = (
+                len(all_unmatched)
+                if single_track_mode
+                else len(unmatched)
+            )
+
             print(
-                f"\n[{track_index + 1}/{len(unmatched)}] "
+                f"\n[{display_position}/{display_total}] "
                 f"{lost_prefix}"
                 f"{colored(track['title'], Colors.CYAN)} - "
                 f"{colored(track['artist'], Colors.GREEN)} "
@@ -8822,14 +10384,32 @@ class Syncer:
             print("  [s] Skip")
             print("  [m] Manual search")
             print("  [i] Ignore permanently")
-            print("  [f] Finish triage & sync now")
+
+            if single_track_mode:
+                print("  [b] Back to missing-track list")
+            else:
+                print("  [f] Finish triage & sync now")
+
             print("  [x] Exit")
 
             choice = input(
                 "  Select: "
             ).strip().lower()
 
-            if choice == "f":
+            if (
+                single_track_mode
+                and choice in ("", "b")
+            ):
+                still_unmatched.append(
+                    track
+                )
+                track_index += 1
+                continue
+
+            if (
+                choice == "f"
+                and not single_track_mode
+            ):
                 # End this triage session without losing our place.
                 # Keep the current track plus everything not yet reviewed.
                 still_unmatched.extend(
@@ -8879,6 +10459,12 @@ class Syncer:
                 still_unmatched.extend(
                     unmatched[track_index:]
                 )
+
+                if single_track_mode:
+                    still_unmatched.extend(
+                        untouched_after
+                    )
+
                 self.config.mapping[mapping_key] = (
                     playlist_mapping
                 )
@@ -9185,6 +10771,11 @@ class Syncer:
 
             track_index += 1
 
+        if single_track_mode:
+            still_unmatched.extend(
+                untouched_after
+            )
+
         self.config.mapping[mapping_key] = (
             playlist_mapping
         )
@@ -9213,6 +10804,13 @@ class Syncer:
                 "✓ All previously unmatched tracks "
                 "have been resolved"
             )
+
+        if single_track_mode:
+            print(
+                "✓ Single-track review complete. "
+                "Returning to the missing-track list."
+            )
+            return
 
         # Offer to immediately rebuild the Plex playlist using the mappings
         # that were just saved in Option 5.
