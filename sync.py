@@ -435,7 +435,7 @@ except ImportError:
     Image = None
 
 APP_NAME = "Playlist Bridge"
-VERSION = "1.4"
+VERSION = "1.4.1"
 
 # Color codes for terminal output
 class Colors:
@@ -10516,9 +10516,6 @@ class Syncer:
                     manual_score = int(
                         round(details["adjusted_score"])
                     )
-
-                    if manual_score < Matcher.MIN_DISPLAY_SCORE:
-                        continue
 
                     manual_candidates.append(
                         (

@@ -27,5 +27,3 @@ venv/
 # Local environment / OS files
 .env
 .DS_Store
-
-artist_aliases.json
