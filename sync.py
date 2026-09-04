@@ -435,7 +435,7 @@ except ImportError:
     Image = None
 
 APP_NAME = "Playlist Bridge"
-VERSION = "1.4.1"
+VERSION = "1.4.2-beta.1"
 
 # Color codes for terminal output
 class Colors:
@@ -9734,7 +9734,8 @@ class Syncer:
 
         Tracks are deduplicated by normalized title + artist. Album is shown
         when available, preferring a non-empty/non-N/A album from any
-        occurrence. The result is sorted by artist, then title.
+        occurrence. Results are sorted by unresolved occurrence count
+        descending, then playlist count descending, then artist/title.
         """
 
         playlists = self.config.config.get(
@@ -9812,6 +9813,8 @@ class Syncer:
         results = list(deduped.values())
         results.sort(
             key=lambda item: (
+                -item["occurrence_count"],
+                -item["playlist_count"],
                 item["artist"].casefold(),
                 item["title"].casefold(),
                 item["album"].casefold(),
