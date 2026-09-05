@@ -435,7 +435,7 @@ except ImportError:
     Image = None
 
 APP_NAME = "Playlist Bridge"
-VERSION = "1.4.1"
+VERSION = "1.4.2-beta.2"
 
 # Color codes for terminal output
 class Colors:
@@ -1530,6 +1530,7 @@ class Config:
             "last_synced": None,
             "last_match_attempt": None,
             "auto_sync": True,
+            "favorite": False,
         }
 
         self.config["playlists"].append(playlist_entry)
@@ -5044,6 +5045,16 @@ class Syncer:
             "auto_sync",
             True,
         ) is not False
+
+    @staticmethod
+    def _playlist_favorite(
+        playlist: dict,
+    ) -> bool:
+        """Missing favorite means OFF for existing playlists."""
+        return playlist.get(
+            "favorite",
+            False,
+        ) is True
 
     @staticmethod
     def _ignored_track_keys(
@@ -9415,6 +9426,81 @@ class Syncer:
                 canonical
             )
 
+    def manage_favorite_playlists_interactive(
+        self,
+    ):
+        """Toggle persistent favorite status for registered playlists."""
+
+        playlists = self.config.config.get(
+            "playlists",
+            [],
+        )
+
+        if not playlists:
+            print("✗ No playlists registered")
+            return
+
+        while True:
+            print("\nFavorite playlists:\n")
+
+            for i, playlist in enumerate(
+                playlists,
+                1,
+            ):
+                favorite = self._playlist_favorite(
+                    playlist
+                )
+                marker = (
+                    colored("★", Colors.YELLOW)
+                    if favorite
+                    else dimmed("☆")
+                )
+
+                print(
+                    f"[{i}] {marker} "
+                    f"{playlist['plex_playlist_name']} "
+                    f"({source_display_label(playlist['source'])})"
+                )
+
+            print("\n[number] Toggle favorite")
+            print("[b] Back")
+            print("[x] Exit")
+
+            choice = input(
+                "\nSelect playlist to toggle: "
+            ).strip().lower()
+
+            if choice in ("", "b"):
+                return
+
+            if choice == "x":
+                sys.exit(0)
+
+            try:
+                index = int(choice) - 1
+                if not 0 <= index < len(playlists):
+                    raise ValueError
+            except ValueError:
+                print("✗ Invalid choice")
+                continue
+
+            playlist = playlists[index]
+            new_state = not self._playlist_favorite(
+                playlist
+            )
+            playlist["favorite"] = new_state
+            self.config.save()
+
+            state = (
+                "favorited"
+                if new_state
+                else "removed from favorites"
+            )
+
+            print(
+                f"✓ '{playlist['plex_playlist_name']}' {state}."
+            )
+
     def manage_auto_sync_interactive(
         self,
     ):
@@ -9502,6 +9588,7 @@ class Syncer:
             print("[4] Manage ignored tracks")
             print("[5] Manage auto-sync")
             print("[6] Manage artist aliases")
+            print("[7] Manage favorite playlists")
             print("[b] Back")
             print("[x] Exit")
 
@@ -9538,6 +9625,10 @@ class Syncer:
 
             if choice == "6":
                 self.manage_artist_aliases_interactive()
+                continue
+
+            if choice == "7":
+                self.manage_favorite_playlists_interactive()
                 continue
 
             print("✗ Invalid choice")
@@ -9694,6 +9785,8 @@ class Syncer:
                 )
 
             print("[a] All missing tracks (deduped)")
+            print("[f] Favorite playlists only")
+            print("[s] Select playlists")
             print("[b] Back")
             print("[x] Exit")
 
@@ -9709,6 +9802,88 @@ class Syncer:
 
             if choice == "a":
                 self.show_all_missing_tracks_deduped()
+                continue
+
+            if choice == "f":
+                favorite_playlists = [
+                    playlist
+                    for _list_idx, playlist, _count
+                    in playlists_with_missing
+                    if self._playlist_favorite(
+                        playlist
+                    )
+                ]
+
+                if not favorite_playlists:
+                    print(
+                        "✗ No favorite playlists currently have "
+                        "unmatched tracks"
+                    )
+                    continue
+
+                self.show_all_missing_tracks_deduped(
+                    playlists=favorite_playlists,
+                    heading="Missing tracks from favorite playlists",
+                )
+                continue
+
+            if choice == "s":
+                print(
+                    "\nSelect playlists with unmatched tracks:\n"
+                )
+
+                for select_idx, (
+                    _list_idx,
+                    playlist,
+                    unmatched_count,
+                ) in enumerate(
+                    playlists_with_missing,
+                    1,
+                ):
+                    favorite_marker = (
+                        colored("★", Colors.YELLOW)
+                        if self._playlist_favorite(
+                            playlist
+                        )
+                        else dimmed("☆")
+                    )
+
+                    print(
+                        f"[{select_idx}] {favorite_marker} "
+                        f"{playlist['plex_playlist_name']} "
+                        f"({source_display_label(playlist['source'])}) "
+                        f"- {unmatched_count} unmatched"
+                    )
+
+                selection = input(
+                    "\nSelect playlists "
+                    "(examples: 1,3,5-7; b = Back): "
+                ).strip().lower()
+
+                if selection in ("", "b"):
+                    continue
+
+                if selection == "x":
+                    sys.exit(0)
+
+                try:
+                    selected_indexes = parse_index_selection(
+                        selection,
+                        len(playlists_with_missing),
+                    )
+                except ValueError:
+                    print("✗ Invalid selection")
+                    continue
+
+                selected_playlists = [
+                    playlists_with_missing[index][1]
+                    for index in selected_indexes
+                ]
+
+                self.show_all_missing_tracks_deduped(
+                    playlists=selected_playlists,
+                    heading="Missing tracks from selected playlists",
+                )
                 continue
 
             try:
@@ -9728,19 +9903,28 @@ class Syncer:
 
             print("✗ Invalid choice")
 
-    def collect_all_missing_tracks_deduped(self):
+    def collect_all_missing_tracks_deduped(
+        self,
+        playlists: List[dict] = None,
+    ):
         """
-        Return a deduplicated list of unresolved tracks across all playlists.
+        Return a deduplicated list of unresolved tracks.
+
+        When playlists is None, all registered playlists are included.
+        Otherwise only the supplied playlist subset contributes occurrences,
+        playlist counts, and playlist names.
 
         Tracks are deduplicated by normalized title + artist. Album is shown
         when available, preferring a non-empty/non-N/A album from any
-        occurrence. The result is sorted by artist, then title.
+        occurrence. Results are sorted by unresolved occurrence count
+        descending, then playlist count descending, then artist/title.
         """
 
-        playlists = self.config.config.get(
-            "playlists",
-            [],
-        )
+        if playlists is None:
+            playlists = self.config.config.get(
+                "playlists",
+                [],
+            )
 
         deduped = {}
 
@@ -9812,6 +9996,8 @@ class Syncer:
         results = list(deduped.values())
         results.sort(
             key=lambda item: (
+                -item["occurrence_count"],
+                -item["playlist_count"],
                 item["artist"].casefold(),
                 item["title"].casefold(),
                 item["album"].casefold(),
@@ -9819,17 +10005,23 @@ class Syncer:
         )
         return results
 
-    def show_all_missing_tracks_deduped(self):
-        """Display all unresolved tracks across all playlists."""
+    def show_all_missing_tracks_deduped(
+        self,
+        playlists: List[dict] = None,
+        heading: str = "All missing tracks across playlists",
+    ):
+        """Display deduplicated unresolved tracks for all or selected playlists."""
 
-        deduped = self.collect_all_missing_tracks_deduped()
+        deduped = self.collect_all_missing_tracks_deduped(
+            playlists=playlists,
+        )
 
         if not deduped:
             print("✓ No unmatched tracks to display")
             return
 
         print(
-            f"\nAll missing tracks across playlists "
+            f"\n{heading} "
             f"({len(deduped)} unique):\n"
         )
 
