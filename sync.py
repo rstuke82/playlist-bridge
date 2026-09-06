@@ -439,7 +439,7 @@ except ImportError:
     Image = None
 
 APP_NAME = "Playlist Bridge"
-VERSION = "1.5.0-beta.1"
+VERSION = "1.5.0-beta.4"
 
 # Color codes for terminal output
 class Colors:
@@ -488,6 +488,18 @@ def auto_sync_display(
 
     label = "● OFF" if symbol else "OFF"
     return colored(label, Colors.RED)
+
+
+
+def playlist_favorite_marker(
+    playlist: dict,
+) -> str:
+    """Return a consistent favorite-star marker for a playlist."""
+    return (
+        colored("★", Colors.YELLOW)
+        if playlist.get("favorite", False) is True
+        else dimmed("☆")
+    )
 
 
 def provenance_display(value: str) -> str:
@@ -7220,6 +7232,109 @@ class Syncer:
             ),
         )
 
+    def sync_favorites(
+        self,
+    ):
+        """
+        Explicitly sync only playlists marked as favorites.
+
+        This is a manual action, so favorite playlists are synced even if
+        Auto Sync is OFF, matching the existing interactive Sync All behavior.
+        """
+        favorites = [
+            playlist
+            for playlist in self.config.config.get(
+                "playlists",
+                [],
+            )
+            if self._playlist_favorite(
+                playlist
+            )
+        ]
+
+        if not favorites:
+            print(
+                "✗ No favorite playlists are configured. "
+                "Use Settings → Manage favorite playlists first."
+            )
+            return
+
+        print(
+            section_header(
+                "SYNCING FAVORITE PLAYLISTS"
+            )
+        )
+        print(
+            f"Found {len(favorites)} favorite playlist"
+            f"{'s' if len(favorites) != 1 else ''}.\n"
+        )
+
+        totals = self._run_stats()
+
+        for playlist in favorites:
+            try:
+                result = self.sync_playlist(
+                    playlist
+                )
+
+                if isinstance(
+                    result,
+                    dict,
+                ):
+                    for key in totals:
+                        totals[key] += int(
+                            result.get(
+                                key,
+                                0,
+                            )
+                            or 0
+                        )
+                else:
+                    totals["errors"] += 1
+
+            except Exception as e:
+                totals["errors"] += 1
+                print(
+                    f"✗ Error processing "
+                    f"'{playlist.get('plex_playlist_name', 'Unknown')}': "
+                    f"{e}"
+                )
+
+        print(
+            section_header(
+                "FAVORITES SYNC SUMMARY"
+            )
+        )
+        print(
+            f"Favorite playlists synced: {totals['synced']}"
+        )
+        print(
+            f"Source additions:          {totals['source_added']}"
+        )
+        print(
+            f"Source removals:           {totals['source_removed']}"
+        )
+        print(
+            f"New automatic matches:     {totals['new_matches']}"
+        )
+        print(
+            f"Recovered LOST:            {totals['recovered_lost']}"
+        )
+        print(
+            f"Newly LOST:                {totals['newly_lost']}"
+        )
+        print(
+            f"Unresolved:                {totals['unresolved']}"
+        )
+        print(
+            f"Ignored:                   {totals['ignored']}"
+        )
+        print(
+            f"Errors:                    {totals['errors']}"
+        )
+
+        return totals
+
     def sync_all(
         self,
         dry_run: bool = False,
@@ -8381,7 +8496,8 @@ class Syncer:
                 )
 
                 print(
-                    f"[{i}] {p['plex_playlist_name']} "
+                    f"[{i}] {playlist_favorite_marker(p)} "
+                    f"{p['plex_playlist_name']} "
                     f"({source_display_label(p['source'])}) "
                     f"- {match_count:>{match_width}} matches | "
                     f"{auto_text} | "
@@ -8881,7 +8997,8 @@ class Syncer:
             )
 
             print(
-                f"[{i}] {playlist['plex_playlist_name']} "
+                f"[{i}] {playlist_favorite_marker(playlist)} "
+                f"{playlist['plex_playlist_name']} "
                 f"({source_display_label(playlist['source'])}) "
                 f"- {match_count} saved matches, "
                 f"{missing_count} unresolved"
@@ -9077,7 +9194,8 @@ class Syncer:
             )
 
             print(
-                f"[{i}] {playlist['plex_playlist_name']} "
+                f"[{i}] {playlist_favorite_marker(playlist)} "
+                f"{playlist['plex_playlist_name']} "
                 f"({source_display_label(playlist['source'])}) "
                 f"- {automatic_text} | "
                 f"{manual_text} | "
@@ -9256,7 +9374,7 @@ class Syncer:
                 1,
             ):
                 print(
-                    f"[{i}] "
+                    f"[{i}] {playlist_favorite_marker(playlist)} "
                     f"{playlist['plex_playlist_name']} "
                     f"({source_display_label(playlist['source'])}) "
                     f"- {len(bucket)} ignored"
@@ -9781,17 +9899,8 @@ class Syncer:
                 playlists,
                 1,
             ):
-                favorite = self._playlist_favorite(
-                    playlist
-                )
-                marker = (
-                    colored("★", Colors.YELLOW)
-                    if favorite
-                    else dimmed("☆")
-                )
-
                 print(
-                    f"[{i}] {marker} "
+                    f"[{i}] {playlist_favorite_marker(playlist)} "
                     f"{playlist['plex_playlist_name']} "
                     f"({source_display_label(playlist['source'])})"
                 )
@@ -9867,7 +9976,7 @@ class Syncer:
                 )
 
                 print(
-                    f"[{i}] "
+                    f"[{i}] {playlist_favorite_marker(playlist)} "
                     f"{playlist['plex_playlist_name']} "
                     f"({source_display_label(playlist['source'])}) "
                     f"- Auto sync: {auto_sync_display(enabled)}"
@@ -10111,7 +10220,7 @@ class Syncer:
                     attempt_text = "Never"
 
                 print(
-                    f"[{display_idx}] "
+                    f"[{display_idx}] {playlist_favorite_marker(playlist)} "
                     f"{playlist['plex_playlist_name']} "
                     f"({source_display_label(playlist['source'])}) "
                     f"- {unmatched_count} unmatched "
@@ -10174,16 +10283,8 @@ class Syncer:
                     playlists_with_missing,
                     1,
                 ):
-                    favorite_marker = (
-                        colored("★", Colors.YELLOW)
-                        if self._playlist_favorite(
-                            playlist
-                        )
-                        else dimmed("☆")
-                    )
-
                     print(
-                        f"[{select_idx}] {favorite_marker} "
+                        f"[{select_idx}] {playlist_favorite_marker(playlist)} "
                         f"{playlist['plex_playlist_name']} "
                         f"({source_display_label(playlist['source'])}) "
                         f"- {unmatched_count} unmatched"
@@ -10773,7 +10874,7 @@ class Syncer:
                     1,
                 ):
                     print(
-                        f"[{i}] "
+                        f"[{i}] {playlist_favorite_marker(playlist)} "
                         f"{playlist['plex_playlist_name']} "
                         f"({source_display_label(playlist['source'])})"
                     )
@@ -11479,11 +11580,25 @@ class Syncer:
 
                 self.sync_playlist(playlist)
 
-                print(
-                    "\n✓ Triage session finished. "
-                    "You can return to Option 5 later "
-                    "to continue the remaining tracks."
+                remaining_after_sync = len(
+                    self.config.missing.get(
+                        mapping_key,
+                        [],
+                    )
                 )
+
+                if remaining_after_sync:
+                    print(
+                        "\n✓ Triage session finished. "
+                        "You can return to Option 5 later "
+                        "to continue the remaining tracks."
+                    )
+                else:
+                    print(
+                        "\n✓ Triage session finished. "
+                        "No unresolved tracks remain."
+                    )
+
                 return
 
             if choice == "x":
@@ -11870,20 +11985,17 @@ def print_menu(
         f"{APP_NAME} v{VERSION} - Spotify/Apple Music to Plex"
     )
     print("=" * 50)
-    print(
-        "[1] Add new Spotify/Apple Music playlist"
-    )
-    print("[2] Sync all playlists")
-    print("[3] Sync specific playlist")
-    print("[4] View registered playlists")
-    print("[5] Resolve missing tracks")
-    print("[6] Edit playlist matches")
-    print("[7] Sync history")
-    print("[8] Remove playlist")
-    print("[9] Settings")
+    print("[1] Add new Spotify/Apple Music playlist")
+    print("[2] Sync playlists")
+    print("[3] View registered playlists")
+    print("[4] Resolve missing tracks")
+    print("[5] Edit playlist matches")
+    print("[6] Sync history")
+    print("[7] Remove playlist")
+    print("[8] Settings")
 
     if dev_mode:
-        print("[10] Developer tools")
+        print("[9] Developer tools")
 
     print("[x] Exit")
     print("=" * 50)
@@ -11908,7 +12020,8 @@ def show_playlists(config: Config):
 
     for i, p in enumerate(playlists, 1):
         print(
-            f"[{i}] {p['plex_playlist_name']}"
+            f"[{i}] {playlist_favorite_marker(p)} "
+            f"{p['plex_playlist_name']}"
         )
         print(
             f"    Source: {source_display_label(p['source'])}"
@@ -11940,6 +12053,10 @@ def show_sync_history(config: Config):
                     "name": p[
                         "plex_playlist_name"
                     ],
+                    "favorite": p.get(
+                        "favorite",
+                        False,
+                    ) is True,
                     "time": datetime.fromisoformat(
                         p["last_synced"]
                     ),
@@ -11960,8 +12077,13 @@ def show_sync_history(config: Config):
     )
 
     for i, h in enumerate(history[:10], 1):
+        history_marker = (
+            colored("★", Colors.YELLOW)
+            if h.get("favorite") is True
+            else dimmed("☆")
+        )
         print(
-            f"{i}. {h['name']} - "
+            f"{i}. {history_marker} {h['name']} - "
             f"{dimmed(h['time'].strftime('%Y-%m-%d %H:%M'))}"
         )
 
@@ -11994,7 +12116,8 @@ def pick_playlist(
 
     for i, p in enumerate(playlists, 1):
         line = (
-            f"[{i}] {p['plex_playlist_name']} "
+            f"[{i}] {playlist_favorite_marker(p)} "
+            f"{p['plex_playlist_name']} "
             f"({source_display_label(p['source'])})"
         )
 
@@ -12058,7 +12181,8 @@ def pick_playlists_to_sync(
         1,
     ):
         print(
-            f"[{i}] {playlist['plex_playlist_name']} "
+            f"[{i}] {playlist_favorite_marker(playlist)} "
+            f"{playlist['plex_playlist_name']} "
             f"({source_display_label(playlist['source'])}) "
             f"- Last sync: "
             f"{dimmed(format_timestamp(playlist.get('last_synced')))} "
@@ -12098,6 +12222,45 @@ def pick_playlists_to_sync(
     ]
 
 
+def sync_playlists_menu(
+    config: Config,
+    syncer: Syncer,
+):
+    """Manual playlist sync submenu."""
+
+    while True:
+        print("\nSync playlists:\n")
+        print("[1] Sync all playlists")
+        print("[2] Sync favorite playlists")
+        print("[3] Sync specific playlist")
+        print("[b] Back")
+        print("[x] Exit")
+
+        choice = input("\nSelect: ").strip().lower()
+
+        if choice in ("", "b"):
+            return
+        if choice == "x":
+            sys.exit(0)
+        if choice == "1":
+            syncer.sync_all()
+            continue
+        if choice == "2":
+            syncer.sync_favorites()
+            continue
+        if choice == "3":
+            selected_playlists = pick_playlists_to_sync(
+                config
+            )
+            for playlist in selected_playlists:
+                syncer.sync_playlist(
+                    playlist
+                )
+            continue
+
+        print("✗ Invalid choice")
+
+
 def interactive_menu(
     dev_mode: bool = False,
 ):
@@ -12131,33 +12294,24 @@ def interactive_menu(
                 print("✗ No URL provided")
 
         elif choice == "2":
-            syncer.sync_all()
-
-        elif choice == "3":
-            selected_playlists = (
-                pick_playlists_to_sync(
-                    config
-                )
+            sync_playlists_menu(
+                config,
+                syncer,
             )
 
-            for playlist in selected_playlists:
-                syncer.sync_playlist(
-                    playlist
-                )
-
-        elif choice == "4":
+        elif choice == "3":
             show_playlists(config)
 
-        elif choice == "5":
+        elif choice == "4":
             syncer.resolve_missing_interactive()
 
-        elif choice == "6":
+        elif choice == "5":
             syncer.edit_playlist_matches()
 
-        elif choice == "7":
+        elif choice == "6":
             show_sync_history(config)
 
-        elif choice == "8":
+        elif choice == "7":
             playlist = pick_playlist(
                 config,
                 "remove",
@@ -12182,10 +12336,10 @@ def interactive_menu(
                     config.remove_playlist(idx)
                     print("✓ Removed")
 
-        elif choice == "9":
+        elif choice == "8":
             syncer.settings_interactive()
 
-        elif choice == "10" and dev_mode:
+        elif choice == "9" and dev_mode:
             syncer.developer_menu_interactive()
 
         elif choice == "x":
