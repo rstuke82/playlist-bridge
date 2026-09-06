@@ -1,7 +1,7 @@
 # Playlist Bridge
 
 **Version:** 2.0.0-beta.1  
-**Build:** 20260906.2
+**Build:** 20260906.4
 
 Playlist Bridge syncs public **Spotify** and **Apple Music** playlists to playlists in your local **Plex music library**.
 

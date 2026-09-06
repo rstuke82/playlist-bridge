@@ -438,6 +438,7 @@ except ImportError:
 
 APP_NAME = "Playlist Bridge"
 VERSION = "2.0.0-beta.1"
+BUILD = "20260906.4"
 
 # Color codes for terminal output
 class Colors:

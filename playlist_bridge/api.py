@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+from collections import Counter
 from pathlib import Path
 from typing import List, Literal, Optional
 
@@ -11,8 +12,9 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+import requests
 
-from . import __version__
+from . import __build__, __version__
 from .legacy import (
     AppleMusicAPI,
     Config,
@@ -53,6 +55,18 @@ class PlaylistUpdateRequest(BaseModel):
     favorite: Optional[bool] = None
     auto_sync: Optional[bool] = None
 
+
+
+
+class PlexDiscoverRequest(BaseModel):
+    url: str
+    token: str = ""
+
+
+class PlexSettingsRequest(BaseModel):
+    url: str
+    token: str = ""
+    music_library_key: str
 
 class MissingCandidateRequest(BaseModel):
     title: str
@@ -126,6 +140,38 @@ def _capture(callable_obj, *args, **kwargs):
     return result, stream.getvalue()
 
 
+def _validated_plex_libraries(url: str, token: str) -> List[dict]:
+    base_url = str(url or "").strip().rstrip("/")
+    plex_token = str(token or "").strip()
+    if not base_url or not plex_token:
+        raise HTTPException(status_code=400, detail="Plex URL and token are required")
+
+    try:
+        response = requests.get(
+            f"{base_url}/identity",
+            headers={"X-Plex-Token": plex_token},
+            timeout=8,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Could not connect to Plex: {exc}") from exc
+
+    if response.status_code != 200:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Plex connection failed (HTTP {response.status_code}). Check the URL and token.",
+        )
+
+    try:
+        libraries = Config._get_plex_music_libraries(base_url, plex_token)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    if not libraries:
+        raise HTTPException(status_code=400, detail="No Plex music libraries were found")
+
+    return libraries
+
+
 @app.get("/api/health")
 def health():
     config = _config()
@@ -140,6 +186,7 @@ def health():
     return {
         "status": "ok",
         "version": __version__,
+        "build": __build__,
         "playlists": len(playlists),
         "favorites": sum(1 for p in playlists if p.get("favorite") is True),
         "unresolved": unresolved,
@@ -310,6 +357,142 @@ def sync_one(playlist_key: str):
         return {"summary": result, "log": log}
 
 
+@app.get("/api/playlists/{playlist_key:path}/health")
+def playlist_health(playlist_key: str):
+    """Read-only source/Plex comparison. This endpoint never syncs or saves state."""
+    config = _config()
+    playlist = next(
+        (p for p in config.config.get("playlists", []) if _playlist_key(p) == playlist_key),
+        None,
+    )
+    if playlist is None:
+        raise HTTPException(status_code=404, detail="Playlist not found")
+
+    try:
+        source_type, source_url, source_api = _source_for_url(playlist.get("source_url", ""))
+        (source_tracks, _metadata), source_log = _capture(
+            source_api.get_playlist_tracks,
+            source_url,
+            fetch_artwork=False,
+        )
+
+        syncer = Syncer(config)
+        plex = syncer._get_plex()
+        plex_library, library_log = _capture(plex.search_library, "")
+        if not plex_library:
+            raise HTTPException(status_code=502, detail="No Plex music tracks were found")
+
+        mapping_key = _playlist_key(playlist)
+        match_result, match_log = _capture(
+            syncer._match_source_tracks,
+            source_tracks,
+            mapping_key,
+            plex_library=plex_library,
+            record_provenance=False,
+            mark_new_matches=False,
+        )
+        matched_ids, unmatched, _mapping, _library, stats = match_result
+
+        plex_playlist_id = str(playlist.get("plex_playlist_id", ""))
+        plex_items, playlist_log = _capture(plex.get_playlist_items, plex_playlist_id)
+        actual_ids = [
+            str(item.get("plex_id"))
+            for item in plex_items
+            if item.get("plex_id") is not None
+        ]
+
+        expected = Counter(str(value) for value in matched_ids)
+        actual = Counter(actual_ids)
+        missing_from_plex = sum((expected - actual).values())
+        extra_in_plex = sum((actual - expected).values())
+
+        source_changes = syncer._source_change_report(mapping_key, source_tracks)
+        source_added = 0 if source_changes.get("baseline") else len(source_changes.get("added", []))
+        source_removed = 0 if source_changes.get("baseline") else len(source_changes.get("removed", []))
+        ignored = len(stats.get("ignored_tracks", []))
+        unresolved = len(unmatched)
+        plex_count = len(actual_ids)
+
+        return {
+            "key": mapping_key,
+            "name": playlist.get("plex_playlist_name", ""),
+            "source": source_type,
+            "source_tracks": len(source_tracks),
+            "plex_playlist_tracks": plex_count,
+            "matched_in_library": len(matched_ids),
+            "unresolved": unresolved,
+            "ignored": ignored,
+            "missing_from_plex_playlist": missing_from_plex,
+            "extra_in_plex_playlist": extra_in_plex,
+            "source_added_since_last_sync": source_added,
+            "source_removed_since_last_sync": source_removed,
+            "healthy": (
+                unresolved == 0
+                and missing_from_plex == 0
+                and extra_in_plex == 0
+                and source_added == 0
+                and source_removed == 0
+            ),
+            "read_only": True,
+            "log": "\n".join(part for part in [source_log, library_log, match_log, playlist_log] if part).strip(),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get("/api/settings/plex")
+def get_plex_settings():
+    config = _config()
+    plex = config.config.get("plex", {})
+    token = str(plex.get("token", ""))
+    return {
+        "url": plex.get("url", ""),
+        "token_configured": bool(token),
+        "token_hint": (f"••••{token[-4:]}" if len(token) >= 4 else ("••••" if token else "")),
+        "music_library_key": str(plex.get("music_library_key", "")),
+        "music_library_name": plex.get("music_library_name", ""),
+    }
+
+
+@app.post("/api/settings/plex/discover")
+def discover_plex_libraries(request: PlexDiscoverRequest):
+    config = _config()
+    existing = config.config.get("plex", {})
+    token = request.token.strip() or str(existing.get("token", "")).strip()
+    libraries = _validated_plex_libraries(request.url, token)
+    return {"libraries": libraries}
+
+
+@app.put("/api/settings/plex")
+def put_plex_settings(request: PlexSettingsRequest):
+    with ProcessLock():
+        config = _config()
+        existing = config.config.get("plex", {})
+        token = request.token.strip() or str(existing.get("token", "")).strip()
+        libraries = _validated_plex_libraries(request.url, token)
+        selected = next((library for library in libraries if library["key"] == str(request.music_library_key)), None)
+        if selected is None:
+            raise HTTPException(status_code=400, detail="Select a valid Plex music library")
+
+        config.config["plex"] = {
+            "url": request.url.strip().rstrip("/"),
+            "token": token,
+            "music_library_key": selected["key"],
+            "music_library_name": selected["name"],
+        }
+        config.save()
+        return {
+            "url": config.config["plex"]["url"],
+            "token_configured": True,
+            "token_hint": f"••••{token[-4:]}" if len(token) >= 4 else "••••",
+            "music_library_key": selected["key"],
+            "music_library_name": selected["name"],
+            "connected": True,
+        }
+
+
 @app.get("/api/missing")
 def missing_tracks(scope: Literal["all", "favorites"] = "all"):
     config = _config()
@@ -372,6 +555,16 @@ def save_missing_match(request: MissingMatchRequest):
             wanted = set(request.playlist_keys)
             playlists = [p for p in playlists if _playlist_key(p) in wanted]
 
+        source_track = {
+            "title": request.title,
+            "artist": request.artist,
+            "album": request.album,
+        }
+        affected_playlists = syncer._playlists_containing_missing_track(
+            source_track,
+            playlists,
+        )
+
         plex = syncer._get_plex()
         selected = next(
             (track for track in plex.search_library("") if str(track.get("plex_id")) == request.plex_id),
@@ -381,15 +574,29 @@ def save_missing_match(request: MissingMatchRequest):
             raise HTTPException(status_code=404, detail="Plex track not found")
 
         affected = syncer._apply_global_missing_match(
-            {
-                "title": request.title,
-                "artist": request.artist,
-                "album": request.album,
-            },
+            source_track,
             selected,
-            playlists,
+            affected_playlists,
         )
-        return {"affected": affected}
+
+        sync_results = []
+        combined_log = []
+        for playlist in affected_playlists:
+            result, log = _capture(syncer.sync_playlist, playlist)
+            sync_results.append({
+                "key": _playlist_key(playlist),
+                "name": playlist.get("plex_playlist_name", ""),
+                "summary": result,
+            })
+            if log:
+                combined_log.append(log)
+
+        return {
+            "affected": affected,
+            "synced_playlists": len(affected_playlists),
+            "playlists": sync_results,
+            "log": "\n".join(combined_log).strip(),
+        }
 
 
 @app.get("/api/settings/notifications")

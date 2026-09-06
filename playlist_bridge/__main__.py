@@ -2,7 +2,7 @@
 
 import sys
 
-from . import __version__
+from . import __build__, __version__
 
 
 def main() -> int:
@@ -14,10 +14,10 @@ def main() -> int:
         return 0
 
     if command in {"version", "--version", "-v"}:
-        print(__version__)
+        print(f"{__version__} (build {__build__})")
         return 0
 
-    print(f"Playlist Bridge {__version__}")
+    print(f"Playlist Bridge {__version__} (build {__build__})")
     print("Usage:")
     print("  python sync.py                 # existing CLI")
     print("  python sync.py --sync-all      # automated CLI sync")

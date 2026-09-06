@@ -12,6 +12,37 @@ export type Playlist = {
   ignored: number
 }
 
+export type PlaylistHealth = {
+  key: string
+  name: string
+  source: string
+  source_tracks: number
+  plex_playlist_tracks: number
+  matched_in_library: number
+  unresolved: number
+  ignored: number
+  missing_from_plex_playlist: number
+  extra_in_plex_playlist: number
+  source_added_since_last_sync: number
+  source_removed_since_last_sync: number
+  healthy: boolean
+  read_only: boolean
+}
+
+export type PlexSettings = {
+  url: string
+  token_configured: boolean
+  token_hint: string
+  music_library_key: string
+  music_library_name: string
+  connected?: boolean
+}
+
+export type PlexLibrary = {
+  key: string
+  name: string
+}
+
 export type MissingTrack = {
   title: string
   artist: string
@@ -51,6 +82,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   health: () => request<any>('/api/health'),
   playlists: () => request<Playlist[]>('/api/playlists'),
+  playlistHealth: (key: string) => request<PlaylistHealth>(`/api/playlists/${encodeURIComponent(key)}/health`),
   updatePlaylist: (key: string, body: Partial<Pick<Playlist, 'favorite' | 'auto_sync'>>) =>
     request<Playlist>(`/api/playlists/${encodeURIComponent(key)}`, {
       method: 'PATCH', body: JSON.stringify(body),
@@ -67,8 +99,17 @@ export const api = {
   candidates: (track: Pick<MissingTrack, 'title' | 'artist' | 'album'>) =>
     request<Candidate[]>('/api/missing/candidates', { method: 'POST', body: JSON.stringify(track) }),
   saveMatch: (track: MissingTrack, plex_id: string) =>
-    request<{ affected: number }>('/api/missing/match', {
+    request<{ affected: number; synced_playlists: number }>('/api/missing/match', {
       method: 'POST',
       body: JSON.stringify({ title: track.title, artist: track.artist, album: track.album || '', plex_id }),
+    }),
+  plexSettings: () => request<PlexSettings>('/api/settings/plex'),
+  discoverPlex: (body: { url: string; token: string }) =>
+    request<{ libraries: PlexLibrary[] }>('/api/settings/plex/discover', {
+      method: 'POST', body: JSON.stringify(body),
+    }),
+  savePlex: (body: { url: string; token: string; music_library_key: string }) =>
+    request<PlexSettings>('/api/settings/plex', {
+      method: 'PUT', body: JSON.stringify(body),
     }),
 }
