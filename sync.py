@@ -439,7 +439,7 @@ except ImportError:
     Image = None
 
 APP_NAME = "Playlist Bridge"
-VERSION = "1.5.0-beta.4"
+VERSION = "1.5.0"
 
 # Color codes for terminal output
 class Colors:
