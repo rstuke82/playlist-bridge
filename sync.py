@@ -12,9 +12,13 @@ import argparse
 import json
 import importlib.metadata as importlib_metadata
 from io import BytesIO
+import fcntl
+import hashlib
+import os
 import re
 import shutil
 import sys
+import tempfile
 from collections import Counter
 import copy
 from datetime import datetime
@@ -435,7 +439,7 @@ except ImportError:
     Image = None
 
 APP_NAME = "Playlist Bridge"
-VERSION = "1.4.2-beta.2"
+VERSION = "1.5.0-beta.1"
 
 # Color codes for terminal output
 class Colors:
@@ -716,6 +720,120 @@ def parse_index_selection(
     return selected
 
 
+
+def _fsync_parent_directory(path: Path):
+    """Best-effort fsync of the containing directory after os.replace()."""
+    try:
+        fd = os.open(str(path.parent), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def _atomic_write_text(path: Path, text: str):
+    """Atomically replace a UTF-8 text file in its destination directory."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = None
+
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=str(path.parent),
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temp_path = Path(handle.name)
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        os.replace(temp_path, path)
+        _fsync_parent_directory(path)
+        temp_path = None
+    finally:
+        if temp_path is not None and temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+
+
+def _atomic_write_json(path: Path, data, *, ensure_ascii: bool = True):
+    """Serialize JSON then atomically replace the destination file."""
+    payload = json.dumps(
+        data,
+        indent=2,
+        ensure_ascii=ensure_ascii,
+    ) + "\n"
+    _atomic_write_text(path, payload)
+
+
+def _process_lock_path() -> Path:
+    """Return a per-working-directory lock path outside the Git checkout."""
+    identity = str(Path.cwd().resolve())
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+    return Path(tempfile.gettempdir()) / f"playlist-bridge-{digest}.lock"
+
+
+class ProcessLock:
+    """
+    Kernel-backed single-process lock.
+
+    The temp lock file may remain after exit, but flock itself is released by
+    the kernel on normal exit, crashes, or SIGKILL, so stale files do not block
+    future Playlist Bridge runs.
+    """
+
+    def __init__(self, path: Path = None):
+        self.path = Path(path) if path is not None else _process_lock_path()
+        self._handle = None
+
+    def __enter__(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._handle = open(self.path, "a+", encoding="utf-8")
+
+        try:
+            fcntl.flock(
+                self._handle.fileno(),
+                fcntl.LOCK_EX | fcntl.LOCK_NB,
+            )
+        except BlockingIOError:
+            self._handle.seek(0)
+            owner = self._handle.read().strip()
+            owner_text = f" (PID {owner})" if owner else ""
+            self._handle.close()
+            self._handle = None
+            raise RuntimeError(
+                "Another Playlist Bridge process is already running"
+                f"{owner_text}. Wait for it to finish first."
+            )
+
+        self._handle.seek(0)
+        self._handle.truncate()
+        self._handle.write(str(os.getpid()))
+        self._handle.flush()
+        os.fsync(self._handle.fileno())
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if self._handle is None:
+            return False
+        try:
+            fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            self._handle.close()
+            self._handle = None
+        return False
+
+
 # Config file locations - stored in project root
 CONFIG_DIR = Path.cwd()
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -874,20 +992,12 @@ class Config:
         )
 
     def save_artist_aliases(self):
-        """Persist the standalone alias file and reload matcher aliases."""
-        with open(
+        """Persist the standalone alias file atomically and reload aliases."""
+        _atomic_write_json(
             ARTIST_ALIASES_FILE,
-            "w",
-            encoding="utf-8",
-        ) as f:
-            json.dump(
-                self.artist_aliases,
-                f,
-                indent=2,
-                ensure_ascii=False,
-            )
-            f.write("\n")
-
+            self.artist_aliases,
+            ensure_ascii=False,
+        )
         self.reload_artist_aliases()
 
     @staticmethod
@@ -1141,12 +1251,10 @@ class Config:
         )
         path = self.STATE_FILES[name]
 
-        with open(path, "w") as f:
-            json.dump(
-                self._state_wrapper(data),
-                f,
-                indent=2,
-            )
+        _atomic_write_json(
+            path,
+            self._state_wrapper(data),
+        )
 
         self._loaded_schema_versions[name] = (
             STATE_SCHEMA_VERSION
@@ -1183,12 +1291,10 @@ class Config:
 
             path = self.STATE_FILES[name]
 
-            with open(path, "w") as f:
-                json.dump(
-                    self._state_wrapper(data),
-                    f,
-                    indent=2,
-                )
+            _atomic_write_json(
+                path,
+                self._state_wrapper(data),
+            )
 
             self._loaded_schema_versions[
                 name
@@ -4425,15 +4531,9 @@ class Matcher:
         # intentionally treated as equivalent radio-version metadata, not as
         # remix intent.
         remix_value = re.sub(
-            r"[\(\[]\s*radio\s+(?:mix|edit)\s*[\)\]]",
+            r"\bradio\s+(?:mix|edit)\b",
             " ",
             value,
-            flags=re.IGNORECASE,
-        )
-        remix_value = re.sub(
-            r"\s[-:]\s*radio\s+(?:mix|edit)\s*$",
-            " ",
-            remix_value,
             flags=re.IGNORECASE,
         )
 
@@ -5035,6 +5135,36 @@ class Syncer:
     def __init__(self, config: Config):
         self.config = config
         self.plex = None
+
+    @staticmethod
+    def _run_stats(
+        *,
+        tested: int = 0,
+        synced: int = 0,
+        audited: int = 0,
+        source_added: int = 0,
+        source_removed: int = 0,
+        new_matches: int = 0,
+        recovered_lost: int = 0,
+        newly_lost: int = 0,
+        unresolved: int = 0,
+        ignored: int = 0,
+        errors: int = 0,
+    ) -> dict:
+        """Return one normalized per-playlist run-summary payload."""
+        return {
+            "tested": tested,
+            "synced": synced,
+            "audited": audited,
+            "source_added": source_added,
+            "source_removed": source_removed,
+            "new_matches": new_matches,
+            "recovered_lost": recovered_lost,
+            "newly_lost": newly_lost,
+            "unresolved": unresolved,
+            "ignored": ignored,
+            "errors": errors,
+        }
 
     @staticmethod
     def _auto_sync_enabled(
@@ -5721,6 +5851,7 @@ class Syncer:
                     {
                         "new_matches": [],
                         "lost_matches": [],
+                        "recovered_lost": [],
                         "stale_mappings": [],
                         "ignored_tracks": [],
                     },
@@ -5742,6 +5873,7 @@ class Syncer:
         unmatched = []
         new_matches = []
         lost_matches = []
+        recovered_lost = []
         stale_mappings = []
         ignored_matches = []
 
@@ -5955,6 +6087,17 @@ class Syncer:
                     str(plex_id)
                 )
 
+                if (
+                    stale_cached_mapping
+                    and stale_provenance == "automatic"
+                ):
+                    recovered_lost.append(
+                        {
+                            "source": dict(track),
+                            "replacement_plex_id": str(plex_id),
+                        }
+                    )
+
                 is_new_match = (
                     mark_new_matches
                     and not was_mapped
@@ -6145,6 +6288,7 @@ class Syncer:
             {
                 "new_matches": new_matches,
                 "lost_matches": lost_matches,
+                "recovered_lost": recovered_lost,
                 "stale_mappings": stale_mappings,
                 "ignored_tracks": ignored_matches,
             },
@@ -6480,7 +6624,9 @@ class Syncer:
                 f"✗ Could not extract playlist ID from stored URL: "
                 f"{source_url}"
             )
-            return
+            return self._run_stats(
+                errors=1,
+            )
 
         canonical_url = Config._canonical_source_url(
             source_url,
@@ -6607,7 +6753,9 @@ class Syncer:
             )
         except Exception as e:
             print(f"✗ Failed to fetch: {e}")
-            return
+            return self._run_stats(
+                errors=1,
+            )
 
         print(
             f"  Found {len(source_tracks)} tracks"
@@ -6694,7 +6842,40 @@ class Syncer:
                 "ignored_tracks.json, schema state, and last sync times "
                 "were also left unchanged."
             )
-            return
+            return self._run_stats(
+                tested=1,
+                source_added=(
+                    0
+                    if source_changes["baseline"]
+                    else len(source_changes["added"])
+                ),
+                source_removed=(
+                    0
+                    if source_changes["baseline"]
+                    else len(source_changes["removed"])
+                ),
+                new_matches=len(
+                    match_stats["new_matches"]
+                ),
+                recovered_lost=len(
+                    match_stats.get(
+                        "recovered_lost",
+                        [],
+                    )
+                ),
+                newly_lost=len(
+                    match_stats["lost_matches"]
+                ),
+                unresolved=len(
+                    unmatched
+                ),
+                ignored=len(
+                    match_stats.get(
+                        "ignored_tracks",
+                        [],
+                    )
+                ),
+            )
 
         self._store_unmatched(
             mapping_key,
@@ -6711,6 +6892,8 @@ class Syncer:
             )
         )
 
+        operation_error = False
+
         if matched_tracks:
             print(
                 "  Clearing existing Plex playlist..."
@@ -6719,6 +6902,7 @@ class Syncer:
             if not plex.clear_playlist(
                 plex_playlist_id
             ):
+                operation_error = True
                 print(
                     "⚠ Some existing playlist items could not "
                     "be removed."
@@ -6743,6 +6927,9 @@ class Syncer:
                 f"✓ Added {added}/{len(matched_tracks)} "
                 "matched tracks"
             )
+
+            if added != len(matched_tracks):
+                operation_error = True
 
         plex.update_playlist_metadata(
             plex_playlist_id,
@@ -6816,6 +7003,47 @@ class Syncer:
 
         print(f"Unresolved:      {len(unmatched)}")
 
+        return self._run_stats(
+            tested=1,
+            synced=1,
+            source_added=(
+                0
+                if source_changes["baseline"]
+                else len(source_changes["added"])
+            ),
+            source_removed=(
+                0
+                if source_changes["baseline"]
+                else len(source_changes["removed"])
+            ),
+            new_matches=len(
+                match_stats["new_matches"]
+            ),
+            recovered_lost=len(
+                match_stats.get(
+                    "recovered_lost",
+                    [],
+                )
+            ),
+            newly_lost=len(
+                match_stats["lost_matches"]
+            ),
+            unresolved=len(
+                unmatched
+            ),
+            ignored=len(
+                match_stats.get(
+                    "ignored_tracks",
+                    [],
+                )
+            ),
+            errors=(
+                1
+                if operation_error
+                else 0
+            ),
+        )
+
 
 
     def audit_playlist_without_sync(
@@ -6856,7 +7084,9 @@ class Syncer:
 
         if not playlist_id:
             print("✗ Could not determine source playlist ID")
-            return
+            return self._run_stats(
+                errors=1,
+            )
 
         if source_type == "spotify":
             api = SpotifyAPI()
@@ -6870,13 +7100,19 @@ class Syncer:
             )
         except Exception as e:
             print(f"✗ Failed to fetch source playlist: {e}")
-            return
+            return self._run_stats(
+                errors=1,
+            )
 
         plex = self._get_plex()
         plex_count = plex.get_playlist_item_count(
             plex_playlist_id
         )
         mapping_key = f"{source_type}:{playlist_id}"
+        source_changes = self._source_change_report(
+            mapping_key,
+            source_tracks,
+        )
 
         (
             matched_tracks,
@@ -6951,26 +7187,54 @@ class Syncer:
                 "✓ Dry-run audit complete; no local state or Plex data changed."
             )
 
+        return self._run_stats(
+            tested=1,
+            audited=1,
+            source_added=(
+                0
+                if source_changes["baseline"]
+                else len(source_changes["added"])
+            ),
+            source_removed=(
+                0
+                if source_changes["baseline"]
+                else len(source_changes["removed"])
+            ),
+            recovered_lost=len(
+                match_stats.get(
+                    "recovered_lost",
+                    [],
+                )
+            ),
+            newly_lost=len(
+                match_stats["lost_matches"]
+            ),
+            unresolved=len(
+                unmatched
+            ),
+            ignored=len(
+                match_stats.get(
+                    "ignored_tracks",
+                    [],
+                )
+            ),
+        )
+
     def sync_all(
         self,
         dry_run: bool = False,
         respect_auto_sync: bool = False,
     ):
-        """
-        Sync registered playlists.
-
-        The interactive "Sync all playlists" command is an explicit manual
-        action and includes every registered playlist. Automated --sync-all
-        passes respect_auto_sync=True so cron skips Auto sync: OFF playlists.
-        """
-
+        """Sync/audit all registered playlists and print one run summary."""
         playlists = self.config.config[
             "playlists"
         ]
 
         if not playlists:
             print("✗ No playlists registered")
-            return
+            return self._run_stats(
+                errors=1,
+            )
 
         if dry_run:
             print(
@@ -6983,38 +7247,108 @@ class Syncer:
                 "but nothing will be changed or saved.\n"
             )
 
-        selected = []
-        audited = 0
+        totals = self._run_stats()
+
+        def add_result(result):
+            if not isinstance(result, dict):
+                totals["errors"] += 1
+                return
+
+            for key in totals:
+                totals[key] += int(
+                    result.get(
+                        key,
+                        0,
+                    )
+                    or 0
+                )
 
         for playlist in playlists:
-            if (
-                respect_auto_sync
-                and not self._auto_sync_enabled(
-                    playlist
-                )
-            ):
-                self.audit_playlist_without_sync(
-                    playlist,
-                    write_missing=not dry_run,
-                )
-                audited += 1
-                continue
+            try:
+                if (
+                    respect_auto_sync
+                    and not self._auto_sync_enabled(
+                        playlist
+                    )
+                ):
+                    add_result(
+                        self.audit_playlist_without_sync(
+                            playlist,
+                            write_missing=not dry_run,
+                        )
+                    )
+                    continue
 
-            selected.append(
-                playlist
+                add_result(
+                    self.sync_playlist(
+                        playlist,
+                        dry_run=dry_run,
+                    )
+                )
+
+            except Exception as e:
+                totals["errors"] += 1
+                print(
+                    f"✗ Error processing "
+                    f"'{playlist.get('plex_playlist_name', 'Unknown')}': "
+                    f"{e}"
+                )
+
+        print(
+            section_header(
+                "SYNC-ALL RUN SUMMARY"
+            )
+        )
+
+        if dry_run:
+            print(
+                f"Playlists tested:        {totals['tested']}"
+            )
+        else:
+            print(
+                f"Playlists synced:        {totals['synced']}"
             )
 
-        for playlist in selected:
-            self.sync_playlist(
-                playlist,
-                dry_run=dry_run,
-            )
+        print(
+            f"Auto-sync OFF audited:   {totals['audited']}"
+        )
+        print(
+            f"Source additions:        {totals['source_added']}"
+        )
+        print(
+            f"Source removals:         {totals['source_removed']}"
+        )
+        print(
+            f"New automatic matches:   {totals['new_matches']}"
+        )
+        print(
+            f"Recovered LOST:          {totals['recovered_lost']}"
+        )
+        print(
+            f"Newly LOST:              {totals['newly_lost']}"
+        )
+        print(
+            f"Unresolved:              {totals['unresolved']}"
+        )
+        print(
+            f"Ignored:                 {totals['ignored']}"
+        )
+        print(
+            f"Errors:                  {totals['errors']}"
+        )
 
-        if respect_auto_sync and not selected and audited:
+        if (
+            respect_auto_sync
+            and totals["synced"] == 0
+            and totals["audited"]
+            and not dry_run
+        ):
             print(
                 "\n✓ Automatic sync is OFF for all registered playlists; "
                 "diagnostic audits completed."
             )
+
+        return totals
 
     def developer_menu_interactive(self):
         """Development/testing tools. Only exposed when -devmode is active."""
@@ -10005,83 +10339,570 @@ class Syncer:
         )
         return results
 
+    @staticmethod
+    def _same_missing_identity(
+        left: dict,
+        right: dict,
+    ) -> bool:
+        """Compare missing tracks using normalized title + artist."""
+        return (
+            repair_text(left.get("title", "")).casefold().strip()
+            == repair_text(right.get("title", "")).casefold().strip()
+            and repair_text(left.get("artist", "")).casefold().strip()
+            == repair_text(right.get("artist", "")).casefold().strip()
+        )
+
+    def _playlists_containing_missing_track(
+        self,
+        track: dict,
+        playlists: List[dict],
+    ) -> List[dict]:
+        """Return included playlists that currently contain this missing track."""
+        result = []
+
+        for playlist in playlists:
+            mapping_key = (
+                f"{playlist['source']}:{playlist['source_id']}"
+            )
+            unresolved = self.config.missing.get(
+                mapping_key,
+                [],
+            )
+
+            if any(
+                self._same_missing_identity(
+                    candidate,
+                    track,
+                )
+                for candidate in unresolved
+            ):
+                result.append(
+                    playlist
+                )
+
+        return result
+
+    def _apply_global_missing_match(
+        self,
+        track: dict,
+        selected_plex_track: dict,
+        playlists: List[dict],
+    ) -> int:
+        """Apply one explicit manual match across selected playlist occurrences."""
+        affected = 0
+        now = datetime.now().isoformat()
+
+        for playlist in playlists:
+            mapping_key = (
+                f"{playlist['source']}:{playlist['source_id']}"
+            )
+            unresolved = list(
+                self.config.missing.get(
+                    mapping_key,
+                    [],
+                )
+            )
+            remaining = []
+            matches = []
+
+            for candidate in unresolved:
+                if self._same_missing_identity(
+                    candidate,
+                    track,
+                ):
+                    matches.append(
+                        candidate
+                    )
+                else:
+                    remaining.append(
+                        candidate
+                    )
+
+            if not matches:
+                continue
+
+            playlist_mapping = self.config.mapping.setdefault(
+                mapping_key,
+                {},
+            )
+
+            plex_id = str(
+                selected_plex_track.get(
+                    "plex_id",
+                    "",
+                )
+            )
+
+            for occurrence in matches:
+                search_key = (
+                    f"{occurrence.get('title', '')}|"
+                    f"{occurrence.get('artist', '')}"
+                )
+                playlist_mapping[
+                    search_key
+                ] = plex_id
+
+                self._set_match_provenance(
+                    mapping_key,
+                    search_key,
+                    "manual",
+                    matched_track=selected_plex_track,
+                    plex_id=plex_id,
+                )
+                affected += 1
+
+            if remaining:
+                self.config.missing[
+                    mapping_key
+                ] = remaining
+            else:
+                self.config.missing.pop(
+                    mapping_key,
+                    None,
+                )
+
+            playlist[
+                "last_match_attempt"
+            ] = now
+
+        if affected:
+            self.config.save()
+
+        return affected
+
+    def _review_global_missing_track(
+        self,
+        track: dict,
+        playlists: List[dict],
+    ):
+        """
+        Review one deduped missing track once, then optionally apply that
+        manual match across every matching unresolved occurrence.
+        """
+        plex = self._get_plex()
+        plex_library = plex.search_library("")
+
+        if not plex_library:
+            print("✗ No Plex music tracks found")
+            return
+
+        candidates = []
+
+        for plex_track in plex_library:
+            details = Matcher.score_candidate(
+                track,
+                plex_track,
+            )
+            score = int(
+                round(
+                    details[
+                        "adjusted_score"
+                    ]
+                )
+            )
+
+            if score >= Matcher.MIN_DISPLAY_SCORE:
+                candidates.append(
+                    (
+                        score,
+                        details["identity_score"],
+                        details,
+                        plex_track,
+                    )
+                )
+
+        candidates.sort(
+            key=lambda item: (
+                item[0],
+                item[1],
+                item[2]["title_score"],
+                item[2]["raw_title_score"],
+                item[2]["artist_score"],
+                item[2]["album_score"] or 0,
+            ),
+            reverse=True,
+        )
+        displayed = candidates[:5]
+
+        while True:
+            print(
+                f"\nReviewing: "
+                f"{colored(track['title'], Colors.CYAN)} - "
+                f"{colored(track['artist'], Colors.GREEN)} "
+                f"{source_album_display(track)}"
+            )
+            print("\n  Best Plex candidates:")
+
+            if displayed:
+                for i, (
+                    score,
+                    identity_score,
+                    _details,
+                    candidate,
+                ) in enumerate(
+                    displayed,
+                    1,
+                ):
+                    album = candidate.get(
+                        "album",
+                        "",
+                    )
+                    album_text = (
+                        f" ({album})"
+                        if album
+                        else ""
+                    )
+                    confidence = (
+                        " [LOW CONFIDENCE]"
+                        if identity_score < Matcher.PROMPT_THRESHOLD
+                        else ""
+                    )
+                    print(
+                        f"  [{i}] "
+                        f"{candidate['title']} - "
+                        f"{candidate['artist']}"
+                        f"{album_text} "
+                        f"({score}%){confidence}"
+                    )
+            else:
+                print(
+                    "      No candidates above the normal display threshold."
+                )
+
+            print("  [m] Manual search")
+            print("  [b] Back")
+            print("  [x] Exit")
+
+            choice = input(
+                "  Select: "
+            ).strip().lower()
+
+            if choice in ("", "b"):
+                return
+
+            if choice == "x":
+                sys.exit(0)
+
+            selected = None
+
+            if choice == "m":
+                manual_choice = input(
+                    "  Search Plex title, artist, or album: "
+                ).strip().casefold()
+
+                if not manual_choice:
+                    continue
+
+                manual_results = []
+
+                for plex_track in plex_library:
+                    haystack = (
+                        f"{plex_track.get('title', '')} "
+                        f"{plex_track.get('artist', '')} "
+                        f"{plex_track.get('album', '')}"
+                    ).casefold()
+
+                    if manual_choice not in haystack:
+                        continue
+
+                    details = Matcher.score_candidate(
+                        track,
+                        plex_track,
+                    )
+                    manual_results.append(
+                        (
+                            int(
+                                round(
+                                    details["adjusted_score"]
+                                )
+                            ),
+                            details["identity_score"],
+                            plex_track,
+                        )
+                    )
+
+                manual_results.sort(
+                    key=lambda item: (
+                        item[0],
+                        item[1],
+                    ),
+                    reverse=True,
+                )
+                manual_results = manual_results[:10]
+
+                if not manual_results:
+                    print(
+                        "  ✗ No Plex matches found for that search"
+                    )
+                    continue
+
+                print("\n  Manual Plex matches:\n")
+
+                for i, (
+                    score,
+                    identity_score,
+                    candidate,
+                ) in enumerate(
+                    manual_results,
+                    1,
+                ):
+                    album = candidate.get("album", "")
+                    album_text = (
+                        f" ({album})"
+                        if album
+                        else ""
+                    )
+                    confidence = (
+                        " [LOW CONFIDENCE]"
+                        if identity_score < Matcher.PROMPT_THRESHOLD
+                        else ""
+                    )
+
+                    print(
+                        f"  [{i}] "
+                        f"{candidate['title']} - "
+                        f"{candidate['artist']}"
+                        f"{album_text} "
+                        f"({score}%){confidence}"
+                    )
+
+                manual_pick = input(
+                    "  Select (b = Back): "
+                ).strip().lower()
+
+                if manual_pick in ("", "b"):
+                    continue
+
+                if manual_pick == "x":
+                    sys.exit(0)
+
+                try:
+                    manual_index = (
+                        int(manual_pick) - 1
+                    )
+                except ValueError:
+                    print("  ✗ Invalid selection")
+                    continue
+
+                if not (
+                    0
+                    <= manual_index
+                    < len(manual_results)
+                ):
+                    print("  ✗ Invalid selection")
+                    continue
+
+                selected = manual_results[
+                    manual_index
+                ][2]
+
+            else:
+                try:
+                    candidate_index = int(
+                        choice
+                    ) - 1
+                except ValueError:
+                    print("  ✗ Invalid selection")
+                    continue
+
+                if not (
+                    0
+                    <= candidate_index
+                    < len(displayed)
+                ):
+                    print("  ✗ Invalid selection")
+                    continue
+
+                selected = displayed[
+                    candidate_index
+                ][3]
+
+            occurrence_playlists = (
+                self._playlists_containing_missing_track(
+                    track,
+                    playlists,
+                )
+            )
+
+            if not occurrence_playlists:
+                print("✓ This track is no longer unresolved.")
+                return
+
+            total_occurrences = 0
+
+            for playlist in occurrence_playlists:
+                mapping_key = (
+                    f"{playlist['source']}:{playlist['source_id']}"
+                )
+                total_occurrences += sum(
+                    1
+                    for unresolved_track
+                    in self.config.missing.get(
+                        mapping_key,
+                        [],
+                    )
+                    if self._same_missing_identity(
+                        unresolved_track,
+                        track,
+                    )
+                )
+
+            print(
+                f"\nSelected Plex match: "
+                f"{selected['title']} - "
+                f"{selected['artist']}"
+            )
+            print(
+                f"This can resolve {total_occurrences} occurrence"
+                f"{'s' if total_occurrences != 1 else ''} "
+                f"across {len(occurrence_playlists)} playlist"
+                f"{'s' if len(occurrence_playlists) != 1 else ''}."
+            )
+
+            apply_all = input(
+                "Apply this match to all of them? [Y/n]: "
+            ).strip().lower()
+
+            target_playlists = occurrence_playlists
+
+            if apply_all in ("n", "no"):
+                print("\nChoose playlist(s) to update:\n")
+
+                for i, playlist in enumerate(
+                    occurrence_playlists,
+                    1,
+                ):
+                    print(
+                        f"[{i}] "
+                        f"{playlist['plex_playlist_name']} "
+                        f"({source_display_label(playlist['source'])})"
+                    )
+
+                selection = input(
+                    "\nSelect playlists "
+                    "(examples: 1,3,5-7; b = Back): "
+                ).strip().lower()
+
+                if selection in ("", "b"):
+                    return
+
+                if selection == "x":
+                    sys.exit(0)
+
+                try:
+                    indexes = parse_index_selection(
+                        selection,
+                        len(occurrence_playlists),
+                    )
+                except ValueError:
+                    print("✗ Invalid selection")
+                    return
+
+                target_playlists = [
+                    occurrence_playlists[
+                        index
+                    ]
+                    for index in indexes
+                ]
+
+            affected = self._apply_global_missing_match(
+                track,
+                selected,
+                target_playlists,
+            )
+
+            print(
+                f"✓ Saved manual match for "
+                f"{affected} unresolved occurrence"
+                f"{'s' if affected != 1 else ''}."
+            )
+            print("  Plex playlists were not synced.")
+            return
+
     def show_all_missing_tracks_deduped(
         self,
         playlists: List[dict] = None,
         heading: str = "All missing tracks across playlists",
     ):
-        """Display deduplicated unresolved tracks for all or selected playlists."""
-
-        deduped = self.collect_all_missing_tracks_deduped(
-            playlists=playlists,
-        )
-
-        if not deduped:
-            print("✓ No unmatched tracks to display")
-            return
-
-        print(
-            f"\n{heading} "
-            f"({len(deduped)} unique):\n"
-        )
-
-        for i, track in enumerate(
-            deduped,
-            1,
-        ):
-            lost_prefix = ""
-
-            if track.get(
-                "lost_occurrence_count",
-                0,
-            ):
-                lost_prefix = (
-                    f"{colored('LOST', Colors.RED)} "
-                )
-
-            print(
-                f"[{i}] "
-                f"{lost_prefix}"
-                f"{colored(track['title'], Colors.CYAN)} - "
-                f"{colored(track['artist'], Colors.GREEN)} "
-                f"{source_album_display(track)}"
+        """Display and optionally resolve deduplicated unresolved tracks."""
+        if playlists is None:
+            playlists = self.config.config.get(
+                "playlists",
+                [],
             )
-
-            playlist_word = (
-                "playlist"
-                if track["playlist_count"] == 1
-                else "playlists"
-            )
-            occurrence_word = (
-                "occurrence"
-                if track["occurrence_count"] == 1
-                else "occurrences"
-            )
-
-            print(
-                f"    Appears in "
-                f"{track['playlist_count']} {playlist_word}, "
-                f"{track['occurrence_count']} unresolved "
-                f"{occurrence_word}"
-            )
-            if track.get(
-                "lost_occurrence_count",
-                0,
-            ):
-                print(
-                    f"    LOST occurrences: "
-                    f"{track['lost_occurrence_count']}"
-                )
-
-            print(
-                f"    Playlists: "
-                f"{', '.join(track['playlists'])}"
-            )
-
-        print("\n[b] Back")
-        print("[x] Exit")
 
         while True:
+            deduped = self.collect_all_missing_tracks_deduped(
+                playlists=playlists,
+            )
+
+            if not deduped:
+                print("✓ No unmatched tracks to display")
+                return
+
+            print(
+                f"\n{heading} "
+                f"({len(deduped)} unique):\n"
+            )
+
+            for i, track in enumerate(
+                deduped,
+                1,
+            ):
+                lost_prefix = ""
+
+                if track.get(
+                    "lost_occurrence_count",
+                    0,
+                ):
+                    lost_prefix = (
+                        f"{colored('LOST', Colors.RED)} "
+                    )
+
+                print(
+                    f"[{i}] "
+                    f"{lost_prefix}"
+                    f"{colored(track['title'], Colors.CYAN)} - "
+                    f"{colored(track['artist'], Colors.GREEN)} "
+                    f"{source_album_display(track)}"
+                )
+
+                playlist_word = (
+                    "playlist"
+                    if track["playlist_count"] == 1
+                    else "playlists"
+                )
+                occurrence_word = (
+                    "occurrence"
+                    if track["occurrence_count"] == 1
+                    else "occurrences"
+                )
+
+                print(
+                    f"    Appears in "
+                    f"{track['playlist_count']} {playlist_word}, "
+                    f"{track['occurrence_count']} unresolved "
+                    f"{occurrence_word}"
+                )
+
+                if track.get(
+                    "lost_occurrence_count",
+                    0,
+                ):
+                    print(
+                        f"    LOST occurrences: "
+                        f"{track['lost_occurrence_count']}"
+                    )
+
+                print(
+                    f"    Playlists: "
+                    f"{', '.join(track['playlists'])}"
+                )
+
+            print("\n[number] Review one deduped track")
+            print("[b] Back")
+            print("[x] Exit")
+
             choice = input(
                 "\nSelect: "
             ).strip().lower()
@@ -10092,7 +10913,26 @@ class Syncer:
             if choice == "x":
                 sys.exit(0)
 
-            print("✗ Invalid choice")
+            try:
+                selected_index = (
+                    int(choice) - 1
+                )
+            except ValueError:
+                print("✗ Invalid choice")
+                continue
+
+            if not (
+                0
+                <= selected_index
+                < len(deduped)
+            ):
+                print("✗ Invalid choice")
+                continue
+
+            self._review_global_missing_track(
+                deduped[selected_index],
+                playlists,
+            )
 
 
     def _resolve_playlist_missing(
@@ -11404,41 +12244,64 @@ def main(argv: Optional[List[str]] = None) -> int:
             "--dry-run must be used with --sync-all"
         )
 
-    if args.sync_all:
-        config = Config()
+    try:
+        with ProcessLock():
+            if args.sync_all:
+                config = Config()
 
-        # --sync-all must remain fully automated. Avoid Config.get_plex()
-        # here because it can launch the interactive Plex setup flow.
-        plex_cfg = config.config.get("plex", {})
+                # --sync-all must remain fully automated. Avoid Config.get_plex()
+                # here because it can launch the interactive Plex setup flow.
+                plex_cfg = config.config.get(
+                    "plex",
+                    {},
+                )
 
-        if not plex_cfg.get("url") or not plex_cfg.get("token"):
-            print(
-                "✗ Plex is not configured. "
-                "Run without arguments and configure Plex first."
+                if (
+                    not plex_cfg.get("url")
+                    or not plex_cfg.get("token")
+                ):
+                    print(
+                        "✗ Plex is not configured. "
+                        "Run without arguments and configure Plex first."
+                    )
+                    return 1
+
+                if not config.ensure_plex_music_library(
+                    interactive=False,
+                    save=not args.dry_run,
+                ):
+                    return 1
+
+                if not config.config.get("playlists"):
+                    print("✗ No playlists registered")
+                    return 1
+
+                syncer = Syncer(config)
+                totals = syncer.sync_all(
+                    dry_run=args.dry_run,
+                    respect_auto_sync=True,
+                )
+
+                if (
+                    isinstance(totals, dict)
+                    and totals.get("errors", 0)
+                ):
+                    return 1
+
+                return 0
+
+            interactive_menu(
+                dev_mode=args.devmode,
             )
-            return 1
+            return 0
 
-        if not config.ensure_plex_music_library(
-            interactive=False,
-            save=not args.dry_run,
+    except RuntimeError as e:
+        if str(e).startswith(
+            "Another Playlist Bridge process"
         ):
+            print(f"✗ {e}")
             return 1
-
-        if not config.config.get("playlists"):
-            print("✗ No playlists registered")
-            return 1
-
-        syncer = Syncer(config)
-        syncer.sync_all(
-            dry_run=args.dry_run,
-            respect_auto_sync=True,
-        )
-        return 0
-
-    interactive_menu(
-        dev_mode=args.devmode,
-    )
-    return 0
+        raise
 
 
 if __name__ == "__main__":
