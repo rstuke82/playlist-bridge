@@ -1,0 +1,12460 @@
+#!/usr/bin/env python3
+"""
+Playlist Bridge - Sync Spotify/Apple Music playlists to Plex
+Public playlist URLs, fuzzy matching, interactive menu
+
+Plex playlist handling uses the Plex server/library URI format and
+creates playlists only after at least one source track has been
+successfully matched to a Plex library track.
+"""
+
+import argparse
+import json
+import importlib.metadata as importlib_metadata
+from io import BytesIO
+import fcntl
+import hashlib
+import os
+import re
+import shutil
+import sys
+import tempfile
+from collections import Counter
+import copy
+from datetime import datetime
+from pathlib import Path
+from typing import Optional, Dict, List, Tuple
+from urllib.parse import urlparse, unquote
+from html import unescape
+
+
+REQUIREMENTS_FILE = (
+    Path(__file__).resolve().parent.parent / "requirements.txt"
+)
+
+
+def _requirement_version_tuple(
+    value: str,
+) -> Tuple[int, ...]:
+    """
+    Convert a normal package version to a comparable numeric tuple.
+
+    Playlist Bridge's requirements currently use simple >= minimum versions,
+    so a lightweight stdlib-only comparison is sufficient during bootstrap.
+    """
+    numbers = re.findall(
+        r"\d+",
+        str(value or ""),
+    )
+
+    if not numbers:
+        return ()
+
+    return tuple(
+        int(number)
+        for number in numbers[:6]
+    )
+
+
+def _version_meets_minimum(
+    installed: str,
+    minimum: str,
+) -> bool:
+    """Return whether an installed version satisfies a >= minimum."""
+    installed_parts = list(
+        _requirement_version_tuple(
+            installed
+        )
+    )
+    minimum_parts = list(
+        _requirement_version_tuple(
+            minimum
+        )
+    )
+
+    if (
+        not installed_parts
+        or not minimum_parts
+    ):
+        return True
+
+    width = max(
+        len(installed_parts),
+        len(minimum_parts),
+    )
+
+    installed_parts.extend(
+        [0]
+        * (
+            width
+            - len(installed_parts)
+        )
+    )
+    minimum_parts.extend(
+        [0]
+        * (
+            width
+            - len(minimum_parts)
+        )
+    )
+
+    return tuple(
+        installed_parts
+    ) >= tuple(
+        minimum_parts
+    )
+
+
+def _parse_requirements_file(
+    requirements_path: Path,
+) -> List[dict]:
+    """Parse Playlist Bridge requirements.txt entries."""
+    requirements = []
+
+    for raw_line in requirements_path.read_text(
+        encoding="utf-8"
+    ).splitlines():
+        line = raw_line.split(
+            "#",
+            1,
+        )[0].strip()
+
+        if not line:
+            continue
+
+        if line.startswith("-"):
+            continue
+
+        line = line.split(
+            ";",
+            1,
+        )[0].strip()
+
+        match = re.fullmatch(
+            r"([A-Za-z0-9_.-]+)"
+            r"(?:\[[^\]]+\])?"
+            r"\s*"
+            r"(?:(>=|==|<=|>|<|~=)\s*([^\s]+))?",
+            line,
+        )
+
+        if not match:
+            requirements.append(
+                {
+                    "name": line,
+                    "operator": "",
+                    "version": "",
+                    "parse_error": True,
+                }
+            )
+            continue
+
+        requirements.append(
+            {
+                "name": match.group(1),
+                "operator": (
+                    match.group(2)
+                    or ""
+                ),
+                "version": (
+                    match.group(3)
+                    or ""
+                ),
+                "parse_error": False,
+            }
+        )
+
+    return requirements
+
+
+def _check_requirements(
+    requirements_path: Path = None,
+    version_lookup=None,
+) -> dict:
+    """
+    Check requirements.txt before importing third-party packages.
+
+    This uses importlib.metadata from the Python standard library, allowing
+    Playlist Bridge to report all missing/outdated dependencies at once.
+    """
+    path = (
+        Path(requirements_path)
+        if requirements_path is not None
+        else REQUIREMENTS_FILE
+    )
+
+    if version_lookup is None:
+        version_lookup = (
+            importlib_metadata.version
+        )
+
+    result = {
+        "ok": False,
+        "requirements_file": str(
+            path
+        ),
+        "file_missing": False,
+        "missing": [],
+        "outdated": [],
+        "unparsed": [],
+        "checked": [],
+    }
+
+    if not path.is_file():
+        result[
+            "file_missing"
+        ] = True
+        return result
+
+    try:
+        requirements = (
+            _parse_requirements_file(
+                path
+            )
+        )
+    except (
+        OSError,
+        UnicodeError,
+    ):
+        result[
+            "file_missing"
+        ] = True
+        return result
+
+    for requirement in requirements:
+        if requirement[
+            "parse_error"
+        ]:
+            result[
+                "unparsed"
+            ].append(
+                requirement["name"]
+            )
+            continue
+
+        name = requirement[
+            "name"
+        ]
+
+        try:
+            installed = str(
+                version_lookup(
+                    name
+                )
+            )
+        except (
+            importlib_metadata.PackageNotFoundError,
+            KeyError,
+        ):
+            result[
+                "missing"
+            ].append(
+                {
+                    "name": name,
+                    "required": (
+                        f"{requirement['operator']}"
+                        f"{requirement['version']}"
+                    ),
+                }
+            )
+            continue
+        except Exception:
+            result[
+                "missing"
+            ].append(
+                {
+                    "name": name,
+                    "required": (
+                        f"{requirement['operator']}"
+                        f"{requirement['version']}"
+                    ),
+                }
+            )
+            continue
+
+        result[
+            "checked"
+        ].append(
+            {
+                "name": name,
+                "installed": installed,
+                "required": (
+                    f"{requirement['operator']}"
+                    f"{requirement['version']}"
+                ),
+            }
+        )
+
+        operator = requirement[
+            "operator"
+        ]
+        required_version = requirement[
+            "version"
+        ]
+
+        if (
+            operator == ">="
+            and required_version
+            and not _version_meets_minimum(
+                installed,
+                required_version,
+            )
+        ):
+            result[
+                "outdated"
+            ].append(
+                {
+                    "name": name,
+                    "installed": installed,
+                    "required": (
+                        f">={required_version}"
+                    ),
+                }
+            )
+
+    result["ok"] = not (
+        result[
+            "file_missing"
+        ]
+        or result[
+            "missing"
+        ]
+        or result[
+            "outdated"
+        ]
+        or result[
+            "unparsed"
+        ]
+    )
+
+    return result
+
+
+def _ensure_requirements():
+    """Stop startup with install instructions when requirements fail."""
+    result = (
+        _check_requirements()
+    )
+
+    if result["ok"]:
+        return
+
+    print(
+        "\n✗ Playlist Bridge cannot start because "
+        "its Python requirements are not satisfied."
+    )
+
+    if result[
+        "file_missing"
+    ]:
+        print(
+            f"\n  requirements.txt was not found at:\n"
+            f"  {result['requirements_file']}"
+        )
+        print(
+            "\n  Restore requirements.txt next to sync.py "
+            "and try again."
+        )
+        raise SystemExit(
+            1
+        )
+
+    if result[
+        "missing"
+    ]:
+        print(
+            "\nMissing packages:"
+        )
+
+        for item in result[
+            "missing"
+        ]:
+            print(
+                f"  - "
+                f"{item['name']}"
+                f"{item['required']}"
+            )
+
+    if result[
+        "outdated"
+    ]:
+        print(
+            "\nPackages that need to be upgraded:"
+        )
+
+        for item in result[
+            "outdated"
+        ]:
+            print(
+                f"  - "
+                f"{item['name']} "
+                f"{item['installed']} "
+                f"(requires "
+                f"{item['required']})"
+            )
+
+    if result[
+        "unparsed"
+    ]:
+        print(
+            "\nRequirements that could not be checked:"
+        )
+
+        for item in result[
+            "unparsed"
+        ]:
+            print(
+                f"  - {item}"
+            )
+
+    print(
+        "\nInstall/update dependencies with:\n"
+    )
+    print(
+        f'  "{sys.executable}" -m pip install '
+        f'-r "{REQUIREMENTS_FILE}"'
+    )
+    print()
+
+    raise SystemExit(
+        1
+    )
+
+
+# Run dependency validation before importing requests/BeautifulSoup/
+# FuzzyWuzzy/Pillow below.
+_ensure_requirements()
+
+
+import requests
+from bs4 import BeautifulSoup # type: ignore
+from fuzzywuzzy import fuzz # type: ignore
+from fuzzywuzzy import process # type: ignore
+
+try:
+    from PIL import Image # type: ignore
+except ImportError:
+    Image = None
+
+APP_NAME = "Playlist Bridge"
+VERSION = "2.0.0-beta.1"
+
+# Color codes for terminal output
+class Colors:
+    RESET = '\033[0m'
+    BOLD = '\033[1m'
+    DIM = '\033[2m'
+    RED = '\033[91m'
+    GREEN = '\033[92m'
+    CYAN = '\033[96m'
+    YELLOW = '\033[93m'
+    MAGENTA = '\033[95m'
+    BLUE = '\033[94m'
+    WHITE = '\033[97m'
+
+    # Brand-appropriate 24-bit terminal colors.
+    SPOTIFY = '\033[38;2;29;185;84m'       # #1DB954
+    APPLE_MUSIC = '\033[38;2;250;45;72m'   # #FA2D48
+
+
+def colored(text: str, color: str) -> str:
+    """Add color/style to text for terminal output."""
+    return f"{color}{text}{Colors.RESET}"
+
+
+def dimmed(text) -> str:
+    """Render secondary terminal metadata with lower visual emphasis."""
+    return colored(str(text), Colors.DIM)
+
+
+def section_header(title: str) -> str:
+    """Return one consistent lightweight section divider."""
+    rule = colored("─" * 50, Colors.DIM)
+    heading = colored(title, Colors.BOLD + Colors.CYAN)
+    return f"\n{rule}\n{heading}\n{rule}"
+
+
+def auto_sync_display(
+    enabled: bool,
+    *,
+    symbol: bool = False,
+) -> str:
+    """Color automatic-sync state consistently."""
+    if enabled:
+        label = "● ON" if symbol else "ON"
+        return colored(label, Colors.GREEN)
+
+    label = "● OFF" if symbol else "OFF"
+    return colored(label, Colors.RED)
+
+
+
+def playlist_favorite_marker(
+    playlist: dict,
+) -> str:
+    """Return a consistent favorite-star marker for a playlist."""
+    return (
+        colored("★", Colors.YELLOW)
+        if playlist.get("favorite", False) is True
+        else dimmed("☆")
+    )
+
+
+def provenance_display(value: str) -> str:
+    """Color automatic/manual/legacy provenance consistently."""
+    normalized = str(value or "legacy").strip().lower()
+    colors = {
+        "automatic": Colors.GREEN,
+        "manual": Colors.CYAN,
+        "legacy": Colors.YELLOW,
+    }
+    return colored(
+        normalized,
+        colors.get(normalized, Colors.WHITE),
+    )
+
+
+def repair_text(value) -> str:
+    """
+    Repair common UTF-8 text that was accidentally decoded as Latin-1.
+
+    Example:
+        We Didnât -> We Didn’t
+
+    Already-correct Unicode is left unchanged.
+    """
+    if value is None:
+        return ""
+
+    text = str(value)
+
+    suspicious_markers = ("Ã", "Â", "â", "ð", "Å", "�")
+
+    def suspicious_count(candidate: str) -> int:
+        return (
+            sum(candidate.count(marker) for marker in suspicious_markers)
+            + sum(1 for ch in candidate if 0x80 <= ord(ch) <= 0x9F)
+        )
+
+    # Two passes also repairs common double-encoded strings.
+    for _ in range(2):
+        before = suspicious_count(text)
+
+        if before == 0:
+            break
+
+        best = text
+        best_count = before
+
+        for encoding in ("latin-1", "cp1252"):
+            try:
+                candidate = text.encode(encoding).decode("utf-8")
+            except (UnicodeEncodeError, UnicodeDecodeError):
+                continue
+
+            candidate_count = suspicious_count(candidate)
+
+            if candidate_count < best_count:
+                best = candidate
+                best_count = candidate_count
+
+        if best == text:
+            break
+
+        text = best
+
+    return text
+
+
+def clean_playlist_description(value) -> str:
+    """
+    Return a meaningful playlist description, or an empty string.
+
+    Spotify/Apple Music public metadata sometimes exposes a generated label
+    such as:
+        Playlist · 86 Songs
+    rather than a user-authored description. Plex already knows the object is
+    a playlist and shows its item count, so those generated descriptions add
+    no useful information and are suppressed.
+
+    Genuine source descriptions are preserved.
+    """
+    text = repair_text(value).strip()
+
+    if not text:
+        return ""
+
+    # Common generated descriptions from public playlist metadata.
+    # Allow an optional trailing duration/metadata segment, e.g.
+    # "Playlist · 86 Songs · 5 hr 12 min".
+    generic_patterns = (
+        r"^playlist\s*[·•]\s*\d+\s+songs?"
+        r"(?:\s*[·•]\s*.*)?$",
+        r"^\d+\s+songs?$",
+    )
+
+    if any(
+        re.fullmatch(
+            pattern,
+            text,
+            flags=re.IGNORECASE,
+        )
+        for pattern in generic_patterns
+    ):
+        return ""
+
+    return text
+
+
+def source_display_name(source_type: str) -> str:
+    """Return one consistent uncolored user-facing service name."""
+    names = {
+        "spotify": "Spotify",
+        "applemusic": "Apple Music",
+    }
+    value = str(source_type or "").lower()
+    return names.get(value, str(source_type or "").title())
+
+
+def source_display_label(source_type: str) -> str:
+    """Return a brand-colored service label for terminal display."""
+    value = str(source_type or "").lower()
+    name = source_display_name(source_type)
+
+    if value == "spotify":
+        return colored(name, Colors.SPOTIFY)
+
+    if value == "applemusic":
+        return colored(name, Colors.APPLE_MUSIC)
+
+    return name
+
+
+def source_album_display(track: dict) -> str:
+    """Return source album as subdued secondary match metadata."""
+    album = repair_text(track.get("album", "") or "").strip()
+
+    if album:
+        return colored(
+            f"({album})",
+            Colors.DIM + Colors.YELLOW,
+        )
+
+    return dimmed("(N/A)")
+
+
+def parse_timestamp(value):
+    """Parse an ISO timestamp, returning None for empty/invalid values."""
+    if not value:
+        return None
+
+    try:
+        return datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def format_timestamp(value) -> str:
+    """Format a stored timestamp for terminal display."""
+    parsed = parse_timestamp(value)
+
+    if parsed is None:
+        return "Never"
+
+    return parsed.strftime("%Y-%m-%d %H:%M")
+
+
+def oldest_timestamp_sort_key(item: dict, field: str):
+    """Sort Never/invalid first, followed by oldest valid timestamp."""
+    parsed = parse_timestamp(item.get(field))
+
+    if parsed is None:
+        return (0, datetime.min)
+
+    return (1, parsed)
+
+
+def parse_index_selection(
+    value: str,
+    max_index: int,
+) -> List[int]:
+    """
+    Parse comma-separated menu selections and simple ranges.
+
+    Examples:
+        1,3,5
+        1-3,7
+    """
+    selected = []
+
+    for part in str(value).split(","):
+        token = part.strip()
+
+        if not token:
+            continue
+
+        values = []
+
+        if "-" in token:
+            pieces = token.split("-", 1)
+
+            try:
+                start = int(pieces[0])
+                end = int(pieces[1])
+            except ValueError:
+                raise ValueError("Invalid selection")
+
+            if start > end:
+                start, end = end, start
+
+            values = list(
+                range(start, end + 1)
+            )
+        else:
+            try:
+                values = [int(token)]
+            except ValueError:
+                raise ValueError("Invalid selection")
+
+        for number in values:
+            if not 1 <= number <= max_index:
+                raise ValueError("Selection out of range")
+
+            index = number - 1
+            if index not in selected:
+                selected.append(index)
+
+    if not selected:
+        raise ValueError("No selection")
+
+    return selected
+
+
+
+def _fsync_parent_directory(path: Path):
+    """Best-effort fsync of the containing directory after os.replace()."""
+    try:
+        fd = os.open(str(path.parent), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def _atomic_write_text(path: Path, text: str):
+    """Atomically replace a UTF-8 text file in its destination directory."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = None
+
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=str(path.parent),
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temp_path = Path(handle.name)
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        os.replace(temp_path, path)
+        _fsync_parent_directory(path)
+        temp_path = None
+    finally:
+        if temp_path is not None and temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+
+
+def _atomic_write_json(path: Path, data, *, ensure_ascii: bool = True):
+    """Serialize JSON then atomically replace the destination file."""
+    payload = json.dumps(
+        data,
+        indent=2,
+        ensure_ascii=ensure_ascii,
+    ) + "\n"
+    _atomic_write_text(path, payload)
+
+
+def _process_lock_path() -> Path:
+    """Return a per-working-directory lock path outside the Git checkout."""
+    identity = str(Path.cwd().resolve())
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+    return Path(tempfile.gettempdir()) / f"playlist-bridge-{digest}.lock"
+
+
+class ProcessLock:
+    """
+    Kernel-backed single-process lock.
+
+    The temp lock file may remain after exit, but flock itself is released by
+    the kernel on normal exit, crashes, or SIGKILL, so stale files do not block
+    future Playlist Bridge runs.
+    """
+
+    def __init__(self, path: Path = None):
+        self.path = Path(path) if path is not None else _process_lock_path()
+        self._handle = None
+
+    def __enter__(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._handle = open(self.path, "a+", encoding="utf-8")
+
+        try:
+            fcntl.flock(
+                self._handle.fileno(),
+                fcntl.LOCK_EX | fcntl.LOCK_NB,
+            )
+        except BlockingIOError:
+            self._handle.seek(0)
+            owner = self._handle.read().strip()
+            owner_text = f" (PID {owner})" if owner else ""
+            self._handle.close()
+            self._handle = None
+            raise RuntimeError(
+                "Another Playlist Bridge process is already running"
+                f"{owner_text}. Wait for it to finish first."
+            )
+
+        self._handle.seek(0)
+        self._handle.truncate()
+        self._handle.write(str(os.getpid()))
+        self._handle.flush()
+        os.fsync(self._handle.fileno())
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if self._handle is None:
+            return False
+        try:
+            fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            self._handle.close()
+            self._handle = None
+        return False
+
+
+# Config file locations - stored in project root
+CONFIG_DIR = Path.cwd()
+CONFIG_FILE = CONFIG_DIR / "config.json"
+MAPPING_FILE = CONFIG_DIR / "mapping.json"
+MISSING_FILE = CONFIG_DIR / "missing_tracks.json"
+MATCH_METADATA_FILE = CONFIG_DIR / "match_metadata.json"
+SOURCE_SNAPSHOTS_FILE = CONFIG_DIR / "source_snapshots.json"
+IGNORED_TRACKS_FILE = CONFIG_DIR / "ignored_tracks.json"
+ARTIST_ALIASES_FILE = CONFIG_DIR / "artist_aliases.json"
+
+# Persistent JSON schema version.
+#
+# This is intentionally independent from Playlist Bridge's app VERSION.
+# Increment only when the on-disk JSON structure changes.
+STATE_SCHEMA_VERSION = 2
+
+# Requested square Apple Music playlist artwork size for Plex.
+APPLE_ARTWORK_SIZE = 3000
+
+
+class Config:
+    """Handle configuration file management"""
+
+    STATE_FILES = {
+        "config": CONFIG_FILE,
+        "mapping": MAPPING_FILE,
+        "missing": MISSING_FILE,
+        "match_metadata": MATCH_METADATA_FILE,
+        "source_snapshots": SOURCE_SNAPSHOTS_FILE,
+        "ignored_tracks": IGNORED_TRACKS_FILE,
+    }
+
+    def __init__(self):
+        CONFIG_DIR.mkdir(exist_ok=True)
+
+        self._loaded_schema_versions = {}
+        self._migration_needed = set()
+
+        self.config = self._load_config()
+        self.mapping = self._load_mapping()
+        self.missing = self._load_missing()
+        self.match_metadata = self._load_state_dict(
+            "match_metadata",
+            {},
+        )
+        self.source_snapshots = self._load_state_dict(
+            "source_snapshots",
+            {},
+        )
+        self.ignored_tracks = self._load_state_dict(
+            "ignored_tracks",
+            {},
+        )
+        self.artist_aliases = self._load_artist_aliases()
+        Matcher.set_artist_aliases(
+            self.artist_aliases
+        )
+
+    @staticmethod
+    def _load_artist_aliases(
+        path: Path = None,
+    ) -> dict:
+        """Load the global user-editable artist alias map."""
+        alias_path = (
+            Path(path)
+            if path is not None
+            else ARTIST_ALIASES_FILE
+        )
+
+        if not alias_path.exists():
+            return {}
+
+        try:
+            with open(
+                alias_path,
+                encoding="utf-8",
+            ) as f:
+                raw = json.load(f)
+        except (OSError, ValueError) as e:
+            raise RuntimeError(
+                f"Could not read {alias_path.name}: {e}"
+            ) from e
+
+        if not isinstance(raw, dict):
+            raise RuntimeError(
+                f"{alias_path.name} must contain a JSON object "
+                "mapping Plex artist names to alias lists."
+            )
+
+        cleaned = {}
+        seen_aliases = {}
+
+        for canonical, aliases in raw.items():
+            if not isinstance(canonical, str):
+                raise RuntimeError(
+                    f"{alias_path.name} contains a non-string artist name."
+                )
+
+            canonical_name = repair_text(canonical).strip()
+
+            if not canonical_name:
+                raise RuntimeError(
+                    f"{alias_path.name} contains an empty canonical artist."
+                )
+
+            if isinstance(aliases, str):
+                alias_values = [aliases]
+            elif isinstance(aliases, list):
+                alias_values = aliases
+            else:
+                raise RuntimeError(
+                    f"{alias_path.name}: aliases for '{canonical_name}' "
+                    "must be a string or list of strings."
+                )
+
+            cleaned_aliases = []
+            canonical_norm = canonical_name.casefold()
+
+            for alias in alias_values:
+                if not isinstance(alias, str):
+                    raise RuntimeError(
+                        f"{alias_path.name}: aliases for '{canonical_name}' "
+                        "must contain only strings."
+                    )
+
+                alias_name = repair_text(alias).strip()
+                alias_norm = alias_name.casefold()
+
+                if not alias_name or alias_norm == canonical_norm:
+                    continue
+
+                prior = seen_aliases.get(alias_norm)
+                if prior and prior.casefold() != canonical_norm:
+                    raise RuntimeError(
+                        f"{alias_path.name}: alias '{alias_name}' is assigned "
+                        f"to both '{prior}' and '{canonical_name}'."
+                    )
+
+                seen_aliases[alias_norm] = canonical_name
+
+                if alias_norm not in {
+                    value.casefold()
+                    for value in cleaned_aliases
+                }:
+                    cleaned_aliases.append(alias_name)
+
+            cleaned[canonical_name] = cleaned_aliases
+
+        return cleaned
+
+    def reload_artist_aliases(self):
+        """Reload artist aliases and update the matcher immediately."""
+        self.artist_aliases = self._load_artist_aliases()
+        Matcher.set_artist_aliases(
+            self.artist_aliases
+        )
+
+    def save_artist_aliases(self):
+        """Persist the standalone alias file atomically and reload aliases."""
+        _atomic_write_json(
+            ARTIST_ALIASES_FILE,
+            self.artist_aliases,
+            ensure_ascii=False,
+        )
+        self.reload_artist_aliases()
+
+    @staticmethod
+    def _ensure_artist_alias_shell():
+        """Create an empty artist_aliases.json shell without overwriting it."""
+        if ARTIST_ALIASES_FILE.exists():
+            return
+
+        with open(
+            ARTIST_ALIASES_FILE,
+            "w",
+            encoding="utf-8",
+        ) as f:
+            f.write("{}\n")
+
+    @staticmethod
+    def _state_wrapper(data: dict) -> dict:
+        """Wrap one state object using the current on-disk schema."""
+        return {
+            "_schema_version": STATE_SCHEMA_VERSION,
+            "data": data,
+        }
+
+    @staticmethod
+    def _schema_backup_path(path: Path) -> Path:
+        """Return the one-time backup path used before schema migration."""
+        return path.with_name(
+            f"{path.name}.pre-schema-{STATE_SCHEMA_VERSION}.bak"
+        )
+
+    @staticmethod
+    def _validate_state_data(
+        name: str,
+        data,
+    ) -> dict:
+        """Require every state payload to be a JSON object."""
+        if not isinstance(data, dict):
+            raise RuntimeError(
+                f"{name}.json contains an unsupported root value. "
+                "Expected a JSON object."
+            )
+
+        return data
+
+    @staticmethod
+    def _migrate_state_data(
+        name: str,
+        data: dict,
+        from_version: int,
+    ) -> dict:
+        """
+        Migrate a state payload to STATE_SCHEMA_VERSION.
+
+        Schema 0 is the pre-versioned Playlist Bridge format. The 0 -> 1
+        migration adds the version/data wrapper only; the payload itself does
+        not need to change.
+        """
+        version = from_version
+        migrated = data
+
+        while version < STATE_SCHEMA_VERSION:
+            if version == 0:
+                version = 1
+                continue
+
+            if version == 1:
+                # Schema 2 adds ignored_tracks.json and the optional
+                # per-playlist auto_sync flag. Existing payloads need no
+                # transformation; absent values use compatible defaults.
+                version = 2
+                continue
+
+            raise RuntimeError(
+                f"No migration path is implemented for {name}.json "
+                f"from schema {version} to {STATE_SCHEMA_VERSION}."
+            )
+
+        return migrated
+
+    def _load_state_dict(
+        self,
+        name: str,
+        default: dict,
+    ) -> dict:
+        """
+        Load legacy or schema-versioned state.
+
+        Legacy files are treated as schema 0 and migrated only in memory.
+        They are backed up and rewritten the next time Config.save() runs.
+        This preserves dry-run's no-write guarantee.
+        """
+        path = self.STATE_FILES[name]
+
+        if not path.exists():
+            self._loaded_schema_versions[name] = (
+                STATE_SCHEMA_VERSION
+            )
+            return copy.deepcopy(default)
+
+        try:
+            with open(path) as f:
+                raw = json.load(f)
+        except (OSError, ValueError) as e:
+            raise RuntimeError(
+                f"Could not read {path.name}: {e}"
+            ) from e
+
+        loaded_version = 0
+        data = raw
+
+        if (
+            isinstance(raw, dict)
+            and "_schema_version" in raw
+        ):
+            version_value = raw.get(
+                "_schema_version"
+            )
+
+            if not isinstance(version_value, int):
+                raise RuntimeError(
+                    f"{path.name} has an invalid _schema_version. "
+                    "Expected an integer."
+                )
+
+            loaded_version = version_value
+
+            if loaded_version > STATE_SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"{path.name} uses schema {loaded_version}, but this "
+                    f"Playlist Bridge build only supports through schema "
+                    f"{STATE_SCHEMA_VERSION}. Use a newer Playlist Bridge "
+                    "version rather than risking state-file corruption."
+                )
+
+            if "data" not in raw:
+                raise RuntimeError(
+                    f"{path.name} is schema-versioned but has no 'data' "
+                    "payload."
+                )
+
+            data = raw["data"]
+
+        data = self._validate_state_data(
+            name,
+            data,
+        )
+
+        self._loaded_schema_versions[
+            name
+        ] = loaded_version
+
+        if loaded_version < STATE_SCHEMA_VERSION:
+            self._migration_needed.add(name)
+            data = self._migrate_state_data(
+                name,
+                data,
+                loaded_version,
+            )
+
+        return data
+
+    def _load_config(self) -> dict:
+        return self._load_state_dict(
+            "config",
+            {
+                "plex": {},
+                "playlists": [],
+            },
+        )
+
+    def _load_mapping(self) -> dict:
+        return self._load_state_dict(
+            "mapping",
+            {},
+        )
+
+    def _load_missing(self) -> dict:
+        data = self._load_state_dict(
+            "missing",
+            {},
+        )
+
+        for tracks in data.values():
+            if not isinstance(tracks, list):
+                continue
+
+            for track in tracks:
+                if not isinstance(track, dict):
+                    continue
+
+                for field in (
+                    "title",
+                    "artist",
+                    "album",
+                ):
+                    if field in track:
+                        track[field] = repair_text(
+                            track.get(field, "")
+                        )
+
+                previous_match = track.get(
+                    "previous_match"
+                )
+
+                if isinstance(previous_match, dict):
+                    for field in (
+                        "title",
+                        "artist",
+                        "album",
+                    ):
+                        if field in previous_match:
+                            previous_match[field] = repair_text(
+                                previous_match.get(field, "")
+                            )
+
+        return data
+
+    def _backup_before_schema_upgrade(
+        self,
+        name: str,
+    ):
+        """Create a one-time byte-for-byte backup before schema rewrite."""
+        if name not in self._migration_needed:
+            return
+
+        path = self.STATE_FILES[name]
+
+        if not path.exists():
+            return
+
+        backup_path = self._schema_backup_path(
+            path
+        )
+
+        if backup_path.exists():
+            return
+
+        shutil.copy2(
+            path,
+            backup_path,
+        )
+
+    def _save_state_only(
+        self,
+        name: str,
+        data: dict,
+    ):
+        """Persist one schema-managed state file without rewriting the rest."""
+        self._backup_before_schema_upgrade(
+            name
+        )
+        path = self.STATE_FILES[name]
+
+        _atomic_write_json(
+            path,
+            self._state_wrapper(data),
+        )
+
+        self._loaded_schema_versions[name] = (
+            STATE_SCHEMA_VERSION
+        )
+        self._migration_needed.discard(name)
+
+    def save_missing_only(self):
+        """Persist missing_tracks.json only."""
+        self._save_state_only(
+            "missing",
+            self.missing,
+        )
+        self._ensure_artist_alias_shell()
+
+    def save(self):
+        """
+        Save all state using the current schema.
+
+        Older/legacy files are backed up once before the first rewrite.
+        """
+        state = {
+            "config": self.config,
+            "mapping": self.mapping,
+            "missing": self.missing,
+            "match_metadata": self.match_metadata,
+            "source_snapshots": self.source_snapshots,
+            "ignored_tracks": self.ignored_tracks,
+        }
+
+        for name, data in state.items():
+            self._backup_before_schema_upgrade(
+                name
+            )
+
+            path = self.STATE_FILES[name]
+
+            _atomic_write_json(
+                path,
+                self._state_wrapper(data),
+            )
+
+            self._loaded_schema_versions[
+                name
+            ] = STATE_SCHEMA_VERSION
+            self._migration_needed.discard(
+                name
+            )
+
+        self._ensure_artist_alias_shell()
+
+    @staticmethod
+    def _get_plex_music_libraries(
+        plex_url: str,
+        plex_token: str,
+    ) -> List[dict]:
+        """Return Plex music libraries available to this server/token."""
+        resp = requests.get(
+            f"{plex_url.rstrip('/')}/library/sections",
+            headers={
+                "X-Plex-Token": plex_token,
+                "Accept": "application/json",
+            },
+            timeout=15,
+        )
+
+        if resp.status_code != 200:
+            raise RuntimeError(
+                "Failed to get Plex library sections: "
+                f"HTTP {resp.status_code}"
+            )
+
+        sections = (
+            resp.json()
+            .get("MediaContainer", {})
+            .get("Directory", [])
+        )
+
+        libraries = []
+
+        for section in sections:
+            if section.get("type") != "artist":
+                continue
+
+            key = section.get("key")
+
+            if key is None:
+                continue
+
+            libraries.append(
+                {
+                    "key": str(key),
+                    "name": repair_text(
+                        section.get("title", "")
+                    ).strip()
+                    or f"Music Library {key}",
+                }
+            )
+
+        return libraries
+
+    @staticmethod
+    def _prompt_for_music_library(
+        libraries: List[dict],
+    ) -> Optional[dict]:
+        """Ask the user which Plex music library Playlist Bridge should use."""
+        if not libraries:
+            print("✗ No music libraries were found in Plex.")
+            return None
+
+        if len(libraries) == 1:
+            selected = libraries[0]
+            print(
+                "✓ Music library: "
+                f"{selected['name']}"
+            )
+            return selected
+
+        print("\nPlex music libraries:\n")
+
+        for index, library in enumerate(
+            libraries,
+            1,
+        ):
+            print(
+                f"[{index}] {library['name']}"
+            )
+
+        while True:
+            choice = input(
+                "\nSelect music library: "
+            ).strip().lower()
+
+            if choice == "x":
+                return None
+
+            try:
+                index = int(choice) - 1
+            except ValueError:
+                print("✗ Invalid choice")
+                continue
+
+            if 0 <= index < len(libraries):
+                return libraries[index]
+
+            print("✗ Invalid choice")
+
+    def ensure_plex_music_library(
+        self,
+        interactive: bool = True,
+        save: bool = True,
+    ) -> bool:
+        """
+        Ensure a specific Plex music library is selected.
+
+        Existing configs from older Playlist Bridge releases are handled
+        safely. A single available music library is selected automatically.
+        If multiple libraries exist, interactive use prompts the user while
+        automated use fails clearly instead of guessing.
+        """
+        plex_cfg = self.config.get(
+            "plex",
+            {},
+        )
+
+        plex_url = str(
+            plex_cfg.get("url", "")
+        ).strip().rstrip("/")
+        plex_token = str(
+            plex_cfg.get("token", "")
+        ).strip()
+
+        if not plex_url or not plex_token:
+            return False
+
+        try:
+            libraries = self._get_plex_music_libraries(
+                plex_url,
+                plex_token,
+            )
+        except Exception as e:
+            print(
+                f"✗ Could not read Plex music libraries: {e}"
+            )
+            return False
+
+        if not libraries:
+            print(
+                "✗ No music libraries were found in Plex."
+            )
+            return False
+
+        saved_key = str(
+            plex_cfg.get(
+                "music_library_key",
+                "",
+            )
+        ).strip()
+
+        if saved_key:
+            selected = next(
+                (
+                    library
+                    for library in libraries
+                    if library["key"] == saved_key
+                ),
+                None,
+            )
+
+            if selected:
+                changed = (
+                    plex_cfg.get(
+                        "music_library_name"
+                    )
+                    != selected["name"]
+                )
+
+                plex_cfg[
+                    "music_library_key"
+                ] = selected["key"]
+                plex_cfg[
+                    "music_library_name"
+                ] = selected["name"]
+
+                if changed and save:
+                    self.save()
+
+                return True
+
+            print(
+                "⚠ Previously selected Plex music library "
+                "is no longer available."
+            )
+
+        if len(libraries) == 1:
+            selected = libraries[0]
+            plex_cfg[
+                "music_library_key"
+            ] = selected["key"]
+            plex_cfg[
+                "music_library_name"
+            ] = selected["name"]
+
+            if save:
+                self.save()
+
+            print(
+                "✓ Music library: "
+                f"{selected['name']}"
+            )
+            return True
+
+        if not interactive:
+            print(
+                "✗ Multiple Plex music libraries were found, but no "
+                "library is selected."
+            )
+            print(
+                "  Run Playlist Bridge without arguments, then use "
+                "Settings → Configure Plex to choose one."
+            )
+            return False
+
+        selected = self._prompt_for_music_library(
+            libraries
+        )
+
+        if not selected:
+            return False
+
+        plex_cfg[
+            "music_library_key"
+        ] = selected["key"]
+        plex_cfg[
+            "music_library_name"
+        ] = selected["name"]
+
+        if save:
+            self.save()
+
+        print(
+            "✓ Music library selected: "
+            f"{selected['name']}"
+        )
+        return True
+
+    def setup_plex(self):
+        """Interactive Plex authentication and music-library selection."""
+        print("\n=== Plex Setup ===")
+        plex_url = input(
+            "Plex server URL (e.g., http://localhost:32400): "
+        ).strip().rstrip("/")
+        plex_token = input("Plex API token: ").strip()
+
+        try:
+            resp = requests.get(
+                f"{plex_url}/identity",
+                headers={"X-Plex-Token": plex_token},
+                timeout=5,
+            )
+
+            if resp.status_code != 200:
+                print(
+                    f"✗ Failed to connect. HTTP {resp.status_code}. "
+                    "Check URL and token."
+                )
+                return False
+
+            print("✓ Connected to Plex")
+
+            libraries = self._get_plex_music_libraries(
+                plex_url,
+                plex_token,
+            )
+            selected = self._prompt_for_music_library(
+                libraries
+            )
+
+            if not selected:
+                return False
+
+            self.config["plex"] = {
+                "url": plex_url,
+                "token": plex_token,
+                "music_library_key": selected["key"],
+                "music_library_name": selected["name"],
+            }
+            self.save()
+
+            if len(libraries) > 1:
+                print(
+                    "✓ Music library selected: "
+                    f"{selected['name']}"
+                )
+
+            return True
+
+        except Exception as e:
+            print(f"✗ Error: {e}")
+            return False
+
+    def get_plex(self):
+        """Get Plex config, prompting setup/library selection when needed."""
+        plex_cfg = self.config.get(
+            "plex",
+            {},
+        )
+
+        if (
+            not plex_cfg.get("url")
+            or not plex_cfg.get("token")
+        ):
+            if not self.setup_plex():
+                raise Exception("Plex setup required")
+        elif not self.ensure_plex_music_library(
+            interactive=True,
+            save=True,
+        ):
+            raise Exception(
+                "Plex music-library selection required"
+            )
+
+        return self.config["plex"]
+
+    def add_playlist(
+        self,
+        source_url: str,
+        source_type: str,
+        plex_playlist_name: str,
+        plex_playlist_id: str,
+    ):
+        """Add a new playlist to sync"""
+        canonical_url = self._canonical_source_url(source_url, source_type)
+        playlist_entry = {
+            "source": source_type,
+            "source_url": canonical_url,
+            "source_id": self._extract_id(canonical_url, source_type),
+            "plex_playlist_id": plex_playlist_id,
+            "plex_playlist_name": plex_playlist_name,
+            "last_synced": None,
+            "last_match_attempt": None,
+            "auto_sync": True,
+            "favorite": False,
+        }
+
+        self.config["playlists"].append(playlist_entry)
+        self.save()
+        return playlist_entry
+
+    @staticmethod
+    def _normalize_url_input(value: str) -> str:
+        """Normalize pasted playlist text into a usable URL/URI."""
+        if not value:
+            return ""
+
+        value = unquote(str(value).strip())
+        value = value.replace("\\&", "&").strip()
+
+        # Accept Markdown links copied from chat/web pages:
+        # [https://...](https://...)
+        markdown = re.search(r"\[[^\]]*\]\((https?://[^)]+)\)", value)
+        if markdown:
+            value = markdown.group(1)
+
+        # Accept text that contains a Spotify/Apple playlist URL plus
+        # surrounding punctuation or commentary.
+        url_match = re.search(
+            r"https?://(?:open\.)?spotify\.com/playlist/[^\s<>)\]]+"
+            r"|https?://(?:music|itunes)\.apple\.com/[^\s<>)\]]+",
+            value,
+            re.IGNORECASE,
+        )
+        if url_match:
+            value = url_match.group(0)
+
+        return value.strip().strip("<>[](){}.,;\"'")
+
+    @staticmethod
+    def _extract_id(url: str, source_type: str) -> Optional[str]:
+        """Extract a canonical playlist ID while ignoring URL query data."""
+        value = Config._normalize_url_input(url)
+        if not value:
+            return None
+
+        if source_type == "spotify":
+            # spotify:playlist:7eahWLng9go8LDR5gcW6A3
+            uri_match = re.fullmatch(
+                r"spotify:playlist:([A-Za-z0-9]{22})",
+                value,
+                re.IGNORECASE,
+            )
+            if uri_match:
+                return uri_match.group(1)
+
+            # Bare Spotify playlist ID.
+            if re.fullmatch(r"[A-Za-z0-9]{22}", value):
+                return value
+
+            # Parse only the path component, so ?si=..., &nd=1,
+            # &dlsi=..., etc. can never become part of the ID.
+            try:
+                parsed = urlparse(value)
+                host = parsed.netloc.lower().split(":", 1)[0]
+                if host in {"open.spotify.com", "spotify.com", "www.spotify.com"}:
+                    parts = [p for p in parsed.path.split("/") if p]
+                    for index, part in enumerate(parts[:-1]):
+                        if part.lower() == "playlist":
+                            candidate = parts[index + 1]
+                            if re.fullmatch(r"[A-Za-z0-9]{22}", candidate):
+                                return candidate
+            except ValueError:
+                pass
+
+            # Last-resort extraction from pasted Spotify text.
+            match = re.search(
+                r"(?:open\.)?spotify\.com/playlist/([A-Za-z0-9]{22})",
+                value,
+                re.IGNORECASE,
+            )
+            return match.group(1) if match else None
+
+        if source_type == "applemusic":
+            # Apple Music IDs are not always purely alphanumeric after "pl.".
+            # Replay playlists, for example, use IDs such as:
+            #   pl.rp-B7CXevA0GM
+            # Parse only the path so query parameters never become part of ID.
+            try:
+                parsed = urlparse(value)
+                path = parsed.path
+            except ValueError:
+                path = value
+
+            # Normal Apple Music playlist URL:
+            # /us/playlist/replay-all-time/pl.rp-B7CXevA0GM
+            match = re.search(
+                r"/playlist/[^/]+/(pl\.[A-Za-z0-9._-]+)",
+                path,
+                re.IGNORECASE,
+            )
+            if match:
+                return match.group(1)
+
+            # Fallback for any path/text containing a playlist ID.
+            match = re.search(
+                r"(pl\.[A-Za-z0-9._-]+)",
+                path,
+                re.IGNORECASE,
+            )
+            if match:
+                return match.group(1)
+
+            # Also accept a bare Apple Music playlist ID.
+            if re.fullmatch(r"pl\.[A-Za-z0-9._-]+", value, re.IGNORECASE):
+                return value
+
+            return None
+
+        return None
+
+    @staticmethod
+    def _canonical_source_url(url: str, source_type: str) -> str:
+        """Return a stable URL for storage and future syncs."""
+        source_id = Config._extract_id(url, source_type)
+
+        if source_type == "spotify" and source_id:
+            return f"https://open.spotify.com/playlist/{source_id}"
+
+        return Config._normalize_url_input(url)
+
+    def find_playlist(self, source_url: str) -> Optional[dict]:
+        """Find a playlist by canonical source identity, not query string."""
+        normalized = self._normalize_url_input(source_url)
+
+        if "spotify.com" in normalized.lower() or normalized.lower().startswith("spotify:playlist:"):
+            source_type = "spotify"
+        elif "music.apple.com" in normalized.lower() or "itunes.apple.com" in normalized.lower():
+            source_type = "applemusic"
+        else:
+            source_type = None
+
+        requested_id = (
+            self._extract_id(normalized, source_type)
+            if source_type
+            else None
+        )
+
+        for playlist in self.config["playlists"]:
+            if source_type and playlist.get("source") == source_type:
+                existing_id = playlist.get("source_id") or self._extract_id(
+                    playlist.get("source_url", ""),
+                    source_type,
+                )
+                if requested_id and existing_id == requested_id:
+                    return playlist
+
+            if playlist.get("source_url") == normalized:
+                return playlist
+
+        return None
+
+    def remove_playlist(self, index: int) -> bool:
+        """Remove playlist by index"""
+        if 0 <= index < len(self.config["playlists"]):
+            self.config["playlists"].pop(index)
+            self.save()
+            return True
+        return False
+
+
+
+class SpotifyAPI:
+    """Spotify API wrapper - scrapes public playlists without auth."""
+
+    @staticmethod
+    def _clean_artwork_url(value: str) -> str:
+        """
+        Decode and validate a Spotify artwork URL.
+
+        Spotify also serves CSS/JS/fonts from spotifycdn.com, so simply
+        checking the hostname is not enough.
+        """
+        if not isinstance(value, str):
+            return ""
+
+        value = unescape(value)
+        value = value.replace("\\/", "/")
+        value = value.replace("\\u0026", "&")
+        value = value.strip()
+
+        if not value.startswith("https://"):
+            return ""
+
+        try:
+            parsed = urlparse(value)
+        except ValueError:
+            return ""
+
+        host = (parsed.hostname or "").lower()
+        path = parsed.path.lower()
+
+        if not host:
+            return ""
+
+        blocked_suffixes = (
+            ".css", ".js", ".mjs", ".map",
+            ".woff", ".woff2", ".ttf", ".otf",
+            ".json", ".html", ".svg",
+        )
+
+        if path.endswith(blocked_suffixes):
+            return ""
+
+        if "/_next/" in path or "/static/css/" in path or "/static/js/" in path:
+            return ""
+
+        # Current Spotify custom/playlist artwork CDN.
+        if host.endswith(".spotifycdn.com") and (
+            host.startswith("image-cdn-")
+            or ".image-cdn-" in host
+        ):
+            return value
+
+        # Standard Spotify artwork CDN.
+        if host == "i.scdn.co" and "/image/" in path:
+            return value
+
+        # Spotify-generated mosaic playlist covers.
+        if host == "mosaic.scdn.co":
+            return value
+
+        # Conservative fallback for explicit image files.
+        if (
+            host.endswith("spotifycdn.com")
+            or host.endswith("scdn.co")
+        ) and re.search(r"\.(?:jpe?g|png|webp|gif|avif)$", path):
+            return value
+
+        return ""
+
+
+    @classmethod
+    def _extract_artwork_url(cls, html_text: str, entity: dict = None) -> str:
+        """Extract the main Spotify playlist cover URL."""
+        entity = entity or {}
+        candidates = []
+
+        def add(value):
+            cleaned = cls._clean_artwork_url(value)
+            if cleaned and cleaned not in candidates:
+                candidates.append(cleaned)
+
+        # First prefer image fields from Spotify's playlist entity.
+        def walk_images(obj, depth=0):
+            if depth > 5:
+                return
+            if isinstance(obj, str):
+                add(obj)
+            elif isinstance(obj, list):
+                for item in obj:
+                    walk_images(item, depth + 1)
+            elif isinstance(obj, dict):
+                for key, value in obj.items():
+                    key_lower = str(key).lower()
+                    if any(token in key_lower for token in ("image", "cover", "art", "src", "url")):
+                        walk_images(value, depth + 1)
+
+        walk_images(entity)
+
+        # OpenGraph is a strong signal for the playlist's main cover.
+        og_patterns = [
+            r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
+            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
+        ]
+        for pattern in og_patterns:
+            for match in re.findall(pattern, html_text, re.IGNORECASE):
+                add(match)
+
+        # Spotify's playlist-header image is commonly eager-loaded.
+        for tag in re.findall(r'<img\b[^>]*>', html_text, re.IGNORECASE):
+            if re.search(r'loading=["\']eager["\']', tag, re.IGNORECASE):
+                src_match = re.search(r'src=["\']([^"\']+)["\']', tag, re.IGNORECASE)
+                if src_match:
+                    add(src_match.group(1))
+
+        # Generic Spotify CDN fallback. This handles hosts such as
+        # image-cdn-fa.spotifycdn.com without hard-coding the region.
+        direct_patterns = [
+            r'https://(?:[A-Za-z0-9-]+\.)?image-cdn-[A-Za-z0-9-]+\.spotifycdn\.com/[^"\'\s<>]+',
+            r'https://i\.scdn\.co/image/[A-Za-z0-9]+',
+            r'https://mosaic\.scdn\.co/[^"\'\s<>]+',
+        ]
+        for pattern in direct_patterns:
+            for match in re.findall(pattern, html_text, re.IGNORECASE):
+                add(match)
+
+        # Prefer playlist-cover/CDN style URLs over arbitrary nested images.
+        for candidate in candidates:
+            if "/image/" in candidate and (
+                "image-cdn-" in candidate or "i.scdn.co" in candidate
+            ):
+                return candidate
+
+        return candidates[0] if candidates else ""
+
+    @classmethod
+    def _fetch_oembed_artwork(cls, playlist_id: str) -> str:
+        """
+        Fetch playlist artwork from Spotify's public oEmbed endpoint.
+
+        Spotify oEmbed returns thumbnail_url for public playlists and is
+        considerably more reliable for cover art than scraping embed HTML.
+        """
+        normalized_id = Config._extract_id(playlist_id, "spotify")
+        if not normalized_id:
+            return ""
+
+        public_url = (
+            f"https://open.spotify.com/playlist/{normalized_id}"
+        )
+
+        try:
+            resp = requests.get(
+                "https://open.spotify.com/oembed",
+                params={"url": public_url},
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/124.0.0.0 Safari/537.36"
+                    ),
+                    "Accept": "application/json",
+                },
+                timeout=10,
+            )
+
+            if resp.status_code != 200:
+                return ""
+
+            try:
+                data = resp.json()
+            except ValueError:
+                return ""
+
+            return cls._clean_artwork_url(
+                data.get("thumbnail_url", "")
+            )
+
+        except requests.RequestException:
+            return ""
+
+
+    def get_playlist_tracks(
+        self,
+        playlist_id: str,
+        fetch_artwork: bool = True,
+    ) -> Tuple[List[dict], dict]:
+        """
+        Fetch a public Spotify playlist from a raw ID or full URL.
+
+        Artwork discovery is optional so non-sync workflows such as
+        missing-track triage and match editing do not perform artwork work.
+        """
+
+        normalized_id = Config._extract_id(playlist_id, "spotify")
+        if not normalized_id:
+            raise Exception(
+                "Could not extract Spotify playlist ID from the supplied URL"
+            )
+
+        embed_url = f"https://open.spotify.com/embed/playlist/{normalized_id}"
+        public_url = f"https://open.spotify.com/playlist/{normalized_id}"
+
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept": (
+                "text/html,application/xhtml+xml,application/xml;"
+                "q=0.9,image/webp,*/*;q=0.8"
+            ),
+            "Accept-Language": "en-US,en;q=0.5",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Cache-Control": "max-age=0",
+        }
+
+        try:
+            resp = requests.get(embed_url, headers=headers, timeout=10)
+            if resp.status_code != 200:
+                raise Exception(
+                    f"Failed to fetch Spotify playlist: {resp.status_code}"
+                )
+
+            html_text = resp.text
+
+            match = re.search(
+                r'<script id="__NEXT_DATA__" type="application/json">'
+                r'({.*?})</script>',
+                html_text,
+                re.DOTALL,
+            )
+            if not match:
+                raise Exception("Could not find playlist data in page")
+
+            data = json.loads(match.group(1))
+            entity = (
+                data.get("props", {})
+                .get("pageProps", {})
+                .get("state", {})
+                .get("data", {})
+                .get("entity", {})
+            )
+            if not entity:
+                raise Exception("Could not parse playlist entity data")
+
+            name = repair_text(
+                entity.get("name", "Unknown Playlist")
+            )
+            description = clean_playlist_description(
+                entity.get("description", "")
+            )
+
+            image_url = ""
+
+            if fetch_artwork:
+                # Prefer Spotify's official oEmbed thumbnail. The embed/public
+                # HTML structure changes frequently, while oEmbed exposes a
+                # dedicated thumbnail_url for public playlist artwork.
+                image_url = self._fetch_oembed_artwork(normalized_id)
+
+                if image_url:
+                    print(f"  ✓ Artwork via Spotify oEmbed: {image_url}")
+                else:
+                    # Fall back to the embed page if oEmbed did not return art.
+                    image_url = self._extract_artwork_url(html_text, entity)
+
+                    # The normal public page may expose og:image/header artwork
+                    # even when the embed widget does not.
+                    if not image_url:
+                        try:
+                            public_resp = requests.get(
+                                public_url,
+                                headers=headers,
+                                timeout=10,
+                            )
+                            if public_resp.status_code == 200:
+                                image_url = self._extract_artwork_url(
+                                    public_resp.text
+                                )
+                        except requests.RequestException:
+                            pass
+
+                    if image_url:
+                        print(
+                            f"  ✓ Artwork extracted from Spotify page: "
+                            f"{image_url}"
+                        )
+                    else:
+                        print(
+                            "  ⚠ No Spotify playlist artwork found "
+                            "(oEmbed and page fallbacks failed)"
+                        )
+
+            tracks = entity.get("trackList", [])
+            if not tracks:
+                items = entity.get("tracks", {}).get("items", [])
+                tracks = [item.get("track", item) for item in items]
+
+            track_list = []
+            for track in tracks:
+                if not track:
+                    continue
+
+                title = (
+                    track.get("title")
+                    or track.get("name")
+                    or "Unknown Title"
+                )
+
+                if "subtitle" in track:
+                    artist_names = track.get("subtitle")
+                else:
+                    artists = track.get("artists", [])
+                    artist_names = ", ".join(
+                        a.get("name", "Unknown Artist") for a in artists
+                    )
+
+                if not artist_names:
+                    artist_names = "Unknown Artist"
+
+                # Spotify's embed payload is not consistent about album
+                # metadata, but preserve it whenever it is available so the
+                # matcher can prefer the original studio-album copy.
+                album_name = (
+                    track.get("albumName")
+                    or track.get("album_name")
+                    or ""
+                )
+
+                album_obj = track.get("album")
+                if not album_name and isinstance(album_obj, dict):
+                    album_name = (
+                        album_obj.get("name")
+                        or album_obj.get("title")
+                        or ""
+                    )
+                elif not album_name and isinstance(album_obj, str):
+                    album_name = album_obj
+
+                track_uri = str(
+                    track.get("uri", "") or ""
+                )
+                source_track_id = str(
+                    track.get("id", "") or ""
+                )
+
+                if (
+                    not source_track_id
+                    and track_uri.startswith("spotify:track:")
+                ):
+                    source_track_id = track_uri.rsplit(":", 1)[-1]
+
+                track_list.append(
+                    {
+                        "title": repair_text(title),
+                        "artist": repair_text(artist_names),
+                        "album": repair_text(album_name),
+                        "source_id": source_track_id,
+                        "uri": track_uri,
+                    }
+                )
+
+            return track_list, {
+                "name": name,
+                "description": description,
+                "image_url": image_url,
+                "source_url": public_url,
+            }
+
+        except requests.exceptions.Timeout:
+            raise Exception(
+                "Request timed out. Spotify is tarpitting the connection."
+            )
+        except requests.exceptions.RequestException as e:
+            raise Exception(f"Connection error: {e}")
+        except json.JSONDecodeError as e:
+            raise Exception(f"Failed to parse playlist JSON: {e}")
+        except Exception as e:
+            raise Exception(f"Failed to extract playlist data: {e}")
+
+
+class AppleMusicAPI:
+    """
+    Apple Music public-playlist scraper.
+
+    Current music.apple.com playlist pages embed their server-rendered data
+    in:
+        <script id="serialized-server-data" type="application/json">...</script>
+
+    This does not require an Apple Music developer token for public playlists.
+    """
+
+    @staticmethod
+    def _normalize_artwork_url(value) -> str:
+        """
+        Normalize an Apple Music artwork URL.
+
+        Only expand Apple's {w}/{h} artwork templates here. Do NOT blindly
+        rewrite a fixed 1200x630 social-preview URL to 3000x3000; Apple's CDN
+        preserves the source aspect ratio, so a URL containing "3000x3000bb"
+        can still return a 3000x750 image.
+        """
+        if isinstance(value, list):
+            for item in value:
+                result = AppleMusicAPI._normalize_artwork_url(item)
+                if result:
+                    return result
+            return ""
+
+        if isinstance(value, dict):
+            for key in ("url", "contentUrl", "src"):
+                result = AppleMusicAPI._normalize_artwork_url(
+                    value.get(key)
+                )
+                if result:
+                    return result
+            return ""
+
+        if not isinstance(value, str):
+            return ""
+
+        value = unescape(value).replace("\\/", "/").strip()
+
+        if not value.startswith("https://"):
+            return ""
+
+        # Expand true Apple artwork templates only.
+        if "{w}" in value or "{h}" in value:
+            replacements = {
+                "{w}": str(APPLE_ARTWORK_SIZE),
+                "{h}": str(APPLE_ARTWORK_SIZE),
+                "{f}": "jpg",
+                "{c}": "bb",
+            }
+            for old, new in replacements.items():
+                value = value.replace(old, new)
+
+        return value
+
+    @staticmethod
+    def _artwork_dimensions_from_value(value) -> Tuple[Optional[int], Optional[int]]:
+        """Read declared width/height from an Apple artwork object or URL."""
+        if isinstance(value, dict):
+            width = (
+                value.get("width")
+                or value.get("maximumWidth")
+                or value.get("maxWidth")
+            )
+            height = (
+                value.get("height")
+                or value.get("maximumHeight")
+                or value.get("maxHeight")
+            )
+
+            try:
+                width = int(width) if width is not None else None
+            except (TypeError, ValueError):
+                width = None
+
+            try:
+                height = int(height) if height is not None else None
+            except (TypeError, ValueError):
+                height = None
+
+            if width and height:
+                return width, height
+
+            for key in ("url", "contentUrl", "src"):
+                if value.get(key):
+                    return AppleMusicAPI._artwork_dimensions_from_value(
+                        value.get(key)
+                    )
+
+        if isinstance(value, str):
+            # Useful for fixed derivatives such as 1200x630wp-60.jpg.
+            match = re.search(
+                r"/(\d+)x(\d+)[A-Za-z0-9._-]*\.(?:jpe?g|png|webp)$",
+                value,
+                re.IGNORECASE,
+            )
+            if match:
+                return int(match.group(1)), int(match.group(2))
+
+        return None, None
+
+
+    @staticmethod
+    def _walk_json(obj):
+        """Yield every dict inside an arbitrarily nested JSON structure."""
+        if isinstance(obj, dict):
+            yield obj
+            for value in obj.values():
+                yield from AppleMusicAPI._walk_json(value)
+        elif isinstance(obj, list):
+            for value in obj:
+                yield from AppleMusicAPI._walk_json(value)
+
+    @classmethod
+    def _extract_metadata(cls, data, soup) -> dict:
+        """
+        Extract playlist metadata and prefer true square playlist artwork.
+
+        Apple pages can contain several images:
+          - the playlist cover
+          - album artwork for individual tracks
+          - wide OpenGraph/social preview cards
+
+        Rank playlist-level square artwork above social preview images.
+        """
+        name = ""
+        description = ""
+
+        # First obtain the playlist identity from SEO data.
+        schema_images = []
+
+        for obj in cls._walk_json(data):
+            schema = obj.get("schemaContent")
+            if not isinstance(schema, dict):
+                continue
+
+            schema_type = str(
+                schema.get("@type")
+                or schema.get("type")
+                or ""
+            ).casefold()
+
+            if "playlist" not in schema_type and name:
+                continue
+
+            if not name:
+                name = schema.get("name", "") or ""
+
+            if not description:
+                description = (
+                    schema.get("description", "")
+                    or schema.get("abstract", "")
+                    or ""
+                )
+
+            raw_image = (
+                schema.get("image")
+                or schema.get("thumbnailUrl")
+            )
+            if raw_image:
+                schema_images.append(raw_image)
+
+        if not name:
+            meta = soup.find("meta", attrs={"name": "apple:title"})
+            if meta:
+                name = meta.get("content", "") or ""
+
+        if not name:
+            meta = soup.find("meta", attrs={"property": "og:title"})
+            if meta:
+                name = meta.get("content", "") or ""
+
+        if not description:
+            meta = soup.find(
+                "meta",
+                attrs={"property": "og:description"},
+            )
+            if meta:
+                description = meta.get("content", "") or ""
+
+        if name.endswith(" - Apple Music"):
+            name = name[:-14].strip()
+
+        target_name = name.casefold().strip()
+        candidates = []
+
+        def add_candidate(raw, context_score=0, label="unknown"):
+            url = cls._normalize_artwork_url(raw)
+            if not url:
+                return
+
+            width, height = cls._artwork_dimensions_from_value(raw)
+
+            # If the URL was a template, dimensions may no longer be visible
+            # in the normalized URL. Treat requested dimensions as a hint,
+            # but Plex will validate the actual downloaded pixels later.
+            if not width or not height:
+                width, height = cls._artwork_dimensions_from_value(url)
+
+            score = float(context_score)
+
+            if width and height:
+                ratio = width / height if height else 0
+
+                if 0.95 <= ratio <= 1.05:
+                    score += 80
+                elif 0.80 <= ratio <= 1.20:
+                    score += 25
+                else:
+                    # Strongly demote wide social/banner art.
+                    score -= 80
+
+                score += min(min(width, height) / 100.0, 25.0)
+
+            if "{w}" in str(raw) or "{h}" in str(raw):
+                score += 20
+
+            # Social-preview markers are weak candidates unless they are
+            # actually square.
+            if re.search(
+                r"\d+x\d+(?:wp|sr|mv)",
+                url,
+                re.IGNORECASE,
+            ):
+                score -= 20
+
+            candidates.append(
+                {
+                    "url": url,
+                    "score": score,
+                    "width": width,
+                    "height": height,
+                    "label": label,
+                }
+            )
+
+        # Strongest candidates: objects that look like the playlist itself.
+        for obj in cls._walk_json(data):
+            obj_name = str(
+                obj.get("name")
+                or obj.get("title")
+                or ""
+            ).casefold().strip()
+
+            obj_type = str(
+                obj.get("kind")
+                or obj.get("type")
+                or obj.get("contentType")
+                or obj.get("entityType")
+                or ""
+            ).casefold()
+
+            play_params = obj.get("playParams")
+            if isinstance(play_params, dict):
+                obj_type += " " + str(
+                    play_params.get("kind")
+                    or play_params.get("type")
+                    or ""
+                ).casefold()
+
+            exact_name = bool(
+                target_name
+                and obj_name
+                and obj_name == target_name
+            )
+            playlist_type = "playlist" in obj_type
+
+            if not (exact_name or playlist_type):
+                continue
+
+            context_score = 0
+            if exact_name:
+                context_score += 100
+            if playlist_type:
+                context_score += 60
+
+            for key in (
+                "artwork",
+                "image",
+                "images",
+                "coverArt",
+                "cover",
+                "artworkUrl",
+                "artworkURL",
+            ):
+                if key in obj:
+                    add_candidate(
+                        obj.get(key),
+                        context_score=context_score,
+                        label=f"playlist:{key}",
+                    )
+
+        # SEO images are fallbacks; these are often 1200x630 social cards.
+        for raw in schema_images:
+            add_candidate(
+                raw,
+                context_score=10,
+                label="schema",
+            )
+
+        # OpenGraph image is the final fallback.
+        og = soup.find("meta", attrs={"property": "og:image"})
+        if og:
+            add_candidate(
+                og.get("content", ""),
+                context_score=0,
+                label="og:image",
+            )
+
+        candidates.sort(
+            key=lambda item: item["score"],
+            reverse=True,
+        )
+
+        image_url = candidates[0]["url"] if candidates else ""
+
+        if candidates:
+            best = candidates[0]
+            dim_text = ""
+            if best["width"] and best["height"]:
+                dim_text = (
+                    f" ({best['width']}x{best['height']} declared)"
+                )
+
+            print(
+                f"  ✓ Apple artwork candidate [{best['label']}]"
+                f"{dim_text}: {best['url']}"
+            )
+
+        return {
+            "name": repair_text(
+                name or "Apple Music Playlist"
+            ),
+            "description": clean_playlist_description(
+                description
+            ),
+            "image_url": image_url,
+        }
+
+
+    @staticmethod
+    def _track_from_item(item: dict) -> Optional[dict]:
+        """Convert one Apple server-data item into our common track format."""
+        if not isinstance(item, dict):
+            return None
+
+        artist = item.get("artistName")
+        title = item.get("title") or item.get("name")
+
+        if not isinstance(artist, str) or not artist.strip():
+            return None
+        if not isinstance(title, str) or not title.strip():
+            return None
+
+        # The server data can contain artist/album cards too. A real song
+        # item normally has one or more of these track-specific fields.
+        track_markers = (
+            "duration",
+            "playParams",
+            "tertiaryLinks",
+            "audioTraits",
+            "contentDescriptor",
+            "releaseDate",
+        )
+        if not any(key in item for key in track_markers):
+            return None
+
+        album = item.get("albumName", "") or ""
+
+        if not album:
+            tertiary = item.get("tertiaryLinks")
+            if isinstance(tertiary, list) and tertiary:
+                first = tertiary[0]
+                if isinstance(first, dict):
+                    album = first.get("title", "") or ""
+
+        source_id = (
+            item.get("id")
+            or item.get("adamId")
+            or ""
+        )
+
+        play_params = item.get("playParams")
+        if isinstance(play_params, dict):
+            source_id = (
+                source_id
+                or play_params.get("catalogId")
+                or play_params.get("id")
+                or ""
+            )
+
+        return {
+            "title": repair_text(title).strip(),
+            "artist": repair_text(artist).strip(),
+            "album": (
+                repair_text(album).strip()
+                if isinstance(album, str)
+                else ""
+            ),
+            "source_id": str(source_id) if source_id else "",
+        }
+
+    @classmethod
+    def _extract_tracks(cls, data) -> List[dict]:
+        """Extract ordered playlist tracks from serialized-server-data."""
+        tracks = []
+        seen = set()
+
+        def add_track(item):
+            track = cls._track_from_item(item)
+            if not track:
+                return
+
+            # Prefer catalog ID for dedupe, otherwise title + artist + album.
+            key = (
+                ("id", track["source_id"])
+                if track["source_id"]
+                else (
+                    "text",
+                    track["title"].casefold(),
+                    track["artist"].casefold(),
+                    track["album"].casefold(),
+                )
+            )
+
+            if key in seen:
+                return
+
+            seen.add(key)
+            tracks.append(track)
+
+        # First pass: Apple playlist pages currently organize songs under
+        # section["items"]. Walking those lists preserves playlist order.
+        for obj in cls._walk_json(data):
+            sections = obj.get("sections")
+            if not isinstance(sections, list):
+                continue
+
+            for section in sections:
+                if not isinstance(section, dict):
+                    continue
+                items = section.get("items")
+                if not isinstance(items, list):
+                    continue
+                for item in items:
+                    add_track(item)
+
+        if tracks:
+            return tracks
+
+        # Fallback for future layout changes: scan all dictionaries while
+        # retaining traversal order.
+        for obj in cls._walk_json(data):
+            add_track(obj)
+
+        return tracks
+
+    @classmethod
+    def _extract_metadata_without_artwork(cls, data, soup) -> dict:
+        """Extract playlist name/description without inspecting artwork."""
+        name = ""
+        description = ""
+
+        for obj in cls._walk_json(data):
+            schema = obj.get("schemaContent")
+            if not isinstance(schema, dict):
+                continue
+
+            schema_type = str(
+                schema.get("@type")
+                or schema.get("type")
+                or ""
+            ).casefold()
+
+            if "playlist" not in schema_type:
+                continue
+
+            if not name:
+                name = schema.get("name", "") or ""
+
+            if not description:
+                description = (
+                    schema.get("description", "")
+                    or schema.get("abstract", "")
+                    or ""
+                )
+
+            if name and description:
+                break
+
+        if not name:
+            meta = soup.find("meta", attrs={"name": "apple:title"})
+            if meta:
+                name = meta.get("content", "") or ""
+
+        if not name:
+            meta = soup.find("meta", attrs={"property": "og:title"})
+            if meta:
+                name = meta.get("content", "") or ""
+
+        if not description:
+            meta = soup.find(
+                "meta",
+                attrs={"property": "og:description"},
+            )
+            if meta:
+                description = meta.get("content", "") or ""
+
+        if name.endswith(" - Apple Music"):
+            name = name[:-14].strip()
+
+        return {
+            "name": repair_text(
+                name or "Apple Music Playlist"
+            ),
+            "description": clean_playlist_description(
+                description
+            ),
+            "image_url": "",
+        }
+
+    def get_playlist_tracks(
+        self,
+        playlist_url: str,
+        fetch_artwork: bool = True,
+    ) -> Tuple[List[dict], dict]:
+        """
+        Fetch tracks and metadata from a public Apple Music playlist.
+
+        Artwork discovery is optional so non-sync workflows can fetch only
+        the metadata needed for matching.
+        """
+
+        playlist_id = Config._extract_id(
+            playlist_url,
+            "applemusic",
+        )
+
+        if not playlist_id:
+            raise Exception(
+                "Could not extract Apple Music playlist ID from the supplied URL"
+            )
+
+        normalized_input = Config._normalize_url_input(playlist_url)
+
+        if normalized_input.startswith("http"):
+            url = normalized_input
+        else:
+            # Apple ignores the human-readable slug when the ID is valid.
+            url = (
+                f"https://music.apple.com/us/playlist/playlist/"
+                f"{playlist_id}"
+            )
+
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept": (
+                "text/html,application/xhtml+xml,application/xml;"
+                "q=0.9,image/avif,image/webp,*/*;q=0.8"
+            ),
+            "Accept-Language": "en-US,en;q=0.9",
+            "Cache-Control": "no-cache",
+        }
+
+        try:
+            resp = requests.get(
+                url,
+                headers=headers,
+                timeout=15,
+            )
+
+            if resp.status_code != 200:
+                raise Exception(
+                    f"Apple Music returned HTTP {resp.status_code} "
+                    f"for {url}"
+                )
+
+            soup = BeautifulSoup(
+                resp.text,
+                "html.parser",
+            )
+
+            script = soup.find(
+                "script",
+                id="serialized-server-data",
+            )
+
+            if not script:
+                raise Exception(
+                    "Could not find Apple Music serialized-server-data "
+                    "in the playlist page"
+                )
+
+            raw_json = script.string or script.get_text()
+
+            if not raw_json or not raw_json.strip():
+                raise Exception(
+                    "Apple Music serialized-server-data was empty"
+                )
+
+            try:
+                data = json.loads(raw_json)
+            except json.JSONDecodeError as e:
+                raise Exception(
+                    f"Could not parse Apple Music server data: {e}"
+                )
+
+            if fetch_artwork:
+                metadata = self._extract_metadata(
+                    data,
+                    soup,
+                )
+            else:
+                metadata = self._extract_metadata_without_artwork(
+                    data,
+                    soup,
+                )
+
+            tracks = self._extract_tracks(data)
+
+            if not tracks:
+                raise Exception(
+                    "Apple Music page loaded, but no playlist tracks "
+                    "could be extracted from serialized-server-data"
+                )
+
+            if fetch_artwork and not metadata.get("image_url"):
+                print(
+                    "  ⚠ No Apple Music playlist artwork found"
+                )
+
+            metadata["source_url"] = url
+            metadata["source_id"] = playlist_id
+
+            return tracks, metadata
+
+        except requests.exceptions.Timeout:
+            raise Exception(
+                "Request timed out. Apple Music is not responding."
+            )
+        except requests.exceptions.RequestException as e:
+            raise Exception(
+                f"Apple Music connection error: {e}"
+            )
+        except Exception as e:
+            raise Exception(
+                f"Failed to fetch Apple Music playlist: {e}"
+            )
+
+
+class PlexAPI:
+    """Plex API wrapper"""
+
+    def __init__(
+        self,
+        plex_url: str,
+        plex_token: str,
+        music_library_key: str,
+        music_library_name: str = "",
+    ):
+        self.base_url = plex_url.rstrip("/")
+        self.token = plex_token
+        self.music_library_key = str(
+            music_library_key
+        ).strip()
+        self.music_library_name = str(
+            music_library_name or ""
+        ).strip()
+        self.headers = {
+            "X-Plex-Token": plex_token,
+            "Accept": "application/json",
+        }
+
+        if not self.music_library_key:
+            raise ValueError(
+                "Plex music library is not configured"
+            )
+
+        self.machine_identifier = self._get_machine_identifier()
+
+    def _get_machine_identifier(self) -> str:
+        """Get Plex server machine identifier."""
+        try:
+            resp = requests.get(
+                f"{self.base_url}/identity",
+                headers=self.headers,
+                timeout=10,
+            )
+
+            if resp.status_code != 200:
+                raise Exception(
+                    f"Plex /identity returned HTTP {resp.status_code}: "
+                    f"{resp.text[:500]}"
+                )
+
+            data = resp.json()
+            identifier = data.get("MediaContainer", {}).get(
+                "machineIdentifier"
+            )
+
+            if not identifier:
+                raise Exception(
+                    "Plex did not return a machineIdentifier"
+                )
+
+            return identifier
+
+        except requests.RequestException as e:
+            raise Exception(
+                f"Could not connect to Plex /identity: {e}"
+            )
+        except ValueError as e:
+            raise Exception(
+                f"Plex returned invalid JSON from /identity: {e}"
+            )
+
+    def _library_uri(self, plex_track_id: str) -> str:
+        """
+        Build the URI Plex expects for library media in playlists.
+        """
+        return (
+            f"server://{self.machine_identifier}"
+            f"/com.plexapp.plugins.library/library/metadata/"
+            f"{plex_track_id}"
+        )
+
+    def search_library(
+        self, title: str = "", artist: str = ""
+    ) -> List[dict]:
+        """Load tracks only from the configured Plex music library."""
+
+        try:
+            resp = requests.get(
+                f"{self.base_url}/library/sections/"
+                f"{self.music_library_key}/all",
+                headers=self.headers,
+                params={"type": 10},
+                timeout=30,
+            )
+
+            if resp.status_code != 200:
+                library_label = (
+                    f" '{self.music_library_name}'"
+                    if self.music_library_name
+                    else ""
+                )
+                print(
+                    f"Failed to fetch tracks from Plex music library"
+                    f"{library_label}: {resp.status_code}"
+                )
+                return []
+
+            tracks = (
+                resp.json()
+                .get("MediaContainer", {})
+                .get("Metadata", [])
+            )
+
+            return [
+                {
+                    "title": repair_text(t.get("title", "")),
+                    # Plex uses originalTitle for the track artist when it
+                    # differs from the album artist (common on soundtracks
+                    # and Various Artists compilations).
+                    "artist": repair_text(
+                        t.get("originalTitle")
+                        or t.get("grandparentTitle", "")
+                    ),
+                    "track_artist": repair_text(
+                        t.get("originalTitle", "")
+                    ),
+                    "album_artist": repair_text(
+                        t.get("grandparentTitle", "")
+                    ),
+                    "album": repair_text(
+                        t.get("parentTitle", "")
+                    ),
+                    "plex_id": str(t.get("ratingKey")),
+                    "key": t.get("key"),
+                }
+                for t in tracks
+                if t.get("ratingKey")
+            ]
+
+        except Exception as e:
+            print(f"Error searching library: {e}")
+            return []
+
+    def search_artists(
+        self,
+        query: str = "",
+        limit: int = 10,
+    ) -> List[dict]:
+        """Search artists only inside the configured Plex music library."""
+        try:
+            resp = requests.get(
+                f"{self.base_url}/library/sections/"
+                f"{self.music_library_key}/all",
+                headers=self.headers,
+                params={"type": 8},
+                timeout=30,
+            )
+
+            if resp.status_code != 200:
+                print(
+                    "Failed to fetch Plex artists: "
+                    f"{resp.status_code}"
+                )
+                return []
+
+            artists = (
+                resp.json()
+                .get("MediaContainer", {})
+                .get("Metadata", [])
+            )
+
+            unique = {}
+
+            for artist in artists:
+                title = repair_text(
+                    artist.get("title", "")
+                ).strip()
+                rating_key = artist.get(
+                    "ratingKey"
+                )
+
+                if not title:
+                    continue
+
+                key = title.casefold()
+                if key not in unique:
+                    unique[key] = {
+                        "name": title,
+                        "plex_id": (
+                            str(rating_key)
+                            if rating_key is not None
+                            else ""
+                        ),
+                    }
+
+            values = list(unique.values())
+            search = repair_text(query).strip()
+
+            if not search:
+                return sorted(
+                    values,
+                    key=lambda item: item["name"].casefold(),
+                )[:limit]
+
+            search_norm = Matcher._normalize_match_text(
+                search
+            )
+            ranked = []
+
+            for artist in values:
+                artist_norm = Matcher._normalize_match_text(
+                    artist["name"]
+                )
+                score = max(
+                    fuzz.ratio(
+                        search_norm,
+                        artist_norm,
+                    ),
+                    fuzz.token_set_ratio(
+                        search_norm,
+                        artist_norm,
+                    ),
+                )
+                ranked.append(
+                    (score, artist["name"].casefold(), artist)
+                )
+
+            ranked.sort(
+                key=lambda item: (
+                    item[0],
+                    item[1],
+                ),
+                reverse=True,
+            )
+
+            return [
+                {
+                    **item[2],
+                    "score": item[0],
+                }
+                for item in ranked[:limit]
+            ]
+
+        except Exception as e:
+            print(
+                f"Error searching Plex artists: {e}"
+            )
+            return []
+
+    def get_audio_playlists(self) -> List[dict]:
+        """
+        Return every Plex audio playlist visible to this server/token.
+
+        This is used only by read-only developer diagnostics. Both normal and
+        smart audio playlists are included when Plex exposes them.
+        """
+
+        try:
+            resp = requests.get(
+                f"{self.base_url}/playlists",
+                headers=self.headers,
+                timeout=15,
+            )
+
+            if resp.status_code != 200:
+                print(
+                    f"Failed to get Plex playlists: "
+                    f"{resp.status_code}"
+                )
+                return []
+
+            playlists = (
+                resp.json()
+                .get("MediaContainer", {})
+                .get("Metadata", [])
+            )
+
+            results = []
+
+            for playlist in playlists:
+                playlist_type = str(
+                    playlist.get("playlistType")
+                    or playlist.get("type")
+                    or ""
+                ).casefold()
+
+                # Plex normally reports playlistType="audio". If the field is
+                # absent on a server/version, retain the item unless it is
+                # explicitly known to be video/photo.
+                if playlist_type in (
+                    "video",
+                    "photo",
+                ):
+                    continue
+
+                if (
+                    playlist_type
+                    and playlist_type != "audio"
+                ):
+                    continue
+
+                rating_key = playlist.get(
+                    "ratingKey"
+                )
+
+                if rating_key is None:
+                    continue
+
+                results.append(
+                    {
+                        "plex_id": str(rating_key),
+                        "title": repair_text(
+                            playlist.get("title", "")
+                        ),
+                        "smart": bool(
+                            playlist.get("smart")
+                        ),
+                        "leaf_count": playlist.get(
+                            "leafCount"
+                        ),
+                    }
+                )
+
+            return results
+
+        except Exception as e:
+            print(
+                f"Error getting Plex playlists: {e}"
+            )
+            return []
+
+    def get_playlist(self, playlist_id: str) -> dict:
+        """Get playlist details."""
+
+        try:
+            resp = requests.get(
+                f"{self.base_url}/playlists/{playlist_id}",
+                headers=self.headers,
+                timeout=10,
+            )
+
+            if resp.status_code == 200:
+                return (
+                    resp.json()
+                    .get("MediaContainer", {})
+                    .get("Metadata", [{}])[0]
+                )
+
+            print(
+                f"Failed to get playlist details: {resp.status_code}"
+            )
+            return {}
+
+        except Exception as e:
+            print(f"Error getting playlist: {e}")
+            return {}
+
+    def get_playlist_items(self, playlist_id: str) -> List[dict]:
+        """
+        Get playlist items.
+
+        IMPORTANT:
+        Plex exposes playlistItemID for the item inside the playlist.
+        That is different from the track's ratingKey and is what must
+        be used when deleting a playlist item.
+        """
+
+        try:
+            resp = requests.get(
+                f"{self.base_url}/playlists/{playlist_id}/items",
+                headers=self.headers,
+                timeout=15,
+            )
+
+            if resp.status_code != 200:
+                print(
+                    f"Failed to get playlist items: "
+                    f"{resp.status_code}"
+                )
+                return []
+
+            items = (
+                resp.json()
+                .get("MediaContainer", {})
+                .get("Metadata", [])
+            )
+
+            return [
+                {
+                    "playlist_item_id": i.get("playlistItemID"),
+                    "plex_id": str(i.get("ratingKey"))
+                    if i.get("ratingKey") is not None
+                    else None,
+                    "title": i.get("title", ""),
+                }
+                for i in items
+            ]
+
+        except Exception as e:
+            print(f"Error getting playlist items: {e}")
+            return []
+
+    def get_playlist_item_count(
+        self,
+        playlist_id: str,
+    ) -> Optional[int]:
+        """Return the current Plex playlist item count, or None on failure."""
+        try:
+            resp = requests.get(
+                f"{self.base_url}/playlists/{playlist_id}/items",
+                headers=self.headers,
+                timeout=15,
+            )
+
+            if resp.status_code != 200:
+                print(
+                    "Failed to get Plex playlist item count: "
+                    f"{resp.status_code}"
+                )
+                return None
+
+            container = resp.json().get(
+                "MediaContainer",
+                {},
+            )
+
+            for field in ("totalSize", "size"):
+                value = container.get(field)
+                if isinstance(value, int):
+                    return value
+                if isinstance(value, str) and value.isdigit():
+                    return int(value)
+
+            items = container.get(
+                "Metadata",
+                [],
+            )
+            return len(items) if isinstance(items, list) else 0
+
+        except Exception as e:
+            print(
+                f"Error getting Plex playlist item count: {e}"
+            )
+            return None
+
+    def create_playlist(
+        self,
+        title: str,
+        first_track_plex_id: str,
+        description: str = "",
+    ) -> Optional[str]:
+        """
+        Create a normal Plex audio playlist.
+
+        Plex requires a media URI when creating a normal playlist, so
+        the first matched track is used as the initial playlist item.
+        """
+
+        try:
+            uri = self._library_uri(first_track_plex_id)
+
+            resp = requests.post(
+                f"{self.base_url}/playlists",
+                headers=self.headers,
+                params={
+                    "type": "audio",
+                    "title": title,
+                    "smart": 0,
+                    "uri": uri,
+                },
+                timeout=15,
+            )
+
+            if resp.status_code not in [200, 201]:
+                print(
+                    f"Plex error ({resp.status_code}): "
+                    f"{resp.text[:2000]}"
+                )
+                return None
+
+            try:
+                data = resp.json()
+            except ValueError:
+                print(
+                    "Plex created the playlist but returned "
+                    f"non-JSON data: {resp.text[:1000]}"
+                )
+                return None
+
+            container = data.get("MediaContainer", {})
+            metadata = container.get("Metadata", [])
+
+            if not metadata:
+                print(
+                    f"No playlist metadata in Plex response: "
+                    f"{resp.text[:2000]}"
+                )
+                return None
+
+            playlist_id = metadata[0].get("ratingKey")
+
+            if not playlist_id:
+                print(
+                    "Plex response did not contain a playlist ratingKey"
+                )
+                return None
+
+            # Description is updated separately because Plex playlist
+            # creation does not reliably accept it in all versions.
+            if description:
+                self.update_playlist_metadata(
+                    str(playlist_id), title, description
+                )
+
+            return str(playlist_id)
+
+        except requests.RequestException as e:
+            print(f"Error creating playlist: {e}")
+            return None
+        except Exception as e:
+            print(f"Error creating playlist: {e}")
+            return None
+
+    def add_to_playlist(
+        self, playlist_id: str, track_plex_id: str
+    ) -> bool:
+        """Add a Plex library track to a Plex playlist."""
+
+        try:
+            uri = self._library_uri(track_plex_id)
+
+            resp = requests.put(
+                f"{self.base_url}/playlists/{playlist_id}/items",
+                headers=self.headers,
+                params={"uri": uri},
+                timeout=15,
+            )
+
+            if resp.status_code not in [200, 201]:
+                print(
+                    f"Warning: Failed to add track "
+                    f"{track_plex_id}: {resp.status_code} "
+                    f"{resp.text[:500]}"
+                )
+                return False
+
+            return True
+
+        except Exception as e:
+            print(f"Error adding to playlist: {e}")
+            return False
+
+    def remove_from_playlist(
+        self, playlist_id: str, playlist_item_id: str
+    ) -> bool:
+        """
+        Remove an item from a Plex playlist.
+
+        playlist_item_id must be Plex's playlistItemID, not the
+        track's ratingKey.
+        """
+
+        try:
+            resp = requests.delete(
+                f"{self.base_url}/playlists/{playlist_id}/items/"
+                f"{playlist_item_id}",
+                headers=self.headers,
+                timeout=15,
+            )
+
+            if resp.status_code not in [200, 204]:
+                print(
+                    f"Warning: Failed to remove playlist item "
+                    f"{playlist_item_id}: {resp.status_code} "
+                    f"{resp.text[:500]}"
+                )
+                return False
+
+            return True
+
+        except Exception as e:
+            print(f"Error removing from playlist: {e}")
+            return False
+
+    def clear_playlist(self, playlist_id: str) -> bool:
+        """
+        Remove every item from a playlist.
+
+        Items are removed one at a time because Plex's playlist item
+        endpoint identifies each item by playlistItemID.
+        """
+
+        items = self.get_playlist_items(playlist_id)
+
+        if not items:
+            return True
+
+        success = True
+
+        for item in items:
+            item_id = item.get("playlist_item_id")
+
+            if not item_id:
+                print(
+                    f"Warning: Playlist item for "
+                    f"'{item.get('title', 'Unknown')}' has no "
+                    "playlistItemID; cannot remove it."
+                )
+                success = False
+                continue
+
+            if not self.remove_from_playlist(
+                playlist_id, str(item_id)
+            ):
+                success = False
+
+        return success
+
+    def update_playlist_metadata(
+        self,
+        playlist_id: str,
+        title: str,
+        description: str,
+        artwork_url: str = None,
+    ):
+        """Update playlist name, description, and optionally artwork."""
+
+        try:
+            clean_title = repair_text(
+                title
+            )
+            clean_description = clean_playlist_description(
+                description or ""
+            )
+
+            params = {
+                "title": clean_title,
+                "summary": clean_description,
+            }
+
+            resp = requests.put(
+                f"{self.base_url}/playlists/{playlist_id}",
+                headers=self.headers,
+                params=params,
+                timeout=15,
+            )
+
+            if resp.status_code not in [200, 204]:
+                print(
+                    f"Warning: Failed to update playlist metadata: "
+                    f"{resp.status_code} {resp.text[:500]}"
+                )
+
+            # Attempt to update artwork if URL provided
+            if artwork_url:
+                if self._update_playlist_artwork(
+                    playlist_id,
+                    artwork_url,
+                ):
+                    print("  ✓ Synced artwork from source")
+
+        except Exception as e:
+            print(f"Error updating playlist metadata: {e}")
+
+    @staticmethod
+    def _detect_image_dimensions(data: bytes) -> Tuple[Optional[int], Optional[int]]:
+        """
+        Detect PNG/JPEG dimensions using only the Python standard library.
+        This avoids adding Pillow as a required dependency.
+        """
+        if not data:
+            return None, None
+
+        # PNG: signature + IHDR width/height.
+        if (
+            len(data) >= 24
+            and data[:8] == b"\x89PNG\r\n\x1a\n"
+        ):
+            width = int.from_bytes(data[16:20], "big")
+            height = int.from_bytes(data[20:24], "big")
+            return width, height
+
+        # JPEG: scan marker segments until a Start Of Frame marker.
+        if len(data) >= 4 and data[:2] == b"\xff\xd8":
+            i = 2
+            sof_markers = {
+                0xC0, 0xC1, 0xC2, 0xC3,
+                0xC5, 0xC6, 0xC7,
+                0xC9, 0xCA, 0xCB,
+                0xCD, 0xCE, 0xCF,
+            }
+
+            while i + 3 < len(data):
+                if data[i] != 0xFF:
+                    i += 1
+                    continue
+
+                while i < len(data) and data[i] == 0xFF:
+                    i += 1
+
+                if i >= len(data):
+                    break
+
+                marker = data[i]
+                i += 1
+
+                # Standalone markers.
+                if marker in (0xD8, 0xD9):
+                    continue
+
+                if i + 1 >= len(data):
+                    break
+
+                segment_length = int.from_bytes(
+                    data[i:i + 2],
+                    "big",
+                )
+
+                if segment_length < 2:
+                    break
+
+                if marker in sof_markers and i + 7 < len(data):
+                    height = int.from_bytes(
+                        data[i + 3:i + 5],
+                        "big",
+                    )
+                    width = int.from_bytes(
+                        data[i + 5:i + 7],
+                        "big",
+                    )
+                    return width, height
+
+                i += segment_length
+
+        return None, None
+
+    @staticmethod
+    def _apple_artwork_variants(
+        url: str,
+    ) -> List[str]:
+        """
+        Generate Apple CDN artwork alternatives.
+
+        Query strings such as ?l=en-US are preserved. The rendition regex is
+        applied only to parsed.path so those query parameters no longer block
+        creation of Apple's square "cc" crop URLs.
+        """
+        variants = [url]
+
+        try:
+            parsed = urlparse(url)
+            host = (
+                parsed.hostname
+                or ""
+            ).lower()
+        except ValueError:
+            return variants
+
+        if "mzstatic" not in host:
+            return variants
+
+        path = parsed.path
+        size = APPLE_ARTWORK_SIZE
+
+        match = re.search(
+            r"/\d+x\d+[A-Za-z0-9._-]*\.(?:jpe?g|png|webp)$",
+            path,
+            re.IGNORECASE,
+        )
+
+        if match:
+            base_path = path[:match.start()]
+
+            for candidate_path in (
+                f"{base_path}/{size}x{size}cc.jpg",
+                f"{base_path}/{size}x{size}bb-999.jpg",
+            ):
+                candidate = parsed._replace(
+                    path=candidate_path
+                ).geturl()
+
+                if candidate not in variants:
+                    variants.append(
+                        candidate
+                    )
+
+        cc_path = re.sub(
+            r"/(\d+)x(\d+)bb(?:-\d+)?\.(jpe?g|png|webp)$",
+            r"/\1x\2cc.\3",
+            path,
+            flags=re.IGNORECASE,
+        )
+
+        if cc_path != path:
+            candidate = parsed._replace(
+                path=cc_path
+            ).geturl()
+
+            if candidate not in variants:
+                variants.append(candidate)
+
+        return variants
+
+    @staticmethod
+    def _center_crop_square(
+        image_data: bytes,
+        content_type: str,
+    ) -> Tuple[
+        Optional[bytes],
+        Optional[str],
+        Optional[int],
+    ]:
+        """
+        Center-crop an image to the largest possible square.
+
+        A 1200x630 image becomes 630x630 by removing 285 pixels from
+        each horizontal side. No stretching is performed.
+        """
+        if Image is None:
+            return None, None, None
+
+        try:
+            with Image.open(
+                BytesIO(image_data)
+            ) as image:
+                width, height = image.size
+                side = min(
+                    width,
+                    height,
+                )
+
+                if side < 600:
+                    return None, None, side
+
+                left = max(
+                    0,
+                    (width - side) // 2,
+                )
+                top = max(
+                    0,
+                    (height - side) // 2,
+                )
+
+                cropped = image.crop(
+                    (
+                        left,
+                        top,
+                        left + side,
+                        top + side,
+                    )
+                )
+
+                output = BytesIO()
+                normalized_type = (
+                    str(content_type or "")
+                    .split(";", 1)[0]
+                    .strip()
+                    .lower()
+                )
+
+                if normalized_type == "image/png":
+                    cropped.save(
+                        output,
+                        format="PNG",
+                        optimize=True,
+                    )
+                    output_type = "image/png"
+                else:
+                    if cropped.mode not in (
+                        "RGB",
+                        "L",
+                    ):
+                        cropped = cropped.convert(
+                            "RGB"
+                        )
+
+                    cropped.save(
+                        output,
+                        format="JPEG",
+                        quality=95,
+                        optimize=True,
+                    )
+                    output_type = "image/jpeg"
+
+                return (
+                    output.getvalue(),
+                    output_type,
+                    side,
+                )
+
+        except Exception:
+            return None, None, None
+
+    def _update_playlist_artwork(
+        self,
+        playlist_id: str,
+        artwork_url: str,
+    ) -> bool:
+        """
+        Upload square artwork to Plex.
+
+        Preference order:
+        1. already-square source artwork;
+        2. Apple CDN square crop variants;
+        3. local center crop of the first large non-square image.
+        """
+
+        if not artwork_url:
+            return False
+
+        variants = self._apple_artwork_variants(
+            artwork_url
+        )
+
+        last_error = None
+        crop_fallback = None
+
+        for index, candidate_url in enumerate(
+            variants,
+            1,
+        ):
+            try:
+                image_resp = requests.get(
+                    candidate_url,
+                    headers={
+                        "User-Agent": (
+                            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/124.0.0.0 Safari/537.36"
+                        ),
+                        "Accept": (
+                            "image/avif,image/webp,image/apng,"
+                            "image/*,*/*;q=0.8"
+                        ),
+                    },
+                    timeout=15,
+                )
+
+                if image_resp.status_code != 200:
+                    last_error = (
+                        f"HTTP {image_resp.status_code} downloading "
+                        f"artwork variant {index}"
+                    )
+                    continue
+
+                content_type = (
+                    image_resp.headers.get(
+                        "Content-Type",
+                        "",
+                    )
+                    .split(";", 1)[0]
+                    .strip()
+                    .lower()
+                )
+
+                if not content_type.startswith(
+                    "image/"
+                ):
+                    last_error = (
+                        f"variant {index} returned "
+                        f"{content_type or 'unknown content type'}"
+                    )
+                    continue
+
+                if not image_resp.content:
+                    last_error = (
+                        f"variant {index} returned an empty image"
+                    )
+                    continue
+
+                width, height = (
+                    self._detect_image_dimensions(
+                        image_resp.content
+                    )
+                )
+
+                if width and height:
+                    print(
+                        f"  → Artwork variant {index}: "
+                        f"{width}x{height} actual pixels"
+                    )
+
+                    ratio = (
+                        width / height
+                        if height
+                        else 0
+                    )
+
+                    if not (
+                        0.95
+                        <= ratio
+                        <= 1.05
+                    ):
+                        if (
+                            min(
+                                width,
+                                height,
+                            )
+                            >= 600
+                            and crop_fallback is None
+                        ):
+                            crop_fallback = {
+                                "data": image_resp.content,
+                                "content_type": content_type,
+                                "width": width,
+                                "height": height,
+                            }
+
+                            print(
+                                "    ↳ not square; saved as "
+                                "center-crop fallback"
+                            )
+                        else:
+                            print(
+                                "    ↳ rejected: not square enough "
+                                "for direct Plex upload"
+                            )
+
+                        last_error = (
+                            f"variant {index} was {width}x{height}"
+                        )
+                        continue
+
+                    if min(
+                        width,
+                        height,
+                    ) < 600:
+                        print(
+                            "    ↳ rejected: artwork is below "
+                            "600x600"
+                        )
+                        last_error = (
+                            f"variant {index} was only "
+                            f"{width}x{height}"
+                        )
+                        continue
+
+                else:
+                    try:
+                        host = (
+                            urlparse(
+                                candidate_url
+                            ).hostname
+                            or ""
+                        ).lower()
+                    except ValueError:
+                        host = ""
+
+                    if "mzstatic" in host:
+                        last_error = (
+                            "could not verify Apple artwork dimensions"
+                        )
+                        continue
+
+                upload_resp = requests.post(
+                    f"{self.base_url}/library/metadata/"
+                    f"{playlist_id}/posters",
+                    headers={
+                        "X-Plex-Token": self.token,
+                        "Content-Type": content_type,
+                    },
+                    data=image_resp.content,
+                    timeout=20,
+                )
+
+                if upload_resp.status_code in [
+                    200,
+                    201,
+                    204,
+                ]:
+                    if width and height:
+                        print(
+                            f"  ✓ Plex poster uploaded at "
+                            f"{width}x{height}"
+                        )
+                    return True
+
+                last_error = (
+                    f"Plex poster upload HTTP "
+                    f"{upload_resp.status_code}"
+                )
+
+            except requests.exceptions.Timeout:
+                last_error = (
+                    f"artwork variant {index} timed out"
+                )
+            except requests.exceptions.RequestException as e:
+                last_error = (
+                    f"artwork variant {index} request error: {e}"
+                )
+            except Exception as e:
+                last_error = (
+                    f"artwork variant {index} error: {e}"
+                )
+
+        if crop_fallback is not None:
+            original_width = crop_fallback[
+                "width"
+            ]
+            original_height = crop_fallback[
+                "height"
+            ]
+
+            cropped_data, cropped_type, side = (
+                self._center_crop_square(
+                    crop_fallback["data"],
+                    crop_fallback[
+                        "content_type"
+                    ],
+                )
+            )
+
+            if (
+                cropped_data
+                and cropped_type
+                and side
+            ):
+                print(
+                    f"  → Local center crop: "
+                    f"{original_width}x{original_height} "
+                    f"→ {side}x{side}"
+                )
+
+                try:
+                    upload_resp = requests.post(
+                        f"{self.base_url}/library/metadata/"
+                        f"{playlist_id}/posters",
+                        headers={
+                            "X-Plex-Token": self.token,
+                            "Content-Type": cropped_type,
+                        },
+                        data=cropped_data,
+                        timeout=20,
+                    )
+
+                    if upload_resp.status_code in [
+                        200,
+                        201,
+                        204,
+                    ]:
+                        print(
+                            f"  ✓ Plex poster uploaded at "
+                            f"{side}x{side} "
+                            "(center crop)"
+                        )
+                        return True
+
+                    last_error = (
+                        "center-cropped Plex poster upload "
+                        f"HTTP {upload_resp.status_code}"
+                    )
+
+                except requests.exceptions.Timeout:
+                    last_error = (
+                        "center-cropped Plex poster upload "
+                        "timed out"
+                    )
+                except requests.exceptions.RequestException as e:
+                    last_error = (
+                        "center-cropped Plex poster upload "
+                        f"request error: {e}"
+                    )
+
+            elif Image is None:
+                last_error = (
+                    "local center crop requires Pillow "
+                    "(pip install pillow)"
+                )
+            else:
+                last_error = (
+                    "local center crop could not process "
+                    f"{original_width}x{original_height} artwork"
+                )
+
+        print(
+            "  ⚠ No suitable square artwork was uploaded"
+        )
+
+        if last_error:
+            print(
+                f"    Last artwork issue: {last_error}"
+            )
+
+        return False
+
+
+
+class Matcher:
+    """Track matching logic with title/artist identity + album preference."""
+
+    # Normalized artist -> every normalized name in the same global alias group.
+    ARTIST_ALIAS_LOOKUP = {}
+
+    MATCH_THRESHOLD = 90
+    PROMPT_THRESHOLD = 70
+    MIN_DISPLAY_SCORE = 50
+
+    # These are ranking penalties, not hard exclusions. If the only copy
+    # available is on a compilation/live/deluxe release, it can still match.
+    ALBUM_TYPE_PENALTIES = {
+        "compilation": 14,
+        "live": 16,
+        "remix": 14,
+        "acoustic": 10,
+        "demo": 16,
+        "session": 14,
+    }
+
+    # Track-title markers that identify a distinct recording/version.
+    # Featured-artist credits are intentionally NOT included here.
+    # "session" means branded platform sessions (iTunes/Apple Music/Spotify),
+    # not generic album-era provenance such as "(Evolver Sessions)".
+    VERSION_TYPES = {
+        "remix",
+        "live",
+        "acoustic",
+        "demo",
+        "session",
+    }
+
+    @staticmethod
+    def _normalize_match_text(value: str) -> str:
+        """Normalize punctuation/whitespace used in title and artist scoring."""
+        if not value:
+            return ""
+
+        text = repair_text(value).casefold()
+        text = (
+            text.replace("’", "'")
+            .replace("‘", "'")
+            .replace("“", '"')
+            .replace("”", '"')
+            .replace("–", "-")
+            .replace("—", "-")
+        )
+        return re.sub(r"\s+", " ", text).strip()
+
+    @classmethod
+    def _strip_title_metadata(cls, title: str) -> str:
+        """
+        Remove common release/credit qualifiers that are usually metadata,
+        while leaving arbitrary parenthetical subtitles intact.
+
+        Examples:
+            Dark Sky (feat. S.A. Martinez) -> Dark Sky
+            Song (Remastered 2011) -> Song
+            Song - Radio Edit -> Song
+        """
+        value = cls._normalize_match_text(title)
+
+        if not value:
+            return ""
+
+        # Parenthetical/bracketed metadata.
+        metadata_parenthetical = re.compile(
+            r"\s*[\(\[]\s*"
+            r"(?:"
+            r"feat(?:uring)?\.?|ft\.?|with|"
+            r"(?:\d{4}\s+)?remaster(?:ed)?(?:\s+\d{4})?|"
+            r"live\b[^)\]]*|"
+            r"acoustic|stripped|"
+            r"demo\b[^)\]]*|"
+            r"(?:itunes\s+)?sessions?\b[^)\]]*|"
+            r"[^)\]]+\s+sessions?\b[^)\]]*|"
+            r"radio\s+(?:edit|mix)|single\s+edit|edit|"
+            r"remix(?:ed)?|mix|"
+            r"[^)\]]+\s+(?:remix|mix)\b[^)\]]*|"
+            r"mono|stereo|"
+            r"bonus\s+track|"
+            r"from\s+.+?(?:soundtrack|motion\s+picture)"
+            r")"
+            r"[^)\]]*[\)\]]",
+            re.IGNORECASE,
+        )
+
+        value = metadata_parenthetical.sub(" ", value)
+
+        # Suffix metadata outside parentheses.
+        value = re.sub(
+            r"\s*[-:]\s*"
+            r"(?:"
+            r"feat(?:uring)?\.?|ft\.?|with|"
+            r"(?:\d{4}\s+)?remaster(?:ed)?(?:\s+\d{4})?|"
+            r"live(?:\s+(?:at|from|in|on)\b.*)?|"
+            r"acoustic|stripped|"
+            r"demo\b.*|"
+            r"(?:itunes\s+)?sessions?\b.*|"
+            r"radio\s+(?:edit|mix)|single\s+edit|edit|"
+            r"remix(?:ed)?|mix|mono|stereo"
+            r")\b.*$",
+            "",
+            value,
+            flags=re.IGNORECASE,
+        )
+
+        # Featured-credit suffix without punctuation.
+        value = re.sub(
+            r"\s+(?:feat(?:uring)?\.?|ft\.?)\s+.+$",
+            "",
+            value,
+            flags=re.IGNORECASE,
+        )
+
+        return re.sub(r"\s+", " ", value).strip(" -:")
+
+    @classmethod
+    def _strip_trailing_parenthetical(cls, title: str) -> Tuple[str, bool]:
+        """
+        Return title without one arbitrary trailing (...) or [...] qualifier.
+
+        This broad fallback is only compared when one side has the trailing
+        qualifier and the other side does not. That avoids collapsing:
+            Song (Part 1)
+            Song (Part 2)
+        into the same title.
+        """
+        value = cls._normalize_match_text(title)
+
+        if not value:
+            return "", False
+
+        stripped = re.sub(
+            r"\s*[\(\[][^)\]]+[\)\]]\s*$",
+            "",
+            value,
+        ).strip()
+
+        return stripped, stripped != value
+
+    @classmethod
+    def _title_score(cls, source_title: str, plex_title: str) -> Tuple[int, int]:
+        """
+        Return (best_title_score, raw_title_score).
+
+        The best score considers:
+        - literal titles;
+        - safe metadata-stripped titles;
+        - a one-sided arbitrary trailing-parenthetical fallback.
+
+        The one-sided rule is what allows:
+            Austin (Boots Stop Workin') <-> Austin
+        without making:
+            Song (Part 1) <-> Song (Part 2)
+        an artificial 100% match.
+        """
+        source_raw = cls._normalize_match_text(source_title)
+        plex_raw = cls._normalize_match_text(plex_title)
+
+        raw_score = fuzz.token_sort_ratio(
+            source_raw,
+            plex_raw,
+        )
+
+        scores = [raw_score]
+
+        # Treat common dotted abbreviations as equivalent display styling:
+        #   3 A.M. <-> 3 am
+        #   H.O.V.A. <-> HOVA
+        abbreviation_pattern = re.compile(
+            r"(?<=[a-z])\.(?=(?:[a-z]\.)|(?:\s|$))",
+            flags=re.IGNORECASE,
+        )
+        source_abbrev = abbreviation_pattern.sub(
+            "",
+            source_raw,
+        )
+        plex_abbrev = abbreviation_pattern.sub(
+            "",
+            plex_raw,
+        )
+
+        if source_abbrev and plex_abbrev:
+            scores.append(
+                fuzz.token_sort_ratio(
+                    source_abbrev,
+                    plex_abbrev,
+                )
+            )
+
+        source_meta = cls._strip_title_metadata(source_raw)
+        plex_meta = cls._strip_title_metadata(plex_raw)
+
+        if source_meta and plex_meta:
+            scores.append(
+                fuzz.token_sort_ratio(
+                    source_meta,
+                    plex_meta,
+                )
+            )
+
+        if source_meta and plex_raw:
+            scores.append(
+                fuzz.token_sort_ratio(
+                    source_meta,
+                    plex_raw,
+                )
+            )
+
+        if source_raw and plex_meta:
+            scores.append(
+                fuzz.token_sort_ratio(
+                    source_raw,
+                    plex_meta,
+                )
+            )
+
+        source_base, source_had_trailing = (
+            cls._strip_trailing_parenthetical(source_meta)
+        )
+        plex_base, plex_had_trailing = (
+            cls._strip_trailing_parenthetical(plex_meta)
+        )
+
+        # Generic parenthetical fallback only if ONE side has it.
+        if source_had_trailing and not plex_had_trailing:
+            if source_base and plex_meta:
+                scores.append(
+                    fuzz.token_sort_ratio(
+                        source_base,
+                        plex_meta,
+                    )
+                )
+
+        # Deliberately do NOT apply the arbitrary fallback in reverse.
+        # A destination-only qualifier can identify a different recording or
+        # arrangement, e.g.:
+        #   Bring Me to Life -> Bring Me to Life (Synthesis)
+        #
+        # Known metadata such as feat/remaster/live/remix is already handled
+        # by _strip_title_metadata() and the release-type penalties below.
+
+        return max(scores), raw_score
+
+    @classmethod
+    def _title_remix_credit(cls, title: str) -> str:
+        """
+        Extract a named remix credit from a title.
+
+        Example:
+            Dracula (JENNIE Remix) -> jennie
+
+        A generic "(Remix)" does not identify a collaborator and therefore
+        returns an empty string.
+        """
+        value = cls._normalize_match_text(title)
+
+        if not value:
+            return ""
+
+        match = re.search(
+            r"[\(\[]\s*(.+?)\s+remix\s*[\)\]]",
+            value,
+            flags=re.IGNORECASE,
+        )
+
+        if not match:
+            return ""
+
+        credit = match.group(1).strip()
+
+        if not credit or credit == "remix":
+            return ""
+
+        return credit
+
+    @classmethod
+    def _title_has_feature_credit(cls, title: str) -> bool:
+        """Return True when a title explicitly identifies a featured guest."""
+        value = cls._normalize_match_text(title)
+
+        if not value:
+            return False
+
+        return bool(
+            re.search(
+                r"(?:^|[\s(\[\-:])"
+                r"(?:feat(?:uring)?\.?|ft\.?|with)"
+                r"\s+",
+                value,
+                flags=re.IGNORECASE,
+            )
+        )
+
+    @classmethod
+    def set_artist_aliases(
+        cls,
+        alias_groups: dict,
+    ):
+        """Configure symmetric global artist alias equivalence groups."""
+        graph = {}
+
+        if not isinstance(alias_groups, dict):
+            cls.ARTIST_ALIAS_LOOKUP = {}
+            return
+
+        for canonical, aliases in alias_groups.items():
+            canonical_norm = cls._normalize_match_text(
+                canonical
+            )
+
+            if not canonical_norm:
+                continue
+
+            if isinstance(aliases, str):
+                alias_values = [aliases]
+            elif isinstance(aliases, list):
+                alias_values = aliases
+            else:
+                continue
+
+            members = {canonical_norm}
+
+            for alias in alias_values:
+                alias_norm = cls._normalize_match_text(alias)
+                if alias_norm:
+                    members.add(alias_norm)
+
+            for member in members:
+                graph.setdefault(member, set()).update(
+                    members - {member}
+                )
+
+        lookup = {}
+        visited = set()
+
+        for start in graph:
+            if start in visited:
+                continue
+
+            stack = [start]
+            component = set()
+
+            while stack:
+                current = stack.pop()
+                if current in component:
+                    continue
+
+                component.add(current)
+                stack.extend(
+                    graph.get(current, set()) - component
+                )
+
+            visited.update(component)
+            ordered = sorted(component)
+
+            for member in component:
+                lookup[member] = ordered
+
+        cls.ARTIST_ALIAS_LOOKUP = lookup
+
+    @classmethod
+    def _expand_artist_aliases(
+        cls,
+        variants: List[str],
+    ) -> List[str]:
+        """Expand normalized artist variants through global aliases."""
+        expanded = []
+
+        for variant in variants:
+            if variant and variant not in expanded:
+                expanded.append(variant)
+
+            for alias in cls.ARTIST_ALIAS_LOOKUP.get(
+                variant,
+                [],
+            ):
+                if alias and alias not in expanded:
+                    expanded.append(alias)
+
+        return expanded
+
+    @classmethod
+    def _artist_variants(
+        cls,
+        artist: str,
+        allow_primary_collaborator: bool = False,
+    ) -> List[str]:
+        """
+        Generate conservative artist variants.
+
+        When the source title explicitly says "feat." (or equivalent), the
+        first/primary portion of a collaboration string is also considered.
+        This allows:
+            AWOLNATION & Nothing But Thieves -> AWOLNATION
+        for:
+            Maniac (feat. Conor Mason of Nothing but Thieves)
+
+        We only enable that behavior when the track title itself tells us the
+        additional artist is a feature, so ordinary co-billed artists are not
+        silently discarded.
+        """
+        value = cls._normalize_match_text(artist)
+
+        if not value:
+            return [""]
+
+        variants = [value]
+
+        # Artist-string feature syntax.
+        primary = re.sub(
+            r"\s+(?:feat(?:uring)?\.?|ft\.?|with)\s+.+$",
+            "",
+            value,
+            flags=re.IGNORECASE,
+        ).strip()
+
+        if primary and primary not in variants:
+            variants.append(primary)
+
+        if allow_primary_collaborator:
+            # Add progressively shorter collaboration prefixes. This is safer
+            # than blindly taking only the first token because artist names
+            # can themselves contain "&".
+            for separator in (" & ", " x ", " and "):
+                if separator not in value:
+                    continue
+
+                parts = value.split(separator)
+
+                # All prefixes except the complete original value.
+                for end in range(1, len(parts)):
+                    candidate = separator.join(parts[:end]).strip()
+                    if candidate and candidate not in variants:
+                        variants.append(candidate)
+
+        return cls._expand_artist_aliases(
+            variants
+        )
+
+    @classmethod
+    def _artist_score(
+        cls,
+        source_artist: str,
+        plex_artist: str,
+        source_title: str = "",
+        plex_title: str = "",
+    ) -> int:
+        """Return the best conservative artist score."""
+        remix_credit = cls._title_remix_credit(
+            source_title
+        )
+
+        allow_source_primary = (
+            cls._title_has_feature_credit(source_title)
+            or (
+                bool(remix_credit)
+                and remix_credit
+                in cls._normalize_match_text(source_artist)
+            )
+        )
+
+        source_variants = cls._artist_variants(
+            source_artist,
+            allow_primary_collaborator=allow_source_primary,
+        )
+
+        plex_variants = cls._artist_variants(
+            plex_artist,
+            allow_primary_collaborator=cls._title_has_feature_credit(
+                plex_title
+            ),
+        )
+
+        return max(
+            fuzz.ratio(source_variant, plex_variant)
+            for source_variant in source_variants
+            for plex_variant in plex_variants
+        )
+
+
+    @classmethod
+    def _title_release_types(cls, title: str) -> set:
+        """
+        Detect explicit recording/version intent in a track title.
+
+        Featured-artist credits are deliberately excluded because they may
+        appear on only one service while still referring to the same track.
+        """
+        value = cls._normalize_match_text(title)
+
+        if not value:
+            return set()
+
+        kinds = set()
+
+        # Remix and named Mix variants. "Radio Mix" / "Radio Edit" are
+        # intentionally treated as equivalent radio-version metadata, not as
+        # remix intent.
+        remix_value = re.sub(
+            r"\bradio\s+(?:mix|edit)\b",
+            " ",
+            value,
+            flags=re.IGNORECASE,
+        )
+
+        remix_patterns = (
+            r"\bremix(?:ed|es)?\b",
+            r"\bmixes\b",
+            r"[\(\[][^)\]]+\s+mix\b[^)\]]*[\)\]]",
+            r"\s[-:]\s*[^-:]*\bmix\b.*$",
+        )
+
+        if any(
+            re.search(pattern, remix_value, flags=re.IGNORECASE)
+            for pattern in remix_patterns
+        ):
+            kinds.add("remix")
+
+        # Live is deliberately conservative so a real title such as
+        # "Live Through This" is not treated as a live recording.
+        live_patterns = (
+            r"[\(\[]\s*live\b[^)\]]*[\)\]]",
+            r"\s[-:]\s*live(?:\s+(?:at|from|in|on)\b.*)?$",
+            r"\blive\s+(?:at|from|in|on)\b",
+            r"\bunplugged\b",
+            r"\bin concert\b",
+        )
+
+        if any(
+            re.search(pattern, value, flags=re.IGNORECASE)
+            for pattern in live_patterns
+        ):
+            kinds.add("live")
+
+        acoustic_patterns = (
+            r"[\(\[][^)\]]*\bacoustic\b[^)\]]*[\)\]]",
+            r"\s[-:]\s*[^-:]*\bacoustic\b.*$",
+            r"[\(\[][^)\]]*\bstripped\b[^)\]]*[\)\]]",
+            r"\s[-:]\s*[^-:]*\bstripped\b.*$",
+        )
+
+        if any(
+            re.search(pattern, value, flags=re.IGNORECASE)
+            for pattern in acoustic_patterns
+        ):
+            kinds.add("acoustic")
+
+        demo_patterns = (
+            r"[\(\[][^)\]]*\bdemo\b[^)\]]*[\)\]]",
+            r"\s[-:]\s*[^-:]*\bdemo\b.*$",
+        )
+
+        if any(
+            re.search(pattern, value, flags=re.IGNORECASE)
+            for pattern in demo_patterns
+        ):
+            kinds.add("demo")
+
+        # Distinct session recordings include branded platform sessions and
+        # clear broadcast/studio-performance session labels. Generic album-era
+        # provenance such as "(Evolver Sessions)" is deliberately not enough
+        # on its own to create session intent.
+        session_marker = (
+            r"(?:itunes|apple(?:\s+music)?|spotify|bbc|kexp|npr|"
+            r"peel|maida\s+vale|electro[-\s]?vox)"
+        )
+        session_patterns = (
+            rf"[\(\[][^)\]]*\b{session_marker}\b[^)\]]*"
+            r"\bsessions?\b[^)\]]*[\)\]]",
+            rf"\s[-:]\s*[^-:]*\b{session_marker}\b.*"
+            r"\bsessions?\b.*$",
+            r"[\(\[][^)\]]*\b(?:live|acoustic)\s+sessions?\b"
+            r"[^)\]]*[\)\]]",
+        )
+
+        if any(
+            re.search(pattern, value, flags=re.IGNORECASE)
+            for pattern in session_patterns
+        ):
+            kinds.add("session")
+
+        return kinds
+
+    @staticmethod
+    def _normalize_album(album: str) -> str:
+        """Normalize an album title for fuzzy album comparison."""
+        if not album:
+            return ""
+
+        value = str(album).casefold()
+        value = value.replace("’", "'").replace("–", "-").replace("—", "-")
+
+        # Remove common edition qualifiers while keeping the core album name.
+        value = re.sub(
+            r"[\(\[][^)\]]*"
+            r"(?:remaster(?:ed)?|deluxe|expanded|anniversary|"
+            r"bonus|special edition|collector'?s edition)"
+            r"[^)\]]*[\)\]]",
+            " ",
+            value,
+            flags=re.IGNORECASE,
+        )
+
+        value = re.sub(r"[^a-z0-9]+", " ", value)
+        return re.sub(r"\s+", " ", value).strip()
+
+    @classmethod
+    def _source_requires_album_provenance(
+        cls,
+        album: str,
+    ) -> bool:
+        """
+        Return True when the source album name carries recording provenance
+        that should not be silently discarded during automatic matching.
+
+        This is deliberately narrow. Normal studio/edition/compilation album
+        names keep the existing canonical-copy behavior. Archive/rarity
+        collections can contain alternate or otherwise specific recordings,
+        so an unrelated album copy should be reviewed instead of substituted.
+        """
+        value = cls._normalize_album(
+            album
+        )
+
+        if not value:
+            return False
+
+        patterns = (
+            r"\barchive\b",
+            r"\brarities?\b",
+            r"\bb sides?\b",
+            r"\bouttakes?\b",
+        )
+
+        return any(
+            re.search(
+                pattern,
+                value,
+                flags=re.IGNORECASE,
+            )
+            for pattern in patterns
+        )
+
+    @staticmethod
+    def _album_types(album: str) -> set:
+        """
+        Classify release types we normally want to rank below a studio album.
+
+        The patterns are intentionally conservative so an album whose actual
+        title happens to contain a word like "live" is less likely to be
+        penalized accidentally.
+        """
+        if not album:
+            return set()
+
+        value = str(album).casefold()
+        kinds = set()
+
+        compilation_patterns = (
+            r"\bgreatest hits\b",
+            r"\bbest of\b",
+            r"\bthe essential\b",
+            r"\bessential[s]?\b",
+            r"\banthology\b",
+            r"\bsingles collection\b",
+            r"\bcomplete collection\b",
+            r"\bhits collection\b",
+            r"\bcollected\b",
+        )
+
+        live_patterns = (
+            r"^live$",
+            r"\blive at\b",
+            r"\blive from\b",
+            r"\blive in\b",
+            r"\blive on\b",
+            r"\blive album\b",
+            r"\bunplugged\b",
+            r"\bin concert\b",
+            r"\bconcert recording\b",
+        )
+
+        remix_patterns = (
+            r"\bremix(?:es)?\b",
+            r"\bremixed\b",
+            r"\bmixes\b",
+        )
+
+        acoustic_patterns = (
+            r"\bacoustic\b",
+            r"\bstripped\b",
+        )
+
+        demo_patterns = (
+            r"\bdemo(?:s)?\b",
+        )
+
+        session_patterns = (
+            r"\b(?:itunes|apple(?:\s+music)?|spotify)\s+"
+            r"(?:home\s+)?sessions?\b",
+        )
+
+
+        if any(re.search(p, value) for p in compilation_patterns):
+            kinds.add("compilation")
+        if any(re.search(p, value) for p in live_patterns):
+            kinds.add("live")
+        if any(re.search(p, value) for p in remix_patterns):
+            kinds.add("remix")
+        if any(re.search(p, value) for p in acoustic_patterns):
+            kinds.add("acoustic")
+        if any(re.search(p, value) for p in demo_patterns):
+            kinds.add("demo")
+        if any(re.search(p, value) for p in session_patterns):
+            kinds.add("session")
+
+        return kinds
+
+    @classmethod
+    def score_candidate(
+        cls,
+        source_track: dict,
+        plex_track: dict,
+    ) -> dict:
+        """
+        Score one Plex candidate.
+
+        Title/artist determine identity. Album information only changes the
+        ranking among plausible copies of the same song.
+
+        This is deliberate: a Greatest Hits copy can still be used when it is
+        the only copy in Plex, but a studio-album copy should win when both
+        exist.
+        """
+        source_title = str(source_track.get("title", ""))
+        source_artist = str(source_track.get("artist", ""))
+        source_album = str(source_track.get("album", "") or "")
+
+        plex_title = str(plex_track.get("title", ""))
+        plex_artist = str(plex_track.get("artist", ""))
+        plex_album = str(plex_track.get("album", "") or "")
+
+        title_score, raw_title_score = cls._title_score(
+            source_title,
+            plex_title,
+        )
+
+        artist_score = cls._artist_score(
+            source_artist,
+            plex_artist,
+            source_title=source_title,
+            plex_title=plex_title,
+        )
+
+        # Preserve the existing strong artist penalty.
+        weighted_artist = artist_score
+        if artist_score < 70:
+            weighted_artist *= 0.3
+
+        identity_score = (
+            title_score * 0.65
+            + weighted_artist * 0.35
+        )
+
+        album_score = None
+        album_bonus = 0.0
+
+        if source_album and plex_album:
+            source_album_norm = cls._normalize_album(source_album)
+            plex_album_norm = cls._normalize_album(plex_album)
+
+            if source_album_norm and plex_album_norm:
+                album_score = fuzz.token_set_ratio(
+                    source_album_norm,
+                    plex_album_norm,
+                )
+
+                # Reward the intended album only after title identity is
+                # already plausible. This prevents a wrong song by the same
+                # artist on the same album from outranking the correct title.
+                if title_score >= 95:
+                    if album_score >= 95:
+                        album_bonus = 12
+                    elif album_score >= 85:
+                        album_bonus = 8
+                    elif album_score >= 70:
+                        album_bonus = 4
+
+                elif title_score >= 85:
+                    # A moderate title match may receive only a small nudge.
+                    if album_score >= 95:
+                        album_bonus = 4
+                    elif album_score >= 85:
+                        album_bonus = 2
+
+        source_album_requires_provenance = (
+            cls._source_requires_album_provenance(
+                source_album
+            )
+        )
+        album_provenance_mismatch = False
+        album_provenance_penalty = 0
+
+        if source_album_requires_provenance:
+            album_provenance_mismatch = (
+                album_score is None
+                or album_score < 85
+            )
+
+            if album_provenance_mismatch:
+                album_provenance_penalty = 12
+                album_bonus = 0.0
+
+        source_types = cls._album_types(source_album)
+        plex_types = cls._album_types(plex_album)
+
+        source_title_types = cls._title_release_types(
+            source_title
+        )
+        plex_title_types = cls._title_release_types(
+            plex_title
+        )
+
+        # Recording/version markers in the SOURCE TITLE are explicit intent.
+        #
+        # Example:
+        #   Dracula (JENNIE Remix)
+        #
+        # In that case a Plex remix copy is correct and should not receive
+        # the normal remix penalty. The same applies to an explicitly live
+        # source title.
+        requested_variant_types = (
+            source_title_types
+            & cls.VERSION_TYPES
+        )
+
+        candidate_variant_types = (
+            plex_title_types
+            | plex_types
+        ) & cls.VERSION_TYPES
+
+        # Canonical-copy preference still applies to release types the source
+        # did NOT explicitly request in its title.
+        unwanted_plex_types = (
+            plex_types - requested_variant_types
+        )
+
+        album_penalty = sum(
+            cls.ALBUM_TYPE_PENALTIES[kind]
+            for kind in unwanted_plex_types
+        )
+
+        # A destination title can reveal an unwanted version even when the
+        # album does not. Avoid double-penalizing a type already caught by
+        # the album classification.
+        unwanted_title_variant_types = (
+            (plex_title_types & cls.VERSION_TYPES)
+            - requested_variant_types
+            - unwanted_plex_types
+        )
+
+        title_variant_penalty = sum(
+            cls.ALBUM_TYPE_PENALTIES[kind]
+            for kind in unwanted_title_variant_types
+        )
+
+        # If the source explicitly asks for a recording variant, title-level evidence
+        # is stronger than album-level evidence:
+        #
+        #   candidate title says Remix/Live -> no intent penalty
+        #   only candidate album says it    -> half penalty
+        #   neither says it                 -> full penalty
+        #
+        # This keeps "Dracula (JENNIE remix)" above plain "Dracula" even when
+        # both Plex tracks happen to live on the same remix album.
+        release_intent_penalty = 0
+
+        for kind in requested_variant_types:
+            full_penalty = cls.ALBUM_TYPE_PENALTIES[kind]
+
+            if kind in plex_title_types:
+                continue
+
+            if kind in plex_types:
+                release_intent_penalty += max(
+                    1,
+                    full_penalty // 2,
+                )
+            else:
+                release_intent_penalty += full_penalty
+
+        # Do not allow an album bonus to erase a missing title-level recording variant
+        # marker. A plain track on a remix/live album remains viable but ranks
+        # below a candidate whose title explicitly matches the source intent.
+        missing_title_intent = (
+            requested_variant_types - plex_title_types
+        )
+
+        if (
+            unwanted_plex_types
+            or unwanted_title_variant_types
+            or missing_title_intent
+        ):
+            album_bonus = 0.0
+
+        adjusted_score = max(
+            0.0,
+            min(
+                100.0,
+                identity_score
+                + album_bonus
+                - album_penalty
+                - title_variant_penalty
+                - release_intent_penalty
+                - album_provenance_penalty,
+            ),
+        )
+
+        return {
+            "adjusted_score": adjusted_score,
+            "identity_score": identity_score,
+            "title_score": title_score,
+            "raw_title_score": raw_title_score,
+            "artist_score": artist_score,
+            "album_score": album_score,
+            "album_bonus": album_bonus,
+            "album_penalty": album_penalty,
+            "title_variant_penalty": title_variant_penalty,
+            "release_intent_penalty": release_intent_penalty,
+            "album_provenance_penalty": album_provenance_penalty,
+            "album_provenance_mismatch": album_provenance_mismatch,
+            "source_album_requires_provenance": (
+                source_album_requires_provenance
+            ),
+            "source_album_types": source_types,
+            "plex_album_types": plex_types,
+            "source_title_release_types": source_title_types,
+            "plex_title_release_types": plex_title_types,
+            "requested_variant_types": requested_variant_types,
+            "candidate_variant_types": candidate_variant_types,
+            "candidate_title_variant_types": (
+                plex_title_types & cls.VERSION_TYPES
+            ),
+            "candidate_album_variant_types": (
+                plex_types & cls.VERSION_TYPES
+            ),
+        }
+
+    @classmethod
+    def match_track(
+        cls,
+        source_track: dict,
+        plex_library: List[dict],
+        mapping_cache: dict = None,
+    ) -> Optional[str]:
+        """Match source track to Plex while preferring canonical album copies."""
+
+        if mapping_cache is None:
+            mapping_cache = {}
+
+        search_key = (
+            f"{source_track['title']}|{source_track['artist']}"
+        )
+
+        if search_key in mapping_cache:
+            return mapping_cache[search_key]
+
+        if not plex_library:
+            return None
+
+        scored = []
+
+        for plex_track in plex_library:
+            details = cls.score_candidate(
+                source_track,
+                plex_track,
+            )
+            scored.append(
+                (details, plex_track)
+            )
+
+        if not scored:
+            return None
+
+        # First isolate strong title+artist identities. This prevents a
+        # mediocre studio-album candidate from beating an exact song match
+        # merely because the exact copy is on a compilation.
+        strong_identity = [
+            item
+            for item in scored
+            if (
+                item[0]["title_score"] >= 95
+                and item[0]["artist_score"] >= 85
+            )
+        ]
+
+        candidate_pool = strong_identity or scored
+
+        best_details, best_track = max(
+            candidate_pool,
+            key=lambda item: (
+                item[0]["adjusted_score"],
+                item[0]["identity_score"],
+                item[0]["title_score"],
+                item[0]["raw_title_score"],
+                item[0]["album_score"] or 0,
+            ),
+        )
+
+        # Automatic matching has two confidence paths:
+        #
+        # 1) Strong title/artist identity (original behavior).
+        # 2) A near-exact normalized title with a strong final score.
+        #
+        # The second path keeps initial sync consistent with the score shown
+        # in Option 5 when source-service artist credits differ, while the
+        # strict title/artist gates prevent album metadata from rescuing a
+        # clearly different song.
+        missing_requested_variant_types = (
+            best_details["requested_variant_types"]
+            - best_details["candidate_variant_types"]
+        )
+
+        strong_identity_match = (
+            best_details["identity_score"] >= cls.MATCH_THRESHOLD
+            and best_details["title_score"] >= 75
+            and not missing_requested_variant_types
+            and not best_details["album_provenance_mismatch"]
+        )
+
+        strong_adjusted_match = (
+            best_details["adjusted_score"] >= cls.MATCH_THRESHOLD
+            and best_details["title_score"] >= 95
+            and best_details["artist_score"] >= 70
+            and not missing_requested_variant_types
+            and not best_details["album_provenance_mismatch"]
+        )
+
+        if strong_identity_match or strong_adjusted_match:
+            return best_track["plex_id"]
+
+        return None
+
+    @classmethod
+    def candidate_score(
+        cls,
+        source_track: dict,
+        plex_track: dict,
+    ) -> int:
+        """Convenience score for interactive candidate lists."""
+        details = cls.score_candidate(
+            source_track,
+            plex_track,
+        )
+        return int(round(details["adjusted_score"]))
+
+    @staticmethod
+    def interactive_match(
+        source_track: dict, candidates: List[dict]
+    ) -> Optional[str]:
+        """Interactive manual matching."""
+
+        print(
+            f"\nMatching: {source_track['title']} - "
+            f"{source_track['artist']} {source_album_display(source_track)}"
+        )
+        for i, cand in enumerate(candidates[:5], 1):
+            cand_album = cand.get("album", "")
+            album_str = (
+                f" ({cand_album})"
+                if cand_album
+                else ""
+            )
+            print(
+                f"  [{i}] {cand['title']} - "
+                f"{cand['artist']}{album_str}"
+            )
+
+        print("  [s] Skip this track")
+
+        choice = input("Select: ").strip().lower()
+
+        if choice == "s":
+            return None
+
+        try:
+            idx = int(choice) - 1
+
+            if 0 <= idx < len(candidates):
+                return candidates[idx]["plex_id"]
+
+        except ValueError:
+            pass
+
+        return None
+
+
+class Syncer:
+    """Main sync orchestration"""
+
+    def __init__(self, config: Config):
+        self.config = config
+        self.plex = None
+
+    @staticmethod
+    def _run_stats(
+        *,
+        tested: int = 0,
+        synced: int = 0,
+        audited: int = 0,
+        source_added: int = 0,
+        source_removed: int = 0,
+        new_matches: int = 0,
+        recovered_lost: int = 0,
+        newly_lost: int = 0,
+        unresolved: int = 0,
+        ignored: int = 0,
+        errors: int = 0,
+    ) -> dict:
+        """Return one normalized per-playlist run-summary payload."""
+        return {
+            "tested": tested,
+            "synced": synced,
+            "audited": audited,
+            "source_added": source_added,
+            "source_removed": source_removed,
+            "new_matches": new_matches,
+            "recovered_lost": recovered_lost,
+            "newly_lost": newly_lost,
+            "unresolved": unresolved,
+            "ignored": ignored,
+            "errors": errors,
+        }
+
+    @staticmethod
+    def _auto_sync_enabled(
+        playlist: dict,
+    ) -> bool:
+        """Missing auto_sync means ON for pre-1.3 playlists."""
+        return playlist.get(
+            "auto_sync",
+            True,
+        ) is not False
+
+    @staticmethod
+    def _playlist_favorite(
+        playlist: dict,
+    ) -> bool:
+        """Missing favorite means OFF for existing playlists."""
+        return playlist.get(
+            "favorite",
+            False,
+        ) is True
+
+    @staticmethod
+    def _ignored_track_keys(
+        track: dict,
+    ) -> List[str]:
+        """
+        Return stable permanent-ignore identities.
+
+        Prefer source track ID, with normalized title+artist as a fallback.
+        """
+        keys = []
+
+        source_id = str(
+            track.get("source_id", "")
+            or ""
+        ).strip()
+
+        if source_id:
+            keys.append(
+                f"id:{source_id}"
+            )
+
+        title = Matcher._normalize_match_text(
+            track.get("title", "")
+        )
+        artist = Matcher._normalize_match_text(
+            track.get("artist", "")
+        )
+
+        if title or artist:
+            keys.append(
+                f"meta:{title}|{artist}"
+            )
+
+        return keys
+
+    def _get_ignored_bucket(
+        self,
+        mapping_key: str,
+        create: bool = True,
+    ) -> dict:
+        """Return permanent-ignore records for one source playlist."""
+        if create:
+            return self.config.ignored_tracks.setdefault(
+                mapping_key,
+                {},
+            )
+
+        value = self.config.ignored_tracks.get(
+            mapping_key,
+            {},
+        )
+        return value if isinstance(value, dict) else {}
+
+    def _find_ignored_track_key(
+        self,
+        mapping_key: str,
+        track: dict,
+    ) -> Optional[str]:
+        """Return the stored ignore key matching a source track."""
+        bucket = self._get_ignored_bucket(
+            mapping_key,
+            create=False,
+        )
+
+        candidate_keys = self._ignored_track_keys(
+            track
+        )
+
+        for key in candidate_keys:
+            if key in bucket:
+                return key
+
+        meta_key = next(
+            (
+                key
+                for key in candidate_keys
+                if key.startswith("meta:")
+            ),
+            None,
+        )
+
+        if meta_key:
+            for stored_key, record in bucket.items():
+                if not isinstance(record, dict):
+                    continue
+
+                if meta_key in self._ignored_track_keys(
+                    record
+                ):
+                    return stored_key
+
+        return None
+
+    def _is_track_ignored(
+        self,
+        mapping_key: str,
+        track: dict,
+    ) -> bool:
+        """Return whether a source track is permanently ignored."""
+        return (
+            self._find_ignored_track_key(
+                mapping_key,
+                track,
+            )
+            is not None
+        )
+
+    def _ignore_track(
+        self,
+        mapping_key: str,
+        track: dict,
+    ):
+        """
+        Permanently ignore a source track for one playlist.
+
+        Remove any mapping/provenance so the next real sync removes the track
+        from the destination Plex playlist.
+        """
+        keys = self._ignored_track_keys(
+            track
+        )
+
+        if not keys:
+            return
+
+        bucket = self._get_ignored_bucket(
+            mapping_key,
+            create=True,
+        )
+
+        bucket[keys[0]] = {
+            "source_id": str(
+                track.get("source_id", "")
+                or ""
+            ),
+            "title": repair_text(
+                track.get("title", "")
+            ),
+            "artist": repair_text(
+                track.get("artist", "")
+            ),
+            "album": repair_text(
+                track.get("album", "")
+            ),
+            "ignored_at": datetime.now().isoformat(),
+        }
+
+        search_key = (
+            f"{track.get('title', '')}|"
+            f"{track.get('artist', '')}"
+        )
+
+        self.config.mapping.get(
+            mapping_key,
+            {},
+        ).pop(
+            search_key,
+            None,
+        )
+
+        self._remove_match_provenance(
+            mapping_key,
+            search_key,
+        )
+
+    def _restore_ignored_track(
+        self,
+        mapping_key: str,
+        ignored_key: str,
+    ) -> bool:
+        """Restore one permanently ignored source track."""
+        bucket = self._get_ignored_bucket(
+            mapping_key,
+            create=False,
+        )
+
+        if ignored_key not in bucket:
+            return False
+
+        del bucket[ignored_key]
+
+        if not bucket:
+            self.config.ignored_tracks.pop(
+                mapping_key,
+                None,
+            )
+
+        return True
+
+    def _get_match_metadata_bucket(
+        self,
+        mapping_key: str,
+        create: bool = True,
+    ) -> dict:
+        """Return per-track provenance metadata for a playlist."""
+        if create:
+            return self.config.match_metadata.setdefault(
+                mapping_key,
+                {},
+            )
+
+        value = self.config.match_metadata.get(
+            mapping_key,
+            {},
+        )
+        return value if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _plex_match_snapshot(
+        plex_track: dict,
+        plex_id: str = None,
+    ) -> dict:
+        """Return the small Plex metadata snapshot used for LOST history."""
+        if not isinstance(plex_track, dict):
+            return {
+                "plex_id": str(plex_id or ""),
+                "title": "",
+                "artist": "",
+                "album": "",
+            }
+
+        return {
+            "plex_id": str(
+                plex_track.get("plex_id")
+                or plex_id
+                or ""
+            ),
+            "title": repair_text(
+                plex_track.get("title", "")
+            ),
+            "artist": repair_text(
+                plex_track.get("artist", "")
+            ),
+            "album": repair_text(
+                plex_track.get("album", "")
+            ),
+        }
+
+    def _remember_match_snapshot(
+        self,
+        mapping_key: str,
+        search_key: str,
+        plex_track: dict,
+        plex_id: str = None,
+    ):
+        """
+        Remember the last known Plex title/artist/album for a saved mapping.
+
+        If the mapping predates provenance tracking, this enriches the legacy
+        record without guessing whether it was automatic or manual.
+        """
+        bucket = self._get_match_metadata_bucket(
+            mapping_key,
+            create=True,
+        )
+        current = bucket.get(
+            search_key,
+            {},
+        )
+
+        if not isinstance(current, dict):
+            current = {}
+
+        current = dict(current)
+        current["matched_track"] = (
+            self._plex_match_snapshot(
+                plex_track,
+                plex_id,
+            )
+        )
+        current["updated_at"] = (
+            datetime.now().isoformat()
+        )
+        bucket[search_key] = current
+
+    def _previous_match_snapshot(
+        self,
+        mapping_key: str,
+        search_key: str,
+        plex_id: str,
+    ) -> dict:
+        """Return the last known Plex metadata for a mapping that went stale."""
+        record = self._get_match_metadata_bucket(
+            mapping_key,
+            create=False,
+        ).get(search_key)
+
+        if isinstance(record, dict):
+            previous = record.get(
+                "matched_track"
+            )
+
+            if isinstance(previous, dict):
+                snapshot = {
+                    "plex_id": str(
+                        previous.get("plex_id")
+                        or plex_id
+                        or ""
+                    ),
+                    "title": repair_text(
+                        previous.get("title", "")
+                    ),
+                    "artist": repair_text(
+                        previous.get("artist", "")
+                    ),
+                    "album": repair_text(
+                        previous.get("album", "")
+                    ),
+                }
+
+                return snapshot
+
+        # Existing 1.2 mappings do not yet have the last-known metadata
+        # snapshot. Keep the old Plex ID so the LOST record still has a
+        # concrete reference and can explain why details are unavailable.
+        return {
+            "plex_id": str(plex_id or ""),
+            "title": "",
+            "artist": "",
+            "album": "",
+        }
+
+    def _set_match_provenance(
+        self,
+        mapping_key: str,
+        search_key: str,
+        provenance: str,
+        matched_track: dict = None,
+        plex_id: str = None,
+    ):
+        """Record mapping provenance and, when known, the Plex match snapshot."""
+        bucket = self._get_match_metadata_bucket(
+            mapping_key,
+            create=True,
+        )
+        current = bucket.get(
+            search_key,
+            {},
+        )
+
+        if not isinstance(current, dict):
+            current = {}
+
+        current = dict(current)
+        current["provenance"] = provenance
+        current["updated_at"] = (
+            datetime.now().isoformat()
+        )
+
+        if matched_track is not None:
+            current["matched_track"] = (
+                self._plex_match_snapshot(
+                    matched_track,
+                    plex_id,
+                )
+            )
+
+        bucket[search_key] = current
+
+    def _remove_match_provenance(
+        self,
+        mapping_key: str,
+        search_key: str,
+    ):
+        """Remove provenance associated with one saved mapping."""
+        bucket = self._get_match_metadata_bucket(
+            mapping_key,
+            create=False,
+        )
+        bucket.pop(search_key, None)
+
+        if not bucket:
+            self.config.match_metadata.pop(
+                mapping_key,
+                None,
+            )
+
+    def _get_match_provenance(
+        self,
+        mapping_key: str,
+        search_key: str,
+    ) -> str:
+        """Return automatic/manual/legacy for a saved mapping."""
+        record = self._get_match_metadata_bucket(
+            mapping_key,
+            create=False,
+        ).get(search_key)
+
+        if isinstance(record, dict):
+            value = str(
+                record.get("provenance", "")
+            ).strip().lower()
+            if value in ("automatic", "manual"):
+                return value
+
+        return "legacy"
+
+    def _match_provenance_counts(
+        self,
+        mapping_key: str,
+    ) -> dict:
+        """Count automatic/manual/legacy mappings for one playlist."""
+        mapping = self.config.mapping.get(
+            mapping_key,
+            {},
+        )
+        counts = {
+            "automatic": 0,
+            "manual": 0,
+            "legacy": 0,
+        }
+
+        for search_key in mapping:
+            provenance = self._get_match_provenance(
+                mapping_key,
+                search_key,
+            )
+            counts[provenance] += 1
+
+        return counts
+
+    @staticmethod
+    def _source_track_snapshot_key(track: dict) -> str:
+        """Return a stable source-track identity for sync-to-sync changes."""
+        source_id = str(
+            track.get("source_id", "") or ""
+        ).strip()
+
+        if source_id:
+            return f"id:{source_id}"
+
+        title = Matcher._normalize_match_text(
+            track.get("title", "")
+        )
+        artist = Matcher._normalize_match_text(
+            track.get("artist", "")
+        )
+        return f"meta:{title}|{artist}"
+
+    @classmethod
+    def _snapshot_entries(
+        cls,
+        tracks: List[dict],
+    ) -> List[dict]:
+        """Convert current source tracks to lightweight persistent entries."""
+        entries = []
+
+        for track in tracks:
+            entries.append(
+                {
+                    "key": cls._source_track_snapshot_key(
+                        track
+                    ),
+                    "source_id": str(
+                        track.get("source_id", "") or ""
+                    ),
+                    "title": repair_text(
+                        track.get("title", "")
+                    ),
+                    "artist": repair_text(
+                        track.get("artist", "")
+                    ),
+                    "album": repair_text(
+                        track.get("album", "")
+                    ),
+                }
+            )
+
+        return entries
+
+    def _source_change_report(
+        self,
+        mapping_key: str,
+        tracks: List[dict],
+    ) -> dict:
+        """
+        Compare current source contents to the last successful snapshot.
+
+        Counts duplicate occurrences correctly. On the first tracked sync,
+        establish a baseline rather than labeling every track as ADDED.
+        """
+        current_entries = self._snapshot_entries(
+            tracks
+        )
+        previous_entries = self.config.source_snapshots.get(
+            mapping_key
+        )
+
+        if not isinstance(previous_entries, list):
+            return {
+                "baseline": True,
+                "current_entries": current_entries,
+                "added": [],
+                "removed": [],
+                "added_indices": set(),
+            }
+
+        previous_counts = Counter(
+            str(entry.get("key", ""))
+            for entry in previous_entries
+        )
+        current_counts = Counter(
+            str(entry.get("key", ""))
+            for entry in current_entries
+        )
+
+        added = []
+        added_indices = set()
+        seen_current = Counter()
+
+        for index, entry in enumerate(
+            current_entries
+        ):
+            key = str(entry.get("key", ""))
+            seen_current[key] += 1
+
+            if seen_current[key] > previous_counts[key]:
+                added.append(entry)
+                added_indices.add(index)
+
+        removed = []
+        seen_previous = Counter()
+
+        for entry in previous_entries:
+            key = str(entry.get("key", ""))
+            seen_previous[key] += 1
+
+            if seen_previous[key] > current_counts[key]:
+                removed.append(entry)
+
+        return {
+            "baseline": False,
+            "current_entries": current_entries,
+            "added": added,
+            "removed": removed,
+            "added_indices": added_indices,
+        }
+
+    def _save_source_snapshot(
+        self,
+        mapping_key: str,
+        tracks: List[dict],
+    ):
+        """Persist the latest source contents after a real sync."""
+        self.config.source_snapshots[
+            mapping_key
+        ] = self._snapshot_entries(tracks)
+
+    @staticmethod
+    def _print_source_changes(change_report: dict):
+        """Display source playlist additions/removals before matching."""
+        if change_report.get("baseline"):
+            print(
+                "  Source change tracking: "
+                "baseline will be created after this sync"
+            )
+            return
+
+        added = change_report.get("added", [])
+        removed = change_report.get(
+            "removed",
+            [],
+        )
+
+        if not added and not removed:
+            print(
+                "  Source changes since last sync: none"
+            )
+            return
+
+        print(
+            section_header(
+                "SOURCE PLAYLIST CHANGES"
+            )
+        )
+
+        for track in added:
+            print(
+                f"  ADDED   {track.get('title', '')} - "
+                f"{track.get('artist', '')} "
+                f"{source_album_display(track)}"
+            )
+
+        for track in removed:
+            print(
+                f"  REMOVED {track.get('title', '')} - "
+                f"{track.get('artist', '')} "
+                f"{source_album_display(track)}"
+            )
+
+    def _get_plex(self):
+        """Get Plex instance, initialize if needed."""
+
+        if self.plex is None:
+            plex_cfg = self.config.get_plex()
+            self.plex = PlexAPI(
+                plex_cfg["url"],
+                plex_cfg["token"],
+                plex_cfg["music_library_key"],
+                plex_cfg.get(
+                    "music_library_name",
+                    "",
+                ),
+            )
+
+        return self.plex
+
+    def _match_source_tracks(
+        self,
+        source_tracks: List[dict],
+        mapping_key: str,
+        plex_library: List[dict] = None,
+        source_added_indices: set = None,
+        record_provenance: bool = True,
+        mark_new_matches: bool = True,
+    ) -> Tuple[
+        List[str],
+        List[dict],
+        dict,
+        Optional[List[dict]],
+        dict,
+    ]:
+        """
+        Match source tracks against Plex.
+
+        Returns:
+            matched Plex IDs in source order,
+            unmatched source tracks,
+            updated playlist mapping,
+            Plex library for reuse,
+            match-change statistics.
+
+        Cached/manual mappings are always respected when their Plex ID still
+        exists. If a cached Plex ID disappeared, Playlist Bridge attempts a
+        fresh automatic match; if that also fails, the track is marked LOST.
+        """
+        plex = self._get_plex()
+        source_added_indices = (
+            source_added_indices or set()
+        )
+
+        original_mapping = dict(
+            self.config.mapping.get(
+                mapping_key,
+                {},
+            )
+        )
+        playlist_mapping = dict(
+            original_mapping
+        )
+
+        if plex_library is None:
+            print("→ Scanning Plex library...")
+            plex_library = plex.search_library("")
+
+            if not plex_library:
+                print("✗ No Plex music tracks were found.")
+                return (
+                    [],
+                    source_tracks,
+                    playlist_mapping,
+                    plex_library,
+                    {
+                        "new_matches": [],
+                        "lost_matches": [],
+                        "recovered_lost": [],
+                        "stale_mappings": [],
+                        "ignored_tracks": [],
+                    },
+                )
+
+            print(
+                f"  Found {len(plex_library)} tracks in Plex library"
+            )
+
+        plex_by_id = {
+            str(track.get("plex_id")): track
+            for track in plex_library
+            if track.get("plex_id") is not None
+        }
+
+        print("→ Matching tracks...")
+
+        matched_tracks = []
+        unmatched = []
+        new_matches = []
+        lost_matches = []
+        recovered_lost = []
+        stale_mappings = []
+        ignored_matches = []
+
+        for i, track in enumerate(
+            source_tracks,
+            1,
+        ):
+            search_key = (
+                f"{track['title']}|{track['artist']}"
+            )
+            was_mapped = search_key in original_mapping
+            source_added = (
+                i - 1
+            ) in source_added_indices
+
+            if self._is_track_ignored(
+                mapping_key,
+                track,
+            ):
+                ignored_matches.append(
+                    dict(track)
+                )
+
+                if record_provenance:
+                    playlist_mapping.pop(
+                        search_key,
+                        None,
+                    )
+                    self._remove_match_provenance(
+                        mapping_key,
+                        search_key,
+                    )
+
+                status_bits = [
+                    colored(
+                        "IGNORED",
+                        Colors.YELLOW,
+                    )
+                ]
+
+                if source_added:
+                    status_bits.append(
+                        colored(
+                            "NEW",
+                            Colors.MAGENTA,
+                        )
+                    )
+
+                print(
+                    f"  [{i}/{len(source_tracks)}] "
+                    f"{colored('○', Colors.YELLOW)} "
+                    f"{' '.join(status_bits)} "
+                    f"{colored(track['title'], Colors.CYAN)} - "
+                    f"{colored(track['artist'], Colors.GREEN)} "
+                    f"{source_album_display(track)}"
+                )
+                continue
+
+            matched_track = None
+            plex_id = None
+            cached_valid = False
+            stale_cached_mapping = False
+            stale_provenance = "legacy"
+            previous_match = {
+                "plex_id": "",
+                "title": "",
+                "artist": "",
+                "album": "",
+            }
+            allow_automatic_match = True
+
+            if search_key in playlist_mapping:
+                cached_id = str(
+                    playlist_mapping[search_key]
+                )
+                matched_track = plex_by_id.get(
+                    cached_id
+                )
+
+                if matched_track is not None:
+                    plex_id = cached_id
+                    cached_valid = True
+
+                    if record_provenance:
+                        cached_provenance = (
+                            self._get_match_provenance(
+                                mapping_key,
+                                search_key,
+                            )
+                        )
+
+                        # Legacy mappings predate provenance tracking. Only
+                        # for those mappings, independently run the current
+                        # automatic matcher without allowing the saved
+                        # mapping to short-circuit it. If today's matcher
+                        # independently chooses the exact same Plex track,
+                        # it is safe to promote the mapping to automatic.
+                        #
+                        # Manual and already-automatic mappings never enter
+                        # this validation path.
+                        if cached_provenance == "legacy":
+                            current_auto_id = (
+                                Matcher.match_track(
+                                    track,
+                                    plex_library,
+                                    {},
+                                )
+                            )
+
+                            if (
+                                current_auto_id is not None
+                                and str(current_auto_id)
+                                == cached_id
+                            ):
+                                self._set_match_provenance(
+                                    mapping_key,
+                                    search_key,
+                                    "automatic",
+                                    matched_track=matched_track,
+                                    plex_id=cached_id,
+                                )
+                            else:
+                                self._remember_match_snapshot(
+                                    mapping_key,
+                                    search_key,
+                                    matched_track,
+                                    cached_id,
+                                )
+                        else:
+                            self._remember_match_snapshot(
+                                mapping_key,
+                                search_key,
+                                matched_track,
+                                cached_id,
+                            )
+                else:
+                    stale_cached_mapping = True
+
+                    stale_provenance = (
+                        self._get_match_provenance(
+                            mapping_key,
+                            search_key,
+                        )
+                    )
+                    previous_match = (
+                        self._previous_match_snapshot(
+                            mapping_key,
+                            search_key,
+                            cached_id,
+                        )
+                    )
+                    stale_mappings.append(
+                        {
+                            "source": dict(track),
+                            "previous_match": previous_match,
+                            "previous_provenance": stale_provenance,
+                        }
+                    )
+
+                    # A stale mapping that was explicitly manual -- or a
+                    # legacy mapping whose origin cannot be known -- should
+                    # never be silently replaced by a fresh automatic choice.
+                    # Surface it as LOST for human review instead.
+                    if stale_provenance in (
+                        "manual",
+                        "legacy",
+                    ):
+                        allow_automatic_match = False
+
+                    playlist_mapping.pop(
+                        search_key,
+                        None,
+                    )
+
+                    if record_provenance:
+                        self._remove_match_provenance(
+                            mapping_key,
+                            search_key,
+                        )
+
+            if (
+                not cached_valid
+                and allow_automatic_match
+            ):
+                plex_id = Matcher.match_track(
+                    track,
+                    plex_library,
+                    playlist_mapping,
+                )
+
+                if plex_id:
+                    plex_id = str(plex_id)
+                    playlist_mapping[
+                        search_key
+                    ] = plex_id
+                    matched_track = plex_by_id.get(
+                        plex_id
+                    )
+
+                    if record_provenance:
+                        self._set_match_provenance(
+                            mapping_key,
+                            search_key,
+                            "automatic",
+                            matched_track=matched_track,
+                            plex_id=plex_id,
+                        )
+
+            if plex_id:
+                matched_tracks.append(
+                    str(plex_id)
+                )
+
+                if (
+                    stale_cached_mapping
+                    and stale_provenance == "automatic"
+                ):
+                    recovered_lost.append(
+                        {
+                            "source": dict(track),
+                            "replacement_plex_id": str(plex_id),
+                        }
+                    )
+
+                is_new_match = (
+                    mark_new_matches
+                    and not was_mapped
+                )
+
+                if is_new_match:
+                    new_matches.append(track)
+
+                status_bits = []
+
+                if source_added:
+                    status_bits.append(
+                        colored("NEW", Colors.MAGENTA)
+                    )
+
+                matched_info = ""
+
+                if matched_track:
+                    album = matched_track.get(
+                        "album",
+                        "",
+                    )
+                    matched_title = colored(
+                        matched_track["title"],
+                        Colors.CYAN,
+                    )
+                    matched_artist = colored(
+                        matched_track["artist"],
+                        Colors.GREEN,
+                    )
+
+                    if album:
+                        album_str = colored(
+                            f"({album})",
+                            Colors.YELLOW,
+                        )
+                        matched_info = (
+                            f" → {matched_title} - "
+                            f"{matched_artist} {album_str}"
+                        )
+                    else:
+                        matched_info = (
+                            f" → {matched_title} - "
+                            f"{matched_artist}"
+                        )
+
+                source_title = colored(
+                    track["title"],
+                    Colors.CYAN,
+                )
+                source_artist = colored(
+                    track["artist"],
+                    Colors.GREEN,
+                )
+                status_text = (
+                    " " + " ".join(status_bits)
+                    if status_bits
+                    else ""
+                )
+
+                print(
+                    f"  [{i}/{len(source_tracks)}] "
+                    f"{colored('✓', Colors.GREEN)}"
+                    f"{status_text} "
+                    f"{source_title} - {source_artist} "
+                    f"{source_album_display(track)}"
+                    f"{matched_info}"
+                )
+                continue
+
+            unmatched_track = dict(track)
+
+            is_lost = (
+                was_mapped
+                and stale_cached_mapping
+            )
+
+            if is_lost:
+                previous_provenance = (
+                    stale_provenance
+                )
+
+                unmatched_track["status"] = "lost"
+                unmatched_track["previous_match"] = (
+                    previous_match
+                )
+                unmatched_track[
+                    "previous_provenance"
+                ] = previous_provenance
+                lost_matches.append(
+                    unmatched_track
+                )
+
+            unmatched.append(
+                unmatched_track
+            )
+
+            source_title = colored(
+                track["title"],
+                Colors.CYAN,
+            )
+            source_artist = colored(
+                track["artist"],
+                Colors.GREEN,
+            )
+
+            status_bits = []
+
+            if is_lost:
+                status_bits.append(
+                    colored("LOST", Colors.RED)
+                )
+
+            if source_added:
+                status_bits.append(
+                    colored("NEW", Colors.MAGENTA)
+                )
+
+            status_text = (
+                " " + " ".join(status_bits)
+                if status_bits
+                else ""
+            )
+
+            print(
+                f"  [{i}/{len(source_tracks)}] "
+                f"{colored('✗', Colors.RED)}"
+                f"{status_text} "
+                f"{source_title} - {source_artist} "
+                f"{source_album_display(track)}"
+            )
+
+            if is_lost:
+                previous_title = (
+                    previous_match.get(
+                        "title",
+                        "",
+                    )
+                )
+                previous_artist = (
+                    previous_match.get(
+                        "artist",
+                        "",
+                    )
+                )
+                previous_album = (
+                    previous_match.get(
+                        "album",
+                        "",
+                    )
+                )
+                previous_id = (
+                    previous_match.get(
+                        "plex_id",
+                        "",
+                    )
+                )
+
+                if previous_title or previous_artist:
+                    previous_text = (
+                        f"{previous_title} - "
+                        f"{previous_artist}"
+                    )
+
+                    if previous_album:
+                        previous_text += (
+                            f" ({previous_album})"
+                        )
+
+                    print(
+                        "      Previous Plex match: "
+                        f"{previous_text} "
+                        f"[{provenance_display(previous_provenance)}]"
+                    )
+                elif previous_id:
+                    print(
+                        "      Previous Plex match: "
+                        f"metadata unavailable "
+                        f"(Plex ID {previous_id}) "
+                        f"[{provenance_display(previous_provenance)}]"
+                    )
+
+        return (
+            matched_tracks,
+            unmatched,
+            playlist_mapping,
+            plex_library,
+            {
+                "new_matches": new_matches,
+                "lost_matches": lost_matches,
+                "recovered_lost": recovered_lost,
+                "stale_mappings": stale_mappings,
+                "ignored_tracks": ignored_matches,
+            },
+        )
+
+    def _store_unmatched(
+        self,
+        mapping_key: str,
+        unmatched: List[dict],
+    ):
+        """Store unmatched tracks."""
+
+        if unmatched:
+            stored_tracks = []
+
+            for t in unmatched:
+                stored = {
+                    "title": t["title"],
+                    "artist": t["artist"],
+                    "album": t.get("album", ""),
+                    "source_id": t.get("source_id", ""),
+                }
+
+                if t.get("status") == "lost":
+                    stored["status"] = "lost"
+                    stored["previous_match"] = dict(
+                        t.get(
+                            "previous_match",
+                            {},
+                        )
+                    )
+                    stored["previous_provenance"] = (
+                        t.get(
+                            "previous_provenance",
+                            "legacy",
+                        )
+                    )
+
+                stored_tracks.append(
+                    stored
+                )
+
+            self.config.missing[
+                mapping_key
+            ] = stored_tracks
+
+            print(
+                f"\n⚠ {len(unmatched)} tracks unmatched"
+            )
+        else:
+            # Clear stale missing-track records.
+            self.config.missing.pop(mapping_key, None)
+
+    def _build_new_plex_playlist(
+        self,
+        playlist_name: str,
+        description: str,
+        matched_tracks: List[str],
+        artwork_url: str = None,
+    ) -> Optional[str]:
+        """
+        Create a Plex playlist and populate it in source order.
+
+        The first matched track is supplied during playlist creation
+        because Plex requires a media URI when creating a normal
+        audio playlist.
+        """
+
+        if not matched_tracks:
+            print(
+                "✗ Cannot create Plex playlist: "
+                "no tracks matched to the Plex library."
+            )
+            return None
+
+        plex = self._get_plex()
+
+        print(
+            f"\n→ Creating Plex playlist with "
+            f"first matched track..."
+        )
+
+        playlist_id = plex.create_playlist(
+            playlist_name,
+            matched_tracks[0],
+            description,
+        )
+
+        if not playlist_id:
+            print("✗ Failed to create Plex playlist.")
+            return None
+
+        print(
+            f"✓ Created Plex playlist "
+            f"'{playlist_name}' (ID: {playlist_id})"
+        )
+
+        # The first track was already inserted by create_playlist.
+        added = 1
+
+        for plex_id in matched_tracks[1:]:
+            if plex.add_to_playlist(playlist_id, plex_id):
+                added += 1
+
+        print(
+            f"✓ Added {added}/{len(matched_tracks)} "
+            "matched tracks"
+        )
+
+        if added != len(matched_tracks):
+            print(
+                "⚠ Some matched tracks could not be added "
+                "to the Plex playlist."
+            )
+
+        # Update artwork if available
+        if artwork_url:
+            plex.update_playlist_metadata(
+                playlist_id,
+                playlist_name,
+                description,
+                artwork_url,
+            )
+
+        return playlist_id
+
+    def add_source(self, source_url: str):
+        """Add a new source playlist."""
+
+        source_url = Config._normalize_url_input(source_url)
+
+        if "spotify.com" in source_url.lower() or source_url.lower().startswith("spotify:playlist:"):
+            source_type = "spotify"
+        elif ("music.apple.com" in source_url or 
+              "itunes.apple.com" in source_url):
+            source_type = "applemusic"
+        else:
+            print(
+                "✗ Invalid URL. Must be Spotify or Apple Music"
+            )
+            return
+
+        if self.config.find_playlist(source_url):
+            print("✗ This playlist is already being synced")
+            return
+
+        # Make sure Plex credentials work before doing the work.
+        try:
+            plex = self._get_plex()
+        except Exception as e:
+            print(f"✗ Plex connection failed: {e}")
+            return
+
+        if source_type == "spotify":
+            api = SpotifyAPI()
+        else:
+            api = AppleMusicAPI()
+
+        playlist_id = Config._extract_id(
+            source_url,
+            source_type,
+        )
+
+        if not playlist_id:
+            print("✗ Could not extract playlist ID from URL")
+            return
+
+        print(
+            f"Fetching {source_display_label(source_type)} playlist "
+            f"(ID: {playlist_id})..."
+        )
+
+        try:
+            # Pass the full source URL. SpotifyAPI normalizes it to the
+            # canonical playlist ID internally, so query parameters are safe.
+            if source_type == "applemusic":
+                tracks, metadata = api.get_playlist_tracks(
+                    source_url,
+                    fetch_artwork=True,
+                )
+            else:
+                tracks, metadata = api.get_playlist_tracks(
+                    source_url,
+                    fetch_artwork=True,
+                )
+        except Exception as e:
+            print(f"✗ Failed to fetch playlist: {e}")
+            return
+
+        playlist_name = metadata.get(
+            "name",
+            "Unknown Playlist",
+        )
+
+        print(
+            f"✓ Found playlist: {playlist_name} "
+            f"({len(tracks)} tracks)"
+        )
+
+        # Match BEFORE creating the Plex playlist.
+        mapping_key = f"{source_type}:{playlist_id}"
+
+        (
+            matched_tracks,
+            unmatched,
+            playlist_mapping,
+            plex_library,
+            match_stats,
+        ) = self._match_source_tracks(
+            tracks,
+            mapping_key,
+            mark_new_matches=False,
+        )
+
+        self._store_unmatched(
+            mapping_key,
+            unmatched,
+        )
+
+        # Persist matches/missing state even if creation fails.
+        self.config.mapping[mapping_key] = playlist_mapping
+        self.config.save()
+
+        print(
+            f"\n✓ Matched {len(matched_tracks)}/{len(tracks)} "
+            "tracks"
+        )
+
+        if not matched_tracks:
+            print(
+                "\n✗ No tracks could be matched, so Plex "
+                "playlist was not created."
+            )
+            print(
+                "  Add/match the missing tracks, then run "
+                "Resolve Missing."
+            )
+            return
+
+        plex_playlist_id = self._build_new_plex_playlist(
+            playlist_name,
+            metadata.get("description", ""),
+            matched_tracks,
+            metadata.get("image_url", ""),
+        )
+
+        if not plex_playlist_id:
+            return
+
+        playlist_entry = self.config.add_playlist(
+            source_url,
+            source_type,
+            playlist_name,
+            plex_playlist_id,
+        )
+        playlist_entry["last_synced"] = datetime.now().isoformat()
+        self._save_source_snapshot(
+            mapping_key,
+            tracks,
+        )
+
+        auto_choice = input(
+            "\nInclude this playlist in automatic "
+            "--sync-all/cron syncs? [Y/n] "
+            "(n = one-time/manual only): "
+        ).strip().lower()
+
+        playlist_entry["auto_sync"] = (
+            auto_choice not in (
+                "n",
+                "no",
+            )
+        )
+        self.config.save()
+
+        print(
+            f"\n✓ Playlist '{playlist_name}' added to Plex "
+            "and configured for sync!"
+        )
+
+        if not playlist_entry["auto_sync"]:
+            print(
+                "  Auto sync is OFF. The playlist stays "
+                "registered and can still be synced manually."
+            )
+
+        print(section_header("SYNC SUMMARY"))
+        print(f"Source tracks:   {len(tracks)}")
+        print(f"Matched:         {len(matched_tracks)}")
+        print("New matches:     baseline")
+        print("Lost matches:    0")
+        print(
+            f"Ignored:         "
+            f"{len(match_stats.get('ignored_tracks', []))}"
+        )
+        print("Source ADDED:    baseline")
+        print("Source REMOVED:  baseline")
+        print(f"Unresolved:      {len(unmatched)}")
+
+        if unmatched:
+            print(
+                f"⚠ {len(unmatched)} tracks still need "
+                "resolution."
+            )
+
+    def sync_playlist(
+        self,
+        playlist_entry: dict,
+        dry_run: bool = False,
+    ):
+        """
+        Sync a specific playlist.
+
+        When dry_run=True, Playlist Bridge performs source fetching, Plex
+        library scanning, and matching only. It does not:
+          - modify the Plex playlist;
+          - update playlist metadata/artwork;
+          - write config.json, mapping.json, or missing_tracks.json;
+          - update last_synced.
+        """
+
+        source_type = playlist_entry["source"]
+        source_url = Config._normalize_url_input(
+            playlist_entry["source_url"]
+        )
+        playlist_id = Config._extract_id(
+            source_url,
+            source_type,
+        )
+
+        if not playlist_id:
+            print(
+                f"✗ Could not extract playlist ID from stored URL: "
+                f"{source_url}"
+            )
+            return self._run_stats(
+                errors=1,
+            )
+
+        canonical_url = Config._canonical_source_url(
+            source_url,
+            source_type,
+        )
+
+        # Normal syncs continue to repair older stored config entries.
+        # Dry runs intentionally keep all local state untouched.
+        if not dry_run:
+            changed = False
+            old_source_id = playlist_entry.get("source_id")
+
+            if old_source_id != playlist_id:
+                old_mapping_key = (
+                    f"{source_type}:{old_source_id}"
+                    if old_source_id
+                    else None
+                )
+                new_mapping_key = (
+                    f"{source_type}:{playlist_id}"
+                )
+
+                if (
+                    old_mapping_key
+                    and old_mapping_key != new_mapping_key
+                ):
+                    if old_mapping_key in self.config.mapping:
+                        existing = self.config.mapping.pop(
+                            old_mapping_key
+                        )
+                        self.config.mapping.setdefault(
+                            new_mapping_key,
+                            {},
+                        ).update(existing)
+
+                    if old_mapping_key in self.config.missing:
+                        existing_missing = (
+                            self.config.missing.pop(
+                                old_mapping_key
+                            )
+                        )
+
+                        if new_mapping_key not in self.config.missing:
+                            self.config.missing[
+                                new_mapping_key
+                            ] = existing_missing
+
+                    if old_mapping_key in self.config.match_metadata:
+                        existing_metadata = (
+                            self.config.match_metadata.pop(
+                                old_mapping_key
+                            )
+                        )
+                        self.config.match_metadata.setdefault(
+                            new_mapping_key,
+                            {},
+                        ).update(existing_metadata)
+
+                    if old_mapping_key in self.config.source_snapshots:
+                        existing_snapshot = (
+                            self.config.source_snapshots.pop(
+                                old_mapping_key
+                            )
+                        )
+                        if new_mapping_key not in self.config.source_snapshots:
+                            self.config.source_snapshots[
+                                new_mapping_key
+                            ] = existing_snapshot
+
+                    if old_mapping_key in self.config.ignored_tracks:
+                        existing_ignored = (
+                            self.config.ignored_tracks.pop(
+                                old_mapping_key
+                            )
+                        )
+                        self.config.ignored_tracks.setdefault(
+                            new_mapping_key,
+                            {},
+                        ).update(existing_ignored)
+
+                playlist_entry["source_id"] = playlist_id
+                changed = True
+
+            if playlist_entry.get("source_url") != canonical_url:
+                playlist_entry["source_url"] = canonical_url
+                changed = True
+
+            if changed:
+                self.config.save()
+
+        source_url = canonical_url
+
+        plex_playlist_id = playlist_entry[
+            "plex_playlist_id"
+        ]
+        playlist_name = playlist_entry[
+            "plex_playlist_name"
+        ]
+
+        if source_type == "spotify":
+            api = SpotifyAPI()
+        else:
+            api = AppleMusicAPI()
+
+        plex = self._get_plex()
+
+        if dry_run:
+            print(
+                f"\n=== DRY RUN: '{playlist_name}' "
+                f"({source_display_label(source_type)}) ==="
+            )
+        else:
+            print(
+                f"\n→ Syncing '{playlist_name}' from "
+                f"{source_display_label(source_type)}..."
+            )
+
+        try:
+            source_tracks, metadata = api.get_playlist_tracks(
+                source_url,
+                # Artwork is irrelevant during a dry run and can involve
+                # additional network work.
+                fetch_artwork=not dry_run,
+            )
+        except Exception as e:
+            print(f"✗ Failed to fetch: {e}")
+            return self._run_stats(
+                errors=1,
+            )
+
+        print(
+            f"  Found {len(source_tracks)} tracks"
+        )
+
+        mapping_key = (
+            f"{source_type}:{playlist_id}"
+        )
+
+        source_changes = self._source_change_report(
+            mapping_key,
+            source_tracks,
+        )
+        self._print_source_changes(
+            source_changes
+        )
+
+        (
+            matched_tracks,
+            unmatched,
+            playlist_mapping,
+            plex_library,
+            match_stats,
+        ) = self._match_source_tracks(
+            source_tracks,
+            mapping_key,
+            source_added_indices=source_changes[
+                "added_indices"
+            ],
+            record_provenance=not dry_run,
+            mark_new_matches=True,
+        )
+
+        if dry_run:
+            print(section_header("DRY RUN SUMMARY"))
+            print(
+                f"Source tracks: {len(source_tracks)}"
+            )
+            print(
+                f"Would match:    {len(matched_tracks)}"
+            )
+            print(
+                f"New matches:    {len(match_stats['new_matches'])}"
+            )
+            print(
+                f"Lost matches:   {len(match_stats['lost_matches'])}"
+            )
+            print(
+                f"Ignored:        "
+                f"{len(match_stats.get('ignored_tracks', []))}"
+            )
+
+            if source_changes["baseline"]:
+                print("Source ADDED:   baseline")
+                print("Source REMOVED: baseline")
+            else:
+                print(
+                    f"Source ADDED:   {len(source_changes['added'])}"
+                )
+                print(
+                    f"Source REMOVED: {len(source_changes['removed'])}"
+                )
+
+            print(
+                f"Unmatched:      {len(unmatched)}"
+            )
+
+            if unmatched:
+                print("\nUnmatched tracks:")
+                for track in unmatched:
+                    print(
+                        f"  ✗ {track['title']} - "
+                        f"{track['artist']} "
+                        f"{source_album_display(track)}"
+                    )
+
+            print(
+                "\n✓ DRY RUN complete. "
+                "No changes were made to Plex."
+            )
+            print(
+                "  config.json, mapping.json, missing_tracks.json, "
+                "match_metadata.json, source_snapshots.json, "
+                "ignored_tracks.json, schema state, and last sync times "
+                "were also left unchanged."
+            )
+            return self._run_stats(
+                tested=1,
+                source_added=(
+                    0
+                    if source_changes["baseline"]
+                    else len(source_changes["added"])
+                ),
+                source_removed=(
+                    0
+                    if source_changes["baseline"]
+                    else len(source_changes["removed"])
+                ),
+                new_matches=len(
+                    match_stats["new_matches"]
+                ),
+                recovered_lost=len(
+                    match_stats.get(
+                        "recovered_lost",
+                        [],
+                    )
+                ),
+                newly_lost=len(
+                    match_stats["lost_matches"]
+                ),
+                unresolved=len(
+                    unmatched
+                ),
+                ignored=len(
+                    match_stats.get(
+                        "ignored_tracks",
+                        [],
+                    )
+                ),
+            )
+
+        self._store_unmatched(
+            mapping_key,
+            unmatched,
+        )
+
+        self.config.mapping[mapping_key] = (
+            playlist_mapping
+        )
+
+        print(
+            section_header(
+                "SYNCING TO PLEX"
+            )
+        )
+
+        operation_error = False
+
+        if matched_tracks:
+            print(
+                "  Clearing existing Plex playlist..."
+            )
+
+            if not plex.clear_playlist(
+                plex_playlist_id
+            ):
+                operation_error = True
+                print(
+                    "⚠ Some existing playlist items could not "
+                    "be removed."
+                )
+        else:
+            print(
+                "⚠ No matched tracks - "
+                "Plex playlist left unchanged"
+            )
+
+        if matched_tracks:
+            added = 0
+
+            for plex_id in matched_tracks:
+                if plex.add_to_playlist(
+                    plex_playlist_id,
+                    plex_id,
+                ):
+                    added += 1
+
+            print(
+                f"✓ Added {added}/{len(matched_tracks)} "
+                "matched tracks"
+            )
+
+            if added != len(matched_tracks):
+                operation_error = True
+
+        plex.update_playlist_metadata(
+            plex_playlist_id,
+            metadata.get("name", ""),
+            metadata.get("description", ""),
+            metadata.get("image_url", ""),
+        )
+
+        image_url = metadata.get(
+            "image_url",
+            "",
+        )
+
+        if image_url:
+            print(
+                "  → Artwork URL found in source"
+            )
+        else:
+            print(
+                "  ⚠ No artwork URL found in source"
+            )
+
+        playlist_entry["last_synced"] = (
+            datetime.now().isoformat()
+        )
+        self._save_source_snapshot(
+            mapping_key,
+            source_tracks,
+        )
+
+        self.config.save()
+
+        if matched_tracks:
+            print("✓ Sync complete!")
+        else:
+            print(
+                "✓ Sync complete "
+                "(no changes - no matched tracks)"
+            )
+
+        if unmatched:
+            print(
+                f"⚠ {len(unmatched)} tracks were not "
+                "added because they are unmatched."
+            )
+
+        print(section_header("SYNC SUMMARY"))
+        print(f"Source tracks:   {len(source_tracks)}")
+        print(f"Matched:         {len(matched_tracks)}")
+        print(
+            f"New matches:     {len(match_stats['new_matches'])}"
+        )
+        print(
+            f"Lost matches:    {len(match_stats['lost_matches'])}"
+        )
+        print(
+            f"Ignored:         "
+            f"{len(match_stats.get('ignored_tracks', []))}"
+        )
+
+        if source_changes["baseline"]:
+            print("Source ADDED:    baseline")
+            print("Source REMOVED:  baseline")
+        else:
+            print(
+                f"Source ADDED:    {len(source_changes['added'])}"
+            )
+            print(
+                f"Source REMOVED:  {len(source_changes['removed'])}"
+            )
+
+        print(f"Unresolved:      {len(unmatched)}")
+
+        return self._run_stats(
+            tested=1,
+            synced=1,
+            source_added=(
+                0
+                if source_changes["baseline"]
+                else len(source_changes["added"])
+            ),
+            source_removed=(
+                0
+                if source_changes["baseline"]
+                else len(source_changes["removed"])
+            ),
+            new_matches=len(
+                match_stats["new_matches"]
+            ),
+            recovered_lost=len(
+                match_stats.get(
+                    "recovered_lost",
+                    [],
+                )
+            ),
+            newly_lost=len(
+                match_stats["lost_matches"]
+            ),
+            unresolved=len(
+                unmatched
+            ),
+            ignored=len(
+                match_stats.get(
+                    "ignored_tracks",
+                    [],
+                )
+            ),
+            errors=(
+                1
+                if operation_error
+                else 0
+            ),
+        )
+
+
+
+    def audit_playlist_without_sync(
+        self,
+        playlist_entry: dict,
+        write_missing: bool = True,
+    ):
+        """
+        Audit an Auto Sync OFF playlist without changing its Plex playlist.
+
+        The source is fetched, source/Plex counts are compared, and matching
+        is run against the selected Plex music library. Only missing_tracks.json
+        may be refreshed. Mappings, provenance, source snapshots, last_synced,
+        playlist metadata, artwork, and Plex playlist contents are untouched.
+        """
+        source_type = playlist_entry["source"]
+        source_url = Config._normalize_url_input(
+            playlist_entry.get("source_url", "")
+        )
+        playlist_id = Config._extract_id(
+            source_url,
+            source_type,
+        ) or str(
+            playlist_entry.get("source_id", "")
+        ).strip()
+        playlist_name = playlist_entry[
+            "plex_playlist_name"
+        ]
+        plex_playlist_id = playlist_entry[
+            "plex_playlist_id"
+        ]
+
+        print(
+            f"\n→ Auditing '{playlist_name}' "
+            f"({source_display_label(source_type)}) - "
+            f"Auto sync: {auto_sync_display(False)}"
+        )
+
+        if not playlist_id:
+            print("✗ Could not determine source playlist ID")
+            return self._run_stats(
+                errors=1,
+            )
+
+        if source_type == "spotify":
+            api = SpotifyAPI()
+        else:
+            api = AppleMusicAPI()
+
+        try:
+            source_tracks, _metadata = api.get_playlist_tracks(
+                source_url,
+                fetch_artwork=False,
+            )
+        except Exception as e:
+            print(f"✗ Failed to fetch source playlist: {e}")
+            return self._run_stats(
+                errors=1,
+            )
+
+        plex = self._get_plex()
+        plex_count = plex.get_playlist_item_count(
+            plex_playlist_id
+        )
+        mapping_key = f"{source_type}:{playlist_id}"
+        source_changes = self._source_change_report(
+            mapping_key,
+            source_tracks,
+        )
+
+        (
+            matched_tracks,
+            unmatched,
+            _playlist_mapping,
+            _plex_library,
+            match_stats,
+        ) = self._match_source_tracks(
+            source_tracks,
+            mapping_key,
+            source_added_indices=set(),
+            record_provenance=False,
+            mark_new_matches=False,
+        )
+
+        self._store_unmatched(
+            mapping_key,
+            unmatched,
+        )
+
+        if write_missing:
+            self.config.save_missing_only()
+
+        print(
+            section_header(
+                "AUTO SYNC OFF - AUDIT SUMMARY"
+            )
+        )
+        print(f"Source tracks:      {len(source_tracks)}")
+        print(
+            "Plex playlist:      "
+            + (
+                str(plex_count)
+                if plex_count is not None
+                else "unknown"
+            )
+        )
+        print(f"Matched in library: {len(matched_tracks)}")
+        print(
+            f"Ignored:            "
+            f"{len(match_stats.get('ignored_tracks', []))}"
+        )
+        print(f"Unresolved:         {len(unmatched)}")
+
+        if plex_count is None:
+            print(
+                "⚠ Could not compare source and Plex playlist counts."
+            )
+        elif plex_count != len(source_tracks):
+            difference = len(source_tracks) - plex_count
+            direction = (
+                f"{difference} fewer"
+                if difference > 0
+                else f"{abs(difference)} more"
+            )
+            print(
+                "⚠ Track count mismatch: Plex has "
+                f"{direction} item"
+                f"{'s' if abs(difference) != 1 else ''} than the source."
+            )
+        else:
+            print(
+                f"✓ Source and Plex counts match ({plex_count})."
+            )
+
+        if write_missing:
+            print(
+                "✓ missing_tracks.json refreshed; Plex playlist left unchanged."
+            )
+        else:
+            print(
+                "✓ Dry-run audit complete; no local state or Plex data changed."
+            )
+
+        return self._run_stats(
+            tested=1,
+            audited=1,
+            source_added=(
+                0
+                if source_changes["baseline"]
+                else len(source_changes["added"])
+            ),
+            source_removed=(
+                0
+                if source_changes["baseline"]
+                else len(source_changes["removed"])
+            ),
+            recovered_lost=len(
+                match_stats.get(
+                    "recovered_lost",
+                    [],
+                )
+            ),
+            newly_lost=len(
+                match_stats["lost_matches"]
+            ),
+            unresolved=len(
+                unmatched
+            ),
+            ignored=len(
+                match_stats.get(
+                    "ignored_tracks",
+                    [],
+                )
+            ),
+        )
+
+    def sync_favorites(
+        self,
+    ):
+        """
+        Explicitly sync only playlists marked as favorites.
+
+        This is a manual action, so favorite playlists are synced even if
+        Auto Sync is OFF, matching the existing interactive Sync All behavior.
+        """
+        favorites = [
+            playlist
+            for playlist in self.config.config.get(
+                "playlists",
+                [],
+            )
+            if self._playlist_favorite(
+                playlist
+            )
+        ]
+
+        if not favorites:
+            print(
+                "✗ No favorite playlists are configured. "
+                "Use Settings → Manage favorite playlists first."
+            )
+            return
+
+        print(
+            section_header(
+                "SYNCING FAVORITE PLAYLISTS"
+            )
+        )
+        print(
+            f"Found {len(favorites)} favorite playlist"
+            f"{'s' if len(favorites) != 1 else ''}.\n"
+        )
+
+        totals = self._run_stats()
+
+        for playlist in favorites:
+            try:
+                result = self.sync_playlist(
+                    playlist
+                )
+
+                if isinstance(
+                    result,
+                    dict,
+                ):
+                    for key in totals:
+                        totals[key] += int(
+                            result.get(
+                                key,
+                                0,
+                            )
+                            or 0
+                        )
+                else:
+                    totals["errors"] += 1
+
+            except Exception as e:
+                totals["errors"] += 1
+                print(
+                    f"✗ Error processing "
+                    f"'{playlist.get('plex_playlist_name', 'Unknown')}': "
+                    f"{e}"
+                )
+
+        print(
+            section_header(
+                "FAVORITES SYNC SUMMARY"
+            )
+        )
+        print(
+            f"Favorite playlists synced: {totals['synced']}"
+        )
+        print(
+            f"Source additions:          {totals['source_added']}"
+        )
+        print(
+            f"Source removals:           {totals['source_removed']}"
+        )
+        print(
+            f"New automatic matches:     {totals['new_matches']}"
+        )
+        print(
+            f"Recovered LOST:            {totals['recovered_lost']}"
+        )
+        print(
+            f"Newly LOST:                {totals['newly_lost']}"
+        )
+        print(
+            f"Unresolved:                {totals['unresolved']}"
+        )
+        print(
+            f"Ignored:                   {totals['ignored']}"
+        )
+        print(
+            f"Errors:                    {totals['errors']}"
+        )
+
+        return totals
+
+    def sync_all(
+        self,
+        dry_run: bool = False,
+        respect_auto_sync: bool = False,
+    ):
+        """Sync/audit all registered playlists and print one run summary."""
+        playlists = self.config.config[
+            "playlists"
+        ]
+
+        if not playlists:
+            print("✗ No playlists registered")
+            return self._run_stats(
+                errors=1,
+            )
+
+        if dry_run:
+            print(
+                section_header(
+                    "PLAYLIST BRIDGE DRY RUN"
+                )
+            )
+            print(
+                "Matching will be tested against Plex, "
+                "but nothing will be changed or saved.\n"
+            )
+
+        totals = self._run_stats()
+
+        def add_result(result):
+            if not isinstance(result, dict):
+                totals["errors"] += 1
+                return
+
+            for key in totals:
+                totals[key] += int(
+                    result.get(
+                        key,
+                        0,
+                    )
+                    or 0
+                )
+
+        for playlist in playlists:
+            try:
+                if (
+                    respect_auto_sync
+                    and not self._auto_sync_enabled(
+                        playlist
+                    )
+                ):
+                    add_result(
+                        self.audit_playlist_without_sync(
+                            playlist,
+                            write_missing=not dry_run,
+                        )
+                    )
+                    continue
+
+                add_result(
+                    self.sync_playlist(
+                        playlist,
+                        dry_run=dry_run,
+                    )
+                )
+
+            except Exception as e:
+                totals["errors"] += 1
+                print(
+                    f"✗ Error processing "
+                    f"'{playlist.get('plex_playlist_name', 'Unknown')}': "
+                    f"{e}"
+                )
+
+        print(
+            section_header(
+                "SYNC-ALL RUN SUMMARY"
+            )
+        )
+
+        if dry_run:
+            print(
+                f"Playlists tested:        {totals['tested']}"
+            )
+        else:
+            print(
+                f"Playlists synced:        {totals['synced']}"
+            )
+
+        print(
+            f"Auto-sync OFF audited:   {totals['audited']}"
+        )
+        print(
+            f"Source additions:        {totals['source_added']}"
+        )
+        print(
+            f"Source removals:         {totals['source_removed']}"
+        )
+        print(
+            f"New automatic matches:   {totals['new_matches']}"
+        )
+        print(
+            f"Recovered LOST:          {totals['recovered_lost']}"
+        )
+        print(
+            f"Newly LOST:              {totals['newly_lost']}"
+        )
+        print(
+            f"Unresolved:              {totals['unresolved']}"
+        )
+        print(
+            f"Ignored:                 {totals['ignored']}"
+        )
+        print(
+            f"Errors:                  {totals['errors']}"
+        )
+
+        if (
+            respect_auto_sync
+            and totals["synced"] == 0
+            and totals["audited"]
+            and not dry_run
+        ):
+            print(
+                "\n✓ Automatic sync is OFF for all registered playlists; "
+                "diagnostic audits completed."
+            )
+
+        return totals
+
+    def developer_menu_interactive(self):
+        """Development/testing tools. Only exposed when -devmode is active."""
+
+        while True:
+            print("\nDeveloper tools:\n")
+            print("[1] Dry run matching")
+            print("[2] Dry run new playlist")
+            print("[3] Check manual source track")
+            print("[4] Album playlist coverage")
+            print("[b] Back")
+            print("[x] Exit")
+
+            choice = input(
+                "\nSelect: "
+            ).strip().lower()
+
+            if choice in ("", "b"):
+                return
+
+            if choice == "x":
+                sys.exit(0)
+
+            if choice == "1":
+                self.dry_run_interactive()
+                continue
+
+            if choice == "2":
+                self.dry_run_new_playlist_interactive()
+                continue
+
+            if choice == "3":
+                self.manual_match_check_interactive()
+                continue
+
+            if choice == "4":
+                self.show_album_playlist_coverage()
+                continue
+
+            print("✗ Invalid choice")
+
+    def dry_run_new_playlist_interactive(
+        self,
+    ):
+        """
+        Test a new Spotify/Apple Music playlist without registering it.
+
+        This deliberately uses an isolated temporary mapping key so the test
+        behaves like a first-time import. It does not reuse saved mappings,
+        permanent ignores, provenance, source snapshots, or missing state.
+
+        No Plex playlist is created or modified and no local state is saved.
+        """
+
+        print(
+            "\nDry run new playlist"
+        )
+        print(
+            "Paste a Spotify or Apple Music playlist URL to test "
+            "first-time matching without registering it."
+        )
+        print(
+            "Type [b] to go back."
+        )
+
+        source_url = input(
+            "\nPlaylist URL: "
+        ).strip()
+
+        if (
+            not source_url
+            or source_url.casefold() == "b"
+        ):
+            return
+
+        source_url = Config._normalize_url_input(
+            source_url
+        )
+
+        lower_url = source_url.lower()
+
+        if (
+            "spotify.com" in lower_url
+            or lower_url.startswith(
+                "spotify:playlist:"
+            )
+        ):
+            source_type = "spotify"
+        elif (
+            "music.apple.com" in lower_url
+            or "itunes.apple.com" in lower_url
+        ):
+            source_type = "applemusic"
+        else:
+            print(
+                "✗ Invalid URL. Must be Spotify or Apple Music"
+            )
+            return
+
+        playlist_id = Config._extract_id(
+            source_url,
+            source_type,
+        )
+
+        if not playlist_id:
+            print(
+                "✗ Could not extract playlist ID from URL"
+            )
+            return
+
+        existing = self.config.find_playlist(
+            source_url
+        )
+
+        if existing:
+            print(
+                "✗ This playlist is already registered."
+            )
+            print(
+                "  Use Developer Tools → Dry run matching "
+                "to test the registered playlist."
+            )
+            return
+
+        api = (
+            SpotifyAPI()
+            if source_type == "spotify"
+            else AppleMusicAPI()
+        )
+
+        print(
+            f"\n→ Fetching "
+            f"{source_display_label(source_type)} playlist "
+            f"(ID: {playlist_id})..."
+        )
+
+        try:
+            tracks, metadata = (
+                api.get_playlist_tracks(
+                    source_url,
+                    fetch_artwork=False,
+                )
+            )
+        except Exception as e:
+            print(
+                f"✗ Failed to fetch playlist: {e}"
+            )
+            return
+
+        playlist_name = repair_text(
+            metadata.get(
+                "name",
+                "Unknown Playlist",
+            )
+        )
+
+        print(
+            f"✓ Found playlist: "
+            f"{playlist_name} "
+            f"({len(tracks)} tracks)"
+        )
+
+        if not tracks:
+            print(
+                "✗ Source playlist contains no tracks."
+            )
+            return
+
+        # Isolated dev-only key guarantees the test behaves like a completely
+        # new import even if stale state with the same source ID exists in a
+        # local JSON file.
+        mapping_key = (
+            f"dev-new:{source_type}:{playlist_id}"
+        )
+
+        (
+            matched_tracks,
+            unmatched,
+            _playlist_mapping,
+            _plex_library,
+            match_stats,
+        ) = self._match_source_tracks(
+            tracks,
+            mapping_key,
+            record_provenance=False,
+            mark_new_matches=False,
+        )
+
+        print(
+            section_header(
+                "NEW PLAYLIST DRY RUN SUMMARY"
+            )
+        )
+        print(
+            f"Playlist:      {playlist_name}"
+        )
+        print(
+            f"Source:        "
+            f"{source_display_label(source_type)}"
+        )
+        print(
+            f"Source tracks: {len(tracks)}"
+        )
+        print(
+            f"Would match:   {len(matched_tracks)}"
+        )
+        print(
+            f"Unmatched:     {len(unmatched)}"
+        )
+
+        if match_stats.get(
+            "lost_matches"
+        ):
+            print(
+                f"Lost matches:  "
+                f"{len(match_stats['lost_matches'])}"
+            )
+
+        if unmatched:
+            print(
+                "\nUnmatched tracks:\n"
+            )
+
+            for track in unmatched:
+                print(
+                    f"  {colored('✗', Colors.RED)} "
+                    f"{colored(track['title'], Colors.CYAN)} - "
+                    f"{colored(track['artist'], Colors.GREEN)} "
+                    f"{source_album_display(track)}"
+                )
+
+        print(
+            "\n✓ New-playlist dry run complete. "
+            "Nothing was registered or changed."
+        )
+        print(
+            "  No Plex playlist was created or modified, "
+            "and no local JSON state was written."
+        )
+
+    def _find_album_playlist_coverage(
+        self,
+    ) -> dict:
+        """
+        Scan Plex album coverage across Playlist Bridge playlists only.
+
+        A library track counts as covered when its Plex ratingKey appears on
+        at least one Plex playlist registered in config.json. Unrelated Plex
+        playlists, smart playlists, and generated playlists are ignored unless
+        they are explicitly registered with Playlist Bridge.
+
+        Repeated appearances on multiple registered playlists still count as
+        one covered library track.
+
+        Albums are grouped by album artist + album title so two artists with
+        the same album title remain separate.
+        """
+
+        plex = self._get_plex()
+
+        print(
+            "\n→ Scanning Plex music library..."
+        )
+        plex_library = plex.search_library(
+            ""
+        )
+
+        if not plex_library:
+            return {
+                "albums": [],
+                "playlist_count": 0,
+                "playlist_track_count": 0,
+                "library_track_count": 0,
+                "library_album_count": 0,
+            }
+
+        print(
+            f"  Found {len(plex_library)} tracks "
+            "in Plex library"
+        )
+
+        print(
+            "→ Scanning Playlist Bridge Plex playlists..."
+        )
+
+        registered_playlists = (
+            self.config.config.get(
+                "playlists",
+                [],
+            )
+        )
+
+        # Deduplicate by destination Plex playlist ID in case config contains
+        # duplicate registrations pointing at the same Plex playlist.
+        playlists = []
+        seen_playlist_ids = set()
+
+        for playlist in registered_playlists:
+            playlist_id = playlist.get(
+                "plex_playlist_id"
+            )
+
+            if playlist_id is None:
+                continue
+
+            playlist_id = str(
+                playlist_id
+            )
+
+            if (
+                not playlist_id
+                or playlist_id in seen_playlist_ids
+            ):
+                continue
+
+            seen_playlist_ids.add(
+                playlist_id
+            )
+
+            playlists.append(
+                {
+                    "plex_id": playlist_id,
+                    "title": (
+                        repair_text(
+                            playlist.get(
+                                "plex_playlist_name",
+                                "",
+                            )
+                        ).strip()
+                        or f"Playlist {playlist_id}"
+                    ),
+                }
+            )
+
+        playlist_track_ids = set()
+
+        for i, playlist in enumerate(
+            playlists,
+            1,
+        ):
+            playlist_id = playlist[
+                "plex_id"
+            ]
+            playlist_name = playlist[
+                "title"
+            ]
+
+            print(
+                f"  [{i}/{len(playlists)}] "
+                f"{playlist_name}"
+            )
+
+            items = plex.get_playlist_items(
+                playlist_id
+            )
+
+            for item in items:
+                plex_id = item.get(
+                    "plex_id"
+                )
+
+                if plex_id is not None:
+                    playlist_track_ids.add(
+                        str(plex_id)
+                    )
+
+        albums = {}
+
+        for track in plex_library:
+            album = repair_text(
+                track.get(
+                    "album",
+                    "",
+                )
+            ).strip()
+
+            # Albumless tracks are omitted from album-level reporting.
+            if not album:
+                continue
+
+            album_artist = repair_text(
+                track.get(
+                    "album_artist",
+                    "",
+                )
+                or track.get(
+                    "artist",
+                    "",
+                )
+            ).strip()
+
+            key = (
+                album_artist.casefold(),
+                album.casefold(),
+            )
+
+            if key not in albums:
+                albums[key] = {
+                    "artist": album_artist,
+                    "album": album,
+                    "track_count": 0,
+                    "playlist_track_count": 0,
+                }
+
+            entry = albums[key]
+            entry["track_count"] += 1
+
+            plex_id = track.get(
+                "plex_id"
+            )
+
+            if (
+                plex_id is not None
+                and str(plex_id)
+                in playlist_track_ids
+            ):
+                entry[
+                    "playlist_track_count"
+                ] += 1
+
+        album_list = list(
+            albums.values()
+        )
+        album_list.sort(
+            key=lambda item: (
+                item["artist"].casefold(),
+                item["album"].casefold(),
+            )
+        )
+
+        return {
+            "albums": album_list,
+            "playlist_count": len(
+                playlists
+            ),
+            "playlist_track_count": len(
+                playlist_track_ids
+            ),
+            "library_track_count": len(
+                plex_library
+            ),
+            "library_album_count": len(
+                albums
+            ),
+        }
+
+    def find_albums_without_playlist_tracks(
+        self,
+    ) -> dict:
+        """
+        Return albums with zero tracks on Playlist Bridge playlists.
+        """
+
+        result = (
+            self._find_album_playlist_coverage()
+        )
+
+        result = dict(
+            result
+        )
+        result["albums"] = [
+            album
+            for album in result["albums"]
+            if album[
+                "playlist_track_count"
+            ] == 0
+        ]
+
+        return result
+
+    def find_albums_with_playlist_tracks(
+        self,
+    ) -> dict:
+        """
+        Return albums with at least one track on a Playlist Bridge playlist.
+        """
+
+        result = (
+            self._find_album_playlist_coverage()
+        )
+
+        result = dict(
+            result
+        )
+        result["albums"] = [
+            album
+            for album in result["albums"]
+            if album[
+                "playlist_track_count"
+            ] > 0
+        ]
+
+        return result
+
+    def show_album_playlist_coverage(
+        self,
+    ):
+        """
+        Read-only developer report of every Plex album grouped by artist.
+
+        Each artist is shown once as a header. Every album for that artist is
+        listed beneath it and marked according to whether at least one track
+        from that album appears on a Plex playlist registered with
+        Playlist Bridge.
+        """
+
+        print(
+            "\nAlbum playlist coverage"
+        )
+        print(
+            "This checks only Plex playlists registered "
+            "with Playlist Bridge."
+        )
+
+        result = (
+            self._find_album_playlist_coverage()
+        )
+
+        if not result[
+            "library_track_count"
+        ]:
+            print(
+                "✗ No Plex music tracks were found."
+            )
+            return
+
+        albums = result[
+            "albums"
+        ]
+
+        covered_count = sum(
+            1
+            for album in albums
+            if album[
+                "playlist_track_count"
+            ] > 0
+        )
+        uncovered_count = (
+            len(albums)
+            - covered_count
+        )
+
+        print(
+            section_header(
+                "ALBUM PLAYLIST COVERAGE"
+            )
+        )
+        print(
+            f"Library tracks:          "
+            f"{result['library_track_count']}"
+        )
+        print(
+            f"Library albums:          "
+            f"{result['library_album_count']}"
+        )
+        print(
+            f"Bridge playlists scanned: "
+            f"{result['playlist_count']}"
+        )
+        print(
+            f"Unique playlist tracks:  "
+            f"{result['playlist_track_count']}"
+        )
+        print(
+            f"Albums on playlists:     "
+            f"{covered_count}"
+        )
+        print(
+            f"Albums not on playlists: "
+            f"{uncovered_count}"
+        )
+
+        if not albums:
+            print(
+                "\n✗ No Plex albums were found."
+            )
+            return
+
+        # Group already-sorted albums by album artist while preserving the
+        # artist/album alphabetical order established by the scanner.
+        artists = {}
+
+        for album in albums:
+            artist = (
+                album["artist"]
+                or "Unknown Artist"
+            )
+
+            artists.setdefault(
+                artist,
+                [],
+            ).append(
+                album
+            )
+
+        print(
+            "\nAlbum coverage by artist:\n"
+        )
+
+        for artist, artist_albums in artists.items():
+            print(
+                colored(
+                    artist,
+                    Colors.BOLD + Colors.GREEN,
+                )
+            )
+
+            for album in artist_albums:
+                covered = album[
+                    "playlist_track_count"
+                ]
+                total = album[
+                    "track_count"
+                ]
+                is_covered = (
+                    covered > 0
+                )
+
+                status = (
+                    colored(
+                        "● ON PLAYLIST",
+                        Colors.GREEN,
+                    )
+                    if is_covered
+                    else colored(
+                        "● NOT ON PLAYLIST",
+                        Colors.RED,
+                    )
+                )
+
+                coverage_text = (
+                    f"{covered}/{total} tracks"
+                )
+
+                print(
+                    f"  {colored(album['album'], Colors.DIM + Colors.YELLOW)} "
+                    f"- {status} "
+                    f"{dimmed(f'({coverage_text})')}"
+                )
+
+            print()
+
+        print(
+            "✓ Developer report complete. "
+            "No Plex or local state was changed."
+        )
+
+    def manual_match_check_interactive(self):
+        """
+        Test one manually entered source track against the Plex library.
+
+        This is read-only. It does not create mappings, modify playlists,
+        update last-sync timestamps, or save any local state.
+        """
+
+        print(
+            "\nManual source-track match check"
+        )
+        print(
+            "Enter source metadata exactly as you want Playlist Bridge "
+            "to evaluate it."
+        )
+        print(
+            "Album is optional. Type [b] at the title prompt to go back."
+        )
+
+        title = input(
+            "\nSource title: "
+        ).strip()
+
+        if title.casefold() == "b" or not title:
+            return
+
+        artist = input(
+            "Source artist: "
+        ).strip()
+
+        if not artist:
+            print("✗ Artist is required")
+            return
+
+        album = input(
+            "Source album (optional): "
+        ).strip()
+
+        source_track = {
+            "title": repair_text(title),
+            "artist": repair_text(artist),
+            "album": repair_text(album),
+        }
+
+        plex = self._get_plex()
+
+        print("\n→ Scanning Plex library...")
+        plex_library = plex.search_library("")
+
+        if not plex_library:
+            print("✗ No Plex music tracks were found.")
+            return
+
+        print(
+            f"  Found {len(plex_library)} tracks in Plex library"
+        )
+
+        scored = []
+
+        for plex_track in plex_library:
+            details = Matcher.score_candidate(
+                source_track,
+                plex_track,
+            )
+            scored.append(
+                (details, plex_track)
+            )
+
+        # Match the real automatic-selection behavior: if strong title/artist
+        # identities exist, only those compete for the automatic winner.
+        strong_identity = [
+            item
+            for item in scored
+            if (
+                item[0]["title_score"] >= 95
+                and item[0]["artist_score"] >= 85
+            )
+        ]
+
+        candidate_pool = strong_identity or scored
+
+        candidate_pool.sort(
+            key=lambda item: (
+                item[0]["adjusted_score"],
+                item[0]["identity_score"],
+                item[0]["title_score"],
+                item[0]["raw_title_score"],
+            ),
+            reverse=True,
+        )
+
+        auto_plex_id = Matcher.match_track(
+            source_track,
+            plex_library,
+            {},
+        )
+
+        print(
+            f"\nSource: "
+            f"{colored(source_track['title'], Colors.CYAN)} - "
+            f"{colored(source_track['artist'], Colors.GREEN)} "
+            f"{source_album_display(source_track)}"
+        )
+
+        if auto_plex_id is None:
+            print("\nAutomatic result: UNMATCHED")
+        else:
+            auto_track = next(
+                (
+                    track
+                    for track in plex_library
+                    if str(track.get("plex_id")) == str(auto_plex_id)
+                ),
+                None,
+            )
+
+            if auto_track:
+                auto_album = auto_track.get("album", "")
+                auto_album_text = (
+                    f" ({auto_album})"
+                    if auto_album
+                    else ""
+                )
+                print(
+                    "\nAutomatic result: "
+                    f"{auto_track.get('title', '')} - "
+                    f"{auto_track.get('artist', '')}"
+                    f"{auto_album_text}"
+                )
+            else:
+                print(
+                    f"\nAutomatic result: Plex ID {auto_plex_id}"
+                )
+
+        print(
+            "\nTop matcher candidates "
+            f"({'strong-identity pool' if strong_identity else 'full library'}):\n"
+        )
+
+        displayed = candidate_pool[:10]
+
+        for i, (details, candidate) in enumerate(
+            displayed,
+            1,
+        ):
+            candidate_album = candidate.get(
+                "album",
+                "",
+            )
+            album_text = (
+                f" ({candidate_album})"
+                if candidate_album
+                else ""
+            )
+
+            marker = (
+                " [AUTO]"
+                if (
+                    auto_plex_id is not None
+                    and str(candidate.get("plex_id")) == str(auto_plex_id)
+                )
+                else ""
+            )
+
+            print(
+                f"[{i}] "
+                f"{candidate.get('title', '')} - "
+                f"{candidate.get('artist', '')}"
+                f"{album_text}"
+                f"{marker}"
+            )
+
+            album_score = details["album_score"]
+            album_score_text = (
+                "N/A"
+                if album_score is None
+                else str(album_score)
+            )
+
+            print(
+                "    "
+                f"adjusted={details['adjusted_score']:.1f}% | "
+                f"identity={details['identity_score']:.1f}% | "
+                f"title={details['title_score']}% | "
+                f"artist={details['artist_score']}% | "
+                f"album={album_score_text}%"
+            )
+
+            effects = []
+
+            if details["album_bonus"]:
+                effects.append(
+                    f"+{details['album_bonus']:.0f} album bonus"
+                )
+
+            if details["album_penalty"]:
+                effects.append(
+                    f"-{details['album_penalty']} album penalty"
+                )
+
+            if details["title_variant_penalty"]:
+                effects.append(
+                    f"-{details['title_variant_penalty']} title-version penalty"
+                )
+
+            if details["release_intent_penalty"]:
+                effects.append(
+                    f"-{details['release_intent_penalty']} "
+                    "missing-version penalty"
+                )
+
+            missing_variants = (
+                details["requested_variant_types"]
+                - details["candidate_variant_types"]
+            )
+
+            if missing_variants:
+                effects.append(
+                    "missing requested "
+                    + ", ".join(
+                        sorted(missing_variants)
+                    )
+                )
+
+            if effects:
+                print(
+                    "    "
+                    + " | ".join(effects)
+                )
+
+        print(
+            "\n✓ Match check complete. "
+            "No Plex or local state was changed."
+        )
+
+    def dry_run_interactive(self):
+        """Run matching without changing Plex or local matching state."""
+
+        playlists = sorted(
+            self.config.config.get(
+                "playlists",
+                [],
+            ),
+            key=lambda p: oldest_timestamp_sort_key(
+                p,
+                "last_synced",
+            ),
+        )
+
+        if not playlists:
+            print("✗ No playlists registered")
+            return
+
+        print("\nDry run matching:\n")
+
+        for i, playlist in enumerate(
+            playlists,
+            1,
+        ):
+            print(
+                f"[{i}] "
+                f"{playlist['plex_playlist_name']} "
+                f"({source_display_label(playlist['source'])}) "
+                f"- Last sync: "
+                f"{dimmed(format_timestamp(playlist.get('last_synced')))}"
+            )
+
+        print("[a] All playlists")
+        print("[b] Back")
+        print("[x] Exit")
+
+        choice = input(
+            "\nSelect: "
+        ).strip().lower()
+
+        if choice in ("", "b"):
+            return
+
+        if choice == "x":
+            sys.exit(0)
+
+        if choice == "a":
+            self.sync_all(
+                dry_run=True,
+            )
+            return
+
+        try:
+            idx = int(choice) - 1
+        except ValueError:
+            print("✗ Invalid choice")
+            return
+
+        if not (0 <= idx < len(playlists)):
+            print("✗ Invalid choice")
+            return
+
+        self.sync_playlist(
+            playlists[idx],
+            dry_run=True,
+        )
+
+    def edit_playlist_matches(self):
+        """Edit existing matches for a playlist."""
+
+        playlists = self.config.config["playlists"]
+
+        if not playlists:
+            print("✗ No playlists registered")
+            return
+
+        while True:
+            print("\nSelect playlist to edit matches:\n")
+
+            rows = []
+
+            for p in playlists:
+                mapping_key = (
+                    f"{p['source']}:{p['source_id']}"
+                )
+                match_count = len(
+                    self.config.mapping.get(
+                        mapping_key,
+                        {},
+                    )
+                )
+                provenance = (
+                    self._match_provenance_counts(
+                        mapping_key
+                    )
+                )
+                rows.append(
+                    (
+                        p,
+                        match_count,
+                        provenance,
+                    )
+                )
+
+            match_width = max(
+                len(str(row[1]))
+                for row in rows
+            )
+            auto_width = max(
+                len(str(row[2]["automatic"]))
+                for row in rows
+            )
+            manual_width = max(
+                len(str(row[2]["manual"]))
+                for row in rows
+            )
+            legacy_width = max(
+                len(str(row[2]["legacy"]))
+                for row in rows
+            )
+
+            print(
+                "  "
+                f"{provenance_display('automatic')} | "
+                f"{provenance_display('manual')} | "
+                f"{provenance_display('legacy')}\n"
+            )
+
+            for i, (
+                p,
+                match_count,
+                provenance,
+            ) in enumerate(
+                rows,
+                1,
+            ):
+                auto_text = colored(
+                    f"{provenance['automatic']:>{auto_width}} auto",
+                    Colors.GREEN,
+                )
+                manual_text = colored(
+                    f"{provenance['manual']:>{manual_width}} manual",
+                    Colors.CYAN,
+                )
+                legacy_text = colored(
+                    f"{provenance['legacy']:>{legacy_width}} legacy",
+                    Colors.YELLOW,
+                )
+
+                print(
+                    f"[{i}] {playlist_favorite_marker(p)} "
+                    f"{p['plex_playlist_name']} "
+                    f"({source_display_label(p['source'])}) "
+                    f"- {match_count:>{match_width}} matches | "
+                    f"{auto_text} | "
+                    f"{manual_text} | "
+                    f"{legacy_text}"
+                )
+
+            print("[b] Back")
+            print("[x] Exit")
+
+            choice = input(
+                "\nSelect: "
+            ).strip().lower()
+
+            if choice in ("", "b"):
+                return
+
+            if choice == "x":
+                sys.exit(0)
+
+            try:
+                idx = int(choice) - 1
+
+                if 0 <= idx < len(playlists):
+                    self._edit_playlist_matches_interactive(
+                        playlists[idx]
+                    )
+                    continue
+
+            except ValueError:
+                pass
+
+            print("✗ Invalid choice")
+
+    def _edit_playlist_matches_interactive(
+        self,
+        playlist: dict,
+    ):
+        """Interactively edit saved matches for a playlist."""
+
+        source_type = playlist["source"]
+        source_url = Config._normalize_url_input(
+            playlist["source_url"]
+        )
+        playlist_id = Config._extract_id(
+            source_url,
+            source_type,
+        )
+
+        if not playlist_id:
+            print(
+                f"✗ Could not extract playlist ID from: "
+                f"{source_url}"
+            )
+            return
+
+        mapping_key = f"{source_type}:{playlist_id}"
+
+        api = (
+            SpotifyAPI()
+            if source_type == "spotify"
+            else AppleMusicAPI()
+        )
+
+        print(
+            f"\n→ Fetching "
+            f"{source_display_label(source_type)} playlist..."
+        )
+
+        try:
+            # Match editing does not need playlist artwork.
+            if source_type == "applemusic":
+                source_tracks, _ = api.get_playlist_tracks(
+                    source_url,
+                    fetch_artwork=False,
+                )
+            else:
+                source_tracks, _ = api.get_playlist_tracks(
+                    playlist_id,
+                    fetch_artwork=False,
+                )
+        except Exception as e:
+            print(f"✗ Failed to fetch: {e}")
+            return
+
+        plex = self._get_plex()
+        plex_library = plex.search_library("")
+
+        playlist_mapping = self.config.mapping.get(
+            mapping_key,
+            {},
+        )
+
+        print(f"\nFound {len(source_tracks)} tracks.\n")
+
+        changes_made = False
+
+        while True:
+            matches_to_review = []
+
+            for track in source_tracks:
+                search_key = (
+                    f"{track['title']}|{track['artist']}"
+                )
+
+                if search_key not in playlist_mapping:
+                    continue
+
+                plex_id = playlist_mapping[search_key]
+                matched_track = next(
+                    (
+                        t
+                        for t in plex_library
+                        if t["plex_id"] == plex_id
+                    ),
+                    None,
+                )
+
+                if matched_track:
+                    matches_to_review.append(
+                        {
+                            "source": track,
+                            "matched": matched_track,
+                            "plex_id": plex_id,
+                            "search_key": search_key,
+                        }
+                    )
+
+            if not matches_to_review:
+                print("✗ No existing matches to edit")
+                if changes_made:
+                    self._prompt_sync_after_match_edits(
+                        playlist
+                    )
+                return
+
+            print(
+                f"Showing all "
+                f"{len(matches_to_review)} matches:\n"
+            )
+
+            for i, match in enumerate(
+                matches_to_review,
+                1,
+            ):
+                src = match["source"]
+                matched = match["matched"]
+                album = matched.get("album", "")
+                album_str = (
+                    f" {colored(f'({album})', Colors.DIM + Colors.YELLOW)}"
+                    if album
+                    else ""
+                )
+
+                src_title = colored(
+                    src["title"],
+                    Colors.CYAN,
+                )
+                src_artist = colored(
+                    src["artist"],
+                    Colors.GREEN,
+                )
+                matched_title = colored(
+                    matched["title"],
+                    Colors.CYAN,
+                )
+                matched_artist = colored(
+                    matched["artist"],
+                    Colors.GREEN,
+                )
+
+                print(
+                    f"[{i}] {src_title} - "
+                    f"{src_artist} "
+                    f"{source_album_display(src)}"
+                )
+                provenance = self._get_match_provenance(
+                    mapping_key,
+                    match["search_key"],
+                )
+
+                print(
+                    f"    → {matched_title} - "
+                    f"{matched_artist}{album_str} "
+                    f"[{provenance_display(provenance)}]"
+                )
+
+            print("\n[b] Back")
+            print("[x] Exit")
+
+            choice = input(
+                "\nEnter track number to fix: "
+            ).strip().lower()
+
+            if choice in ("", "b"):
+                if changes_made:
+                    self._prompt_sync_after_match_edits(
+                        playlist
+                    )
+                return
+
+            if choice == "x":
+                if changes_made:
+                    self._prompt_sync_after_match_edits(
+                        playlist
+                    )
+                sys.exit(0)
+
+            try:
+                idx = int(choice) - 1
+
+                if 0 <= idx < len(matches_to_review):
+                    changed, exit_requested = self._fix_single_match(
+                        matches_to_review[idx],
+                        plex_library,
+                        playlist_mapping,
+                        mapping_key,
+                    )
+
+                    if changed:
+                        changes_made = True
+
+                    if exit_requested:
+                        if changes_made:
+                            self._prompt_sync_after_match_edits(
+                                playlist
+                            )
+                        sys.exit(0)
+
+                    continue
+
+            except ValueError:
+                pass
+
+            print("✗ Invalid choice")
+
+    def _prompt_sync_after_match_edits(
+        self,
+        playlist: dict,
+    ):
+        """Offer one full playlist sync after Option 6 edits."""
+
+        sync_now = input(
+            "\nSync this playlist to Plex now? (y/n): "
+        ).strip().lower()
+
+        if sync_now in ("y", "yes"):
+            print(
+                f"\n→ Syncing "
+                f"'{playlist['plex_playlist_name']}' "
+                "to Plex..."
+            )
+            self.sync_playlist(playlist)
+        else:
+            print(
+                "✓ Match changes saved. "
+                "Plex playlist was not synced."
+            )
+
+    def _fix_single_match(
+        self,
+        current_match: dict,
+        plex_library: List[dict],
+        playlist_mapping: dict,
+        mapping_key: str,
+    ) -> Tuple[bool, bool]:
+        """
+        Fix one saved match.
+
+        Returns (changed, exit_requested). Plex itself is not modified here;
+        Option 6 offers one full sync when editing is done.
+        """
+
+        src = current_match["source"]
+        src_title = colored(src["title"], Colors.CYAN)
+        src_artist = colored(src["artist"], Colors.GREEN)
+        print(
+            f"\n→ Fixing: {src_title} - {src_artist} "
+            f"{source_album_display(src)}"
+        )
+
+        current = current_match["matched"]
+        current_album = current.get("album", "")
+        current_title = colored(current["title"], Colors.CYAN)
+        current_artist = colored(current["artist"], Colors.GREEN)
+        current_display = f"{current_title} - {current_artist}"
+        if current_album:
+            current_display += (
+                f" {colored(f'({current_album})', Colors.DIM + Colors.YELLOW)}"
+            )
+
+        print(f"  Current match: {current_display}")
+
+        candidates = []
+
+        for plex_track in plex_library:
+            score = Matcher.candidate_score(
+                src,
+                plex_track,
+            )
+
+            if score >= Matcher.MIN_DISPLAY_SCORE:
+                candidates.append((score, plex_track))
+
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        displayed_candidates = candidates[:10]
+
+        print("\nTop Plex candidates:\n")
+
+        for i, (score, cand) in enumerate(
+            displayed_candidates,
+            1,
+        ):
+            marker = (
+                "→ "
+                if cand["plex_id"] == current_match["plex_id"]
+                else "  "
+            )
+            album = cand.get("album", "")
+            cand_title = colored(cand["title"], Colors.CYAN)
+            cand_artist = colored(cand["artist"], Colors.GREEN)
+            album_str = (
+                f" {colored(f'({album})', Colors.DIM + Colors.YELLOW)}"
+                if album
+                else ""
+            )
+
+            details = Matcher.score_candidate(src, cand)
+
+            penalty_note = ""
+            if details["album_penalty"]:
+                kinds = ", ".join(
+                    sorted(
+                        details["plex_album_types"]
+                        - details["requested_variant_types"]
+                    )
+                )
+                penalty_note = (
+                    f" [-{details['album_penalty']} {kinds}]"
+                )
+
+            title_variant_note = ""
+            if details["title_variant_penalty"]:
+                kinds = ", ".join(
+                    sorted(
+                        (
+                            details["plex_title_release_types"]
+                            & Matcher.VERSION_TYPES
+                        )
+                        - details["requested_variant_types"]
+                    )
+                )
+                title_variant_note = (
+                    f" [-{details['title_variant_penalty']} "
+                    f"{kinds} title]"
+                )
+
+            intent_note = ""
+            if details["release_intent_penalty"]:
+                missing = ", ".join(
+                    sorted(
+                        details["requested_variant_types"]
+                        - details["candidate_variant_types"]
+                    )
+                )
+                intent_note = (
+                    f" [-{details['release_intent_penalty']} "
+                    f"title missing {missing}]"
+                )
+
+            print(
+                f"{marker}[{i}] {cand_title} - "
+                f"{cand_artist}{album_str} ({score}%)"
+                f"{penalty_note}{title_variant_note}{intent_note}"
+            )
+
+        print("\n[s] Skip")
+        print("[d] Unlink this match")
+        print("[i] Ignore permanently")
+        print("[b] Back")
+        print("[x] Exit")
+
+        choice = input(
+            "\nSelect correct match: "
+        ).strip().lower()
+
+        if choice in ("", "b"):
+            return False, False
+        if choice == "x":
+            return False, True
+        if choice == "s":
+            return False, False
+
+        if choice == "i":
+            self._ignore_track(
+                mapping_key,
+                src,
+            )
+            playlist_mapping.pop(
+                current_match["search_key"],
+                None,
+            )
+            self.config.mapping[
+                mapping_key
+            ] = playlist_mapping
+            self.config.save()
+            print(
+                f"✓ Permanently ignored: "
+                f"{src['title']} - {src['artist']}"
+            )
+            return True, False
+
+        if choice == "d":
+            if current_match["search_key"] in playlist_mapping:
+                del playlist_mapping[current_match["search_key"]]
+                self._remove_match_provenance(
+                    mapping_key,
+                    current_match["search_key"],
+                )
+                self.config.mapping[mapping_key] = playlist_mapping
+                self.config.save()
+                print(
+                    f"✓ Unlinked: {src_title} - {src_artist}"
+                )
+                return True, False
+            return False, False
+
+        try:
+            ch = int(choice)
+
+            if 1 <= ch <= len(displayed_candidates):
+                selected = displayed_candidates[ch - 1][1]
+
+                same_match = (
+                    selected["plex_id"]
+                    == current_match["plex_id"]
+                )
+
+                playlist_mapping[
+                    current_match["search_key"]
+                ] = selected["plex_id"]
+                self._set_match_provenance(
+                    mapping_key,
+                    current_match["search_key"],
+                    "manual",
+                    matched_track=selected,
+                    plex_id=selected.get("plex_id"),
+                )
+                self.config.mapping[mapping_key] = playlist_mapping
+                self.config.save()
+
+                if same_match:
+                    print(
+                        "✓ Match confirmed and marked "
+                        f"{provenance_display('manual')}"
+                    )
+                else:
+                    print(
+                        f"✓ Updated to: {selected['title']} - "
+                        f"{selected['artist']} "
+                        f"[{provenance_display('manual')}]"
+                    )
+
+                return True, False
+
+        except ValueError:
+            pass
+
+        print("✗ Invalid choice")
+        return False, False
+
+    def clear_playlist_matching_interactive(self):
+        """
+        Clear saved matching state for one registered playlist or all of them.
+
+        This resets saved mappings and unresolved-track state only. It does
+        not remove playlist registrations or modify Plex playlists.
+        """
+
+        playlists = self.config.config.get("playlists", [])
+
+        if not playlists:
+            print("✗ No playlists registered")
+            return
+
+        print("\nSelect playlist to clear matching:\n")
+
+        for i, playlist in enumerate(playlists, 1):
+            mapping_key = (
+                f"{playlist['source']}:{playlist['source_id']}"
+            )
+            match_count = len(
+                self.config.mapping.get(mapping_key, {})
+            )
+            missing_count = len(
+                self.config.missing.get(mapping_key, [])
+            )
+
+            print(
+                f"[{i}] {playlist_favorite_marker(playlist)} "
+                f"{playlist['plex_playlist_name']} "
+                f"({source_display_label(playlist['source'])}) "
+                f"- {match_count} saved matches, "
+                f"{missing_count} unresolved"
+            )
+
+        print("[a] All playlists")
+        print("[b] Back")
+        print("[x] Exit")
+
+        choice = input("\nSelect: ").strip().lower()
+
+        if choice in ("", "b"):
+            return
+
+        if choice == "x":
+            sys.exit(0)
+
+        if choice == "a":
+            total_matches = 0
+            total_missing = 0
+
+            for playlist in playlists:
+                mapping_key = (
+                    f"{playlist['source']}:{playlist['source_id']}"
+                )
+                total_matches += len(
+                    self.config.mapping.get(mapping_key, {})
+                )
+                total_missing += len(
+                    self.config.missing.get(mapping_key, [])
+                )
+
+            confirm = input(
+                f"\nClear all saved matching for ALL "
+                f"{len(playlists)} playlists? "
+                f"This will remove {total_matches} saved matches "
+                f"and {total_missing} unresolved records. (y/n): "
+            ).strip().lower()
+
+            if confirm not in ("y", "yes"):
+                print("✓ Matching was not changed")
+                return
+
+            for playlist in playlists:
+                mapping_key = (
+                    f"{playlist['source']}:{playlist['source_id']}"
+                )
+                self.config.mapping.pop(mapping_key, None)
+                self.config.missing.pop(mapping_key, None)
+                self.config.match_metadata.pop(
+                    mapping_key,
+                    None,
+                )
+
+            self.config.save()
+
+            print(
+                f"✓ Cleared matching for all "
+                f"{len(playlists)} playlists "
+                f"({total_matches} saved matches, "
+                f"{total_missing} unresolved records)"
+            )
+            print(
+                "  Registered playlists and Plex playlists "
+                "were left unchanged."
+            )
+            print(
+                "  The next sync will match every source track again."
+            )
+            return
+
+        try:
+            idx = int(choice) - 1
+        except ValueError:
+            print("✗ Invalid choice")
+            return
+
+        if not (0 <= idx < len(playlists)):
+            print("✗ Invalid choice")
+            return
+
+        playlist = playlists[idx]
+        mapping_key = (
+            f"{playlist['source']}:{playlist['source_id']}"
+        )
+
+        confirm = input(
+            f"\nClear all saved matching for "
+            f"'{playlist['plex_playlist_name']}'? (y/n): "
+        ).strip().lower()
+
+        if confirm not in ("y", "yes"):
+            print("✓ Matching was not changed")
+            return
+
+        removed_matches = len(
+            self.config.mapping.get(mapping_key, {})
+        )
+        removed_missing = len(
+            self.config.missing.get(mapping_key, [])
+        )
+
+        self.config.mapping.pop(mapping_key, None)
+        self.config.missing.pop(mapping_key, None)
+        self.config.match_metadata.pop(
+            mapping_key,
+            None,
+        )
+        self.config.save()
+
+        print(
+            f"✓ Cleared matching for "
+            f"'{playlist['plex_playlist_name']}' "
+            f"({removed_matches} saved matches, "
+            f"{removed_missing} unresolved records)"
+        )
+        print(
+            "  The registered playlist and Plex playlist "
+            "were left unchanged."
+        )
+        print(
+            "  The next sync will match every source track again."
+        )
+
+    def clear_automatic_matching_interactive(self):
+        """
+        Clear only mappings explicitly recorded as automatic.
+
+        Manual mappings are preserved. Legacy mappings created before
+        provenance tracking are also preserved because their origin cannot
+        be known safely.
+        """
+
+        playlists = self.config.config.get(
+            "playlists",
+            [],
+        )
+
+        if not playlists:
+            print("✗ No playlists registered")
+            return
+
+        print(
+            "\nSelect playlist to clear automatic matches:\n"
+        )
+
+        rows = []
+
+        for playlist in playlists:
+            mapping_key = (
+                f"{playlist['source']}:{playlist['source_id']}"
+            )
+            counts = self._match_provenance_counts(
+                mapping_key
+            )
+            rows.append(
+                (
+                    playlist,
+                    mapping_key,
+                    counts,
+                )
+            )
+
+        auto_width = max(
+            len(str(row[2]["automatic"]))
+            for row in rows
+        )
+        manual_width = max(
+            len(str(row[2]["manual"]))
+            for row in rows
+        )
+        legacy_width = max(
+            len(str(row[2]["legacy"]))
+            for row in rows
+        )
+
+        for i, (
+            playlist,
+            _mapping_key,
+            counts,
+        ) in enumerate(rows, 1):
+            automatic_text = colored(
+                f"{counts['automatic']:>{auto_width}} automatic",
+                Colors.GREEN,
+            )
+            manual_text = colored(
+                f"{counts['manual']:>{manual_width}} manual",
+                Colors.CYAN,
+            )
+            legacy_text = colored(
+                f"{counts['legacy']:>{legacy_width}} legacy",
+                Colors.YELLOW,
+            )
+
+            print(
+                f"[{i}] {playlist_favorite_marker(playlist)} "
+                f"{playlist['plex_playlist_name']} "
+                f"({source_display_label(playlist['source'])}) "
+                f"- {automatic_text} | "
+                f"{manual_text} | "
+                f"{legacy_text}"
+            )
+
+        print("[a] All playlists")
+        print("[b] Back")
+        print("[x] Exit")
+
+        choice = input(
+            "\nSelect: "
+        ).strip().lower()
+
+        if choice in ("", "b"):
+            return
+
+        if choice == "x":
+            sys.exit(0)
+
+        selected_rows = []
+
+        if choice == "a":
+            selected_rows = rows
+            label = "ALL playlists"
+        else:
+            try:
+                idx = int(choice) - 1
+            except ValueError:
+                print("✗ Invalid choice")
+                return
+
+            if not 0 <= idx < len(rows):
+                print("✗ Invalid choice")
+                return
+
+            selected_rows = [rows[idx]]
+            label = (
+                f"'{rows[idx][0]['plex_playlist_name']}'"
+            )
+
+        automatic_total = sum(
+            row[2]["automatic"]
+            for row in selected_rows
+        )
+
+        if automatic_total == 0:
+            print(
+                "✓ No automatic matches to clear. "
+                "Manual and legacy mappings were unchanged."
+            )
+            return
+
+        confirm = input(
+            f"\nClear {automatic_total} automatic matches "
+            f"from {label}? Manual and legacy mappings "
+            "will be preserved. (y/n): "
+        ).strip().lower()
+
+        if confirm not in ("y", "yes"):
+            print("✓ Matching was not changed")
+            return
+
+        removed = 0
+
+        for (
+            _playlist,
+            mapping_key,
+            _counts,
+        ) in selected_rows:
+            mapping = self.config.mapping.get(
+                mapping_key,
+                {},
+            )
+            metadata = (
+                self._get_match_metadata_bucket(
+                    mapping_key,
+                    create=False,
+                )
+            )
+
+            automatic_keys = [
+                search_key
+                for search_key in list(mapping)
+                if (
+                    isinstance(
+                        metadata.get(search_key),
+                        dict,
+                    )
+                    and metadata[
+                        search_key
+                    ].get("provenance") == "automatic"
+                )
+            ]
+
+            for search_key in automatic_keys:
+                mapping.pop(search_key, None)
+                metadata.pop(search_key, None)
+                removed += 1
+
+            if mapping:
+                self.config.mapping[
+                    mapping_key
+                ] = mapping
+            else:
+                self.config.mapping.pop(
+                    mapping_key,
+                    None,
+                )
+
+            if not metadata:
+                self.config.match_metadata.pop(
+                    mapping_key,
+                    None,
+                )
+
+        self.config.save()
+
+        print(
+            f"✓ Cleared {removed} automatic matches. "
+            "Manual and legacy mappings were preserved."
+        )
+        print(
+            "  Plex playlists were not modified. "
+            "Cleared tracks will be matched again on the next sync."
+        )
+
+    def manage_ignored_tracks_interactive(
+        self,
+    ):
+        """Review and restore permanently ignored tracks."""
+
+        playlists = self.config.config.get(
+            "playlists",
+            [],
+        )
+
+        while True:
+            available = []
+
+            for playlist in playlists:
+                mapping_key = (
+                    f"{playlist['source']}:"
+                    f"{playlist['source_id']}"
+                )
+                bucket = self._get_ignored_bucket(
+                    mapping_key,
+                    create=False,
+                )
+
+                if bucket:
+                    available.append(
+                        (
+                            playlist,
+                            mapping_key,
+                            bucket,
+                        )
+                    )
+
+            if not available:
+                print(
+                    "\n✓ No permanently ignored tracks."
+                )
+                return
+
+            print(
+                "\nPlaylists with ignored tracks:\n"
+            )
+
+            for i, (
+                playlist,
+                _mapping_key,
+                bucket,
+            ) in enumerate(
+                available,
+                1,
+            ):
+                print(
+                    f"[{i}] {playlist_favorite_marker(playlist)} "
+                    f"{playlist['plex_playlist_name']} "
+                    f"({source_display_label(playlist['source'])}) "
+                    f"- {len(bucket)} ignored"
+                )
+
+            print("[b] Back")
+            print("[x] Exit")
+
+            choice = input(
+                "\nSelect playlist: "
+            ).strip().lower()
+
+            if choice in ("", "b"):
+                return
+
+            if choice == "x":
+                sys.exit(0)
+
+            try:
+                index = int(choice) - 1
+                if not 0 <= index < len(available):
+                    raise ValueError
+            except ValueError:
+                print("✗ Invalid choice")
+                continue
+
+            playlist, mapping_key, _bucket = (
+                available[index]
+            )
+
+            while True:
+                bucket = self._get_ignored_bucket(
+                    mapping_key,
+                    create=False,
+                )
+
+                if not bucket:
+                    print(
+                        "\n✓ No ignored tracks remain for "
+                        f"'{playlist['plex_playlist_name']}'."
+                    )
+                    break
+
+                items = sorted(
+                    bucket.items(),
+                    key=lambda item: (
+                        repair_text(
+                            item[1].get("artist", "")
+                        ).casefold(),
+                        repair_text(
+                            item[1].get("title", "")
+                        ).casefold(),
+                    ),
+                )
+
+                print(
+                    f"\nIgnored tracks for "
+                    f"'{playlist['plex_playlist_name']}':\n"
+                )
+
+                for i, (
+                    _ignored_key,
+                    track,
+                ) in enumerate(
+                    items,
+                    1,
+                ):
+                    print(
+                        f"[{i}] "
+                        f"{track.get('title', '')} - "
+                        f"{track.get('artist', '')} "
+                        f"{source_album_display(track)}"
+                    )
+
+                print(
+                    "\nSelect a track number to restore it."
+                )
+                print("[a] Restore all")
+                print("[b] Back")
+                print("[x] Exit")
+
+                sub_choice = input(
+                    "\nSelect: "
+                ).strip().lower()
+
+                if sub_choice in ("", "b"):
+                    break
+
+                if sub_choice == "x":
+                    sys.exit(0)
+
+                if sub_choice == "a":
+                    confirm = input(
+                        f"Restore all {len(items)} ignored "
+                        "tracks for this playlist? (y/n): "
+                    ).strip().lower()
+
+                    if confirm in (
+                        "y",
+                        "yes",
+                    ):
+                        self.config.ignored_tracks.pop(
+                            mapping_key,
+                            None,
+                        )
+                        self.config.save()
+                        print(
+                            "✓ Restored all ignored tracks. "
+                            "They are eligible for matching "
+                            "on the next sync."
+                        )
+                    continue
+
+                try:
+                    item_index = (
+                        int(sub_choice) - 1
+                    )
+                    if not 0 <= item_index < len(items):
+                        raise ValueError
+                except ValueError:
+                    print("✗ Invalid choice")
+                    continue
+
+                ignored_key, track = items[
+                    item_index
+                ]
+
+                if self._restore_ignored_track(
+                    mapping_key,
+                    ignored_key,
+                ):
+                    self.config.save()
+                    print(
+                        f"✓ Restored: "
+                        f"{track.get('title', '')} - "
+                        f"{track.get('artist', '')}"
+                    )
+
+    def _artist_alias_owner(
+        self,
+        artist_name: str,
+    ) -> Optional[str]:
+        """Return the canonical alias group containing an artist name."""
+        target = Matcher._normalize_match_text(
+            artist_name
+        )
+
+        if not target:
+            return None
+
+        for canonical, aliases in self.config.artist_aliases.items():
+            if Matcher._normalize_match_text(canonical) == target:
+                return canonical
+
+            for alias in aliases:
+                if Matcher._normalize_match_text(alias) == target:
+                    return canonical
+
+        return None
+
+    def _select_plex_artist_interactive(
+        self,
+        initial_query: str,
+    ) -> Optional[str]:
+        """Search the selected Plex library and return one artist name."""
+        plex = self._get_plex()
+        query = repair_text(initial_query).strip()
+
+        while True:
+            entered = input(
+                f"Plex artist search [{query}]: "
+            ).strip()
+
+            if entered:
+                query = repair_text(entered).strip()
+
+            if not query:
+                print("✗ Enter an artist search")
+                continue
+
+            results = plex.search_artists(
+                query,
+                limit=10,
+            )
+
+            if not results:
+                print("✗ No Plex artists found")
+            else:
+                print("\nPlex artist matches:\n")
+
+                for index, artist in enumerate(
+                    results,
+                    1,
+                ):
+                    score = artist.get("score")
+                    score_text = (
+                        f" ({score}%)"
+                        if score is not None
+                        else ""
+                    )
+                    print(
+                        f"[{index}] {artist['name']}"
+                        f"{score_text}"
+                    )
+
+            print("[s] Search again")
+            print("[b] Back")
+            print("[x] Exit")
+
+            choice = input(
+                "\nSelect Plex artist: "
+            ).strip().lower()
+
+            if choice in ("", "b"):
+                return None
+
+            if choice == "x":
+                sys.exit(0)
+
+            if choice == "s":
+                continue
+
+            try:
+                index = int(choice) - 1
+                if not 0 <= index < len(results):
+                    raise ValueError
+            except ValueError:
+                print("✗ Invalid choice")
+                continue
+
+            return results[index]["name"]
+
+    def _add_artist_alias_interactive(
+        self,
+        canonical_artist: str = None,
+    ):
+        """Add one source/alternate artist name to a global Plex artist."""
+        alias = input(
+            "Alternate/source artist name: "
+        ).strip()
+        alias = repair_text(alias).strip()
+
+        if not alias:
+            print("✗ Artist name cannot be empty")
+            return
+
+        existing_owner = self._artist_alias_owner(alias)
+
+        if existing_owner:
+            print(
+                f"✗ '{alias}' is already mapped in "
+                f"the '{existing_owner}' alias group."
+            )
+            return
+
+        canonical = canonical_artist
+
+        if not canonical:
+            canonical = self._select_plex_artist_interactive(
+                alias
+            )
+
+        if not canonical:
+            return
+
+        canonical = repair_text(canonical).strip()
+
+        if (
+            Matcher._normalize_match_text(alias)
+            == Matcher._normalize_match_text(canonical)
+        ):
+            print(
+                "✗ The alias and Plex artist are already the same name."
+            )
+            return
+
+        canonical_owner = self._artist_alias_owner(canonical)
+        if canonical_owner and (
+            Matcher._normalize_match_text(canonical_owner)
+            != Matcher._normalize_match_text(canonical)
+        ):
+            print(
+                f"✗ Plex artist '{canonical}' is currently an alias "
+                f"under '{canonical_owner}'. Remove/remap that entry first."
+            )
+            return
+
+        aliases = self.config.artist_aliases.setdefault(
+            canonical,
+            [],
+        )
+        aliases.append(alias)
+        self.config.save_artist_aliases()
+
+        print(
+            f"✓ Global artist alias saved: "
+            f"{alias} → {canonical}"
+        )
+
+    def _manage_artist_alias_group_interactive(
+        self,
+        canonical: str,
+    ):
+        """Manage aliases assigned to one canonical Plex artist."""
+        while canonical in self.config.artist_aliases:
+            aliases = self.config.artist_aliases.get(
+                canonical,
+                [],
+            )
+
+            print(
+                f"\nPlex artist: {colored(canonical, Colors.GREEN)}\n"
+            )
+
+            if aliases:
+                for index, alias in enumerate(
+                    aliases,
+                    1,
+                ):
+                    print(f"[{index}] {alias}")
+            else:
+                print("  No aliases")
+
+            print("\n[a] Add alias to this Plex artist")
+            print("[r] Remove this alias group")
+            print("[b] Back")
+            print("[x] Exit")
+
+            choice = input(
+                "\nSelect: "
+            ).strip().lower()
+
+            if choice in ("", "b"):
+                return
+
+            if choice == "x":
+                sys.exit(0)
+
+            if choice == "a":
+                self._add_artist_alias_interactive(
+                    canonical
+                )
+                continue
+
+            if choice == "r":
+                confirm = input(
+                    f"Remove all aliases mapped to '{canonical}'? (y/n): "
+                ).strip().lower()
+
+                if confirm in ("y", "yes"):
+                    self.config.artist_aliases.pop(
+                        canonical,
+                        None,
+                    )
+                    self.config.save_artist_aliases()
+                    print("✓ Artist alias group removed")
+                    return
+                continue
+
+            try:
+                index = int(choice) - 1
+                if not 0 <= index < len(aliases):
+                    raise ValueError
+            except ValueError:
+                print("✗ Invalid choice")
+                continue
+
+            alias = aliases[index]
+            print(
+                f"\nAlias: {colored(alias, Colors.CYAN)} "
+                f"→ {colored(canonical, Colors.GREEN)}"
+            )
+            print("[m] Map to a different Plex artist")
+            print("[d] Delete alias")
+            print("[b] Back")
+            print("[x] Exit")
+
+            action = input(
+                "Select: "
+            ).strip().lower()
+
+            if action in ("", "b"):
+                continue
+
+            if action == "x":
+                sys.exit(0)
+
+            if action == "d":
+                del aliases[index]
+                if not aliases:
+                    self.config.artist_aliases.pop(
+                        canonical,
+                        None,
+                    )
+                self.config.save_artist_aliases()
+                print(f"✓ Removed alias: {alias}")
+                if canonical not in self.config.artist_aliases:
+                    return
+                continue
+
+            if action == "m":
+                new_canonical = self._select_plex_artist_interactive(
+                    alias
+                )
+
+                if not new_canonical:
+                    continue
+
+                if (
+                    Matcher._normalize_match_text(new_canonical)
+                    == Matcher._normalize_match_text(canonical)
+                ):
+                    print("✓ Alias is already mapped to that Plex artist")
+                    continue
+
+                owner = self._artist_alias_owner(new_canonical)
+                if owner and (
+                    Matcher._normalize_match_text(owner)
+                    != Matcher._normalize_match_text(new_canonical)
+                ):
+                    print(
+                        f"✗ Plex artist '{new_canonical}' is currently an "
+                        f"alias under '{owner}'. Remove/remap it first."
+                    )
+                    continue
+
+                del aliases[index]
+                if not aliases:
+                    self.config.artist_aliases.pop(
+                        canonical,
+                        None,
+                    )
+
+                self.config.artist_aliases.setdefault(
+                    new_canonical,
+                    [],
+                ).append(alias)
+                self.config.save_artist_aliases()
+                print(
+                    f"✓ Remapped: {alias} → {new_canonical}"
+                )
+                if canonical not in self.config.artist_aliases:
+                    return
+                continue
+
+            print("✗ Invalid choice")
+
+    def manage_artist_aliases_interactive(
+        self,
+    ):
+        """Manage global source-artist aliases mapped to Plex artists."""
+        while True:
+            groups = sorted(
+                self.config.artist_aliases.items(),
+                key=lambda item: item[0].casefold(),
+            )
+
+            print("\nGlobal artist aliases:\n")
+
+            if groups:
+                for index, (canonical, aliases) in enumerate(
+                    groups,
+                    1,
+                ):
+                    alias_text = ", ".join(aliases) or "(none)"
+                    print(
+                        f"[{index}] {colored(canonical, Colors.GREEN)} "
+                        f"← {colored(alias_text, Colors.CYAN)}"
+                    )
+            else:
+                print("  No artist aliases configured")
+
+            print("\n[a] Add alias mapping")
+            print("[b] Back")
+            print("[x] Exit")
+
+            choice = input(
+                "\nSelect: "
+            ).strip().lower()
+
+            if choice in ("", "b"):
+                return
+
+            if choice == "x":
+                sys.exit(0)
+
+            if choice == "a":
+                self._add_artist_alias_interactive()
+                continue
+
+            try:
+                index = int(choice) - 1
+                if not 0 <= index < len(groups):
+                    raise ValueError
+            except ValueError:
+                print("✗ Invalid choice")
+                continue
+
+            canonical = groups[index][0]
+            self._manage_artist_alias_group_interactive(
+                canonical
+            )
+
+    def manage_favorite_playlists_interactive(
+        self,
+    ):
+        """Toggle persistent favorite status for registered playlists."""
+
+        playlists = self.config.config.get(
+            "playlists",
+            [],
+        )
+
+        if not playlists:
+            print("✗ No playlists registered")
+            return
+
+        while True:
+            print("\nFavorite playlists:\n")
+
+            for i, playlist in enumerate(
+                playlists,
+                1,
+            ):
+                print(
+                    f"[{i}] {playlist_favorite_marker(playlist)} "
+                    f"{playlist['plex_playlist_name']} "
+                    f"({source_display_label(playlist['source'])})"
+                )
+
+            print("\n[number] Toggle favorite")
+            print("[b] Back")
+            print("[x] Exit")
+
+            choice = input(
+                "\nSelect playlist to toggle: "
+            ).strip().lower()
+
+            if choice in ("", "b"):
+                return
+
+            if choice == "x":
+                sys.exit(0)
+
+            try:
+                index = int(choice) - 1
+                if not 0 <= index < len(playlists):
+                    raise ValueError
+            except ValueError:
+                print("✗ Invalid choice")
+                continue
+
+            playlist = playlists[index]
+            new_state = not self._playlist_favorite(
+                playlist
+            )
+            playlist["favorite"] = new_state
+            self.config.save()
+
+            state = (
+                "favorited"
+                if new_state
+                else "removed from favorites"
+            )
+
+            print(
+                f"✓ '{playlist['plex_playlist_name']}' {state}."
+            )
+
+    def manage_auto_sync_interactive(
+        self,
+    ):
+        """Toggle cron/--sync-all participation per playlist."""
+
+        playlists = self.config.config.get(
+            "playlists",
+            [],
+        )
+
+        if not playlists:
+            print("✗ No playlists registered")
+            return
+
+        while True:
+            print(
+                "\nAutomatic sync settings:\n"
+            )
+            print(
+                f"{colored('OFF', Colors.RED)} playlists stay registered "
+                "and can still be synced manually.\n"
+            )
+
+            for i, playlist in enumerate(
+                playlists,
+                1,
+            ):
+                enabled = self._auto_sync_enabled(
+                    playlist
+                )
+
+                print(
+                    f"[{i}] {playlist_favorite_marker(playlist)} "
+                    f"{playlist['plex_playlist_name']} "
+                    f"({source_display_label(playlist['source'])}) "
+                    f"- Auto sync: {auto_sync_display(enabled)}"
+                )
+
+            print("[b] Back")
+            print("[x] Exit")
+
+            choice = input(
+                "\nSelect playlist to toggle: "
+            ).strip().lower()
+
+            if choice in ("", "b"):
+                return
+
+            if choice == "x":
+                sys.exit(0)
+
+            try:
+                index = int(choice) - 1
+                if not 0 <= index < len(playlists):
+                    raise ValueError
+            except ValueError:
+                print("✗ Invalid choice")
+                continue
+
+            playlist = playlists[index]
+            new_state = not self._auto_sync_enabled(
+                playlist
+            )
+            playlist["auto_sync"] = new_state
+            self.config.save()
+
+            state_word = (
+                colored("enabled", Colors.GREEN)
+                if new_state
+                else colored("disabled", Colors.RED)
+            )
+
+            print(
+                f"✓ Auto sync {state_word} "
+                f"for '{playlist['plex_playlist_name']}'."
+            )
+
+    def settings_interactive(self):
+        """Settings submenu with predictable one-level Back behavior."""
+
+        while True:
+            print("\n[1] Configure Plex")
+            print("[2] Clear all matching for a playlist")
+            print("[3] Clear automatic matches")
+            print("[4] Manage ignored tracks")
+            print("[5] Manage auto-sync")
+            print("[6] Manage artist aliases")
+            print("[7] Manage favorite playlists")
+            print("[b] Back")
+            print("[x] Exit")
+
+            choice = input(
+                "Select: "
+            ).strip().lower()
+
+            if choice in ("", "b"):
+                return
+
+            if choice == "x":
+                sys.exit(0)
+
+            if choice == "1":
+                self.config.setup_plex()
+                self.plex = None
+                continue
+
+            if choice == "2":
+                self.clear_playlist_matching_interactive()
+                continue
+
+            if choice == "3":
+                self.clear_automatic_matching_interactive()
+                continue
+
+            if choice == "4":
+                self.manage_ignored_tracks_interactive()
+                continue
+
+            if choice == "5":
+                self.manage_auto_sync_interactive()
+                continue
+
+            if choice == "6":
+                self.manage_artist_aliases_interactive()
+                continue
+
+            if choice == "7":
+                self.manage_favorite_playlists_interactive()
+                continue
+
+            print("✗ Invalid choice")
+
+    @staticmethod
+    def _print_previous_lost_match(
+        track: dict,
+        indent: str = "",
+    ):
+        """Display the previous Plex target stored with a LOST track."""
+        if track.get("status") != "lost":
+            return
+
+        previous = track.get(
+            "previous_match",
+            {},
+        )
+
+        if not isinstance(previous, dict):
+            previous = {}
+
+        provenance = str(
+            track.get(
+                "previous_provenance",
+                "legacy",
+            )
+        )
+
+        title = repair_text(
+            previous.get("title", "")
+        ).strip()
+        artist = repair_text(
+            previous.get("artist", "")
+        ).strip()
+        album = repair_text(
+            previous.get("album", "")
+        ).strip()
+        plex_id = str(
+            previous.get("plex_id", "")
+            or ""
+        )
+
+        if title or artist:
+            text = (
+                f"{title} - {artist}"
+            ).strip(" -")
+
+            if album:
+                text += f" ({album})"
+
+            print(
+                f"{indent}Previous Plex match: "
+                f"{text} [{provenance_display(provenance)}]"
+            )
+            return
+
+        if plex_id:
+            print(
+                f"{indent}Previous Plex match: "
+                f"metadata unavailable "
+                f"(Plex ID {plex_id}) "
+                f"[{provenance_display(provenance)}]"
+            )
+            return
+
+        print(
+            f"{indent}Previous Plex match: "
+            "metadata unavailable"
+        )
+
+    def resolve_missing_interactive(self):
+        """Interactive resolution of missing tracks."""
+
+        playlists = self.config.config["playlists"]
+
+        if not playlists:
+            print("✗ No playlists registered")
+            return
+
+        while True:
+            playlists_with_missing = []
+
+            for i, p in enumerate(playlists):
+                mapping_key = (
+                    f"{p['source']}:{p['source_id']}"
+                )
+                unmatched = self.config.missing.get(
+                    mapping_key,
+                    [],
+                )
+
+                if unmatched:
+                    playlists_with_missing.append(
+                        (i, p, len(unmatched))
+                    )
+
+            if not playlists_with_missing:
+                print("✓ No unmatched tracks to resolve")
+                return
+
+            def match_attempt_sort_key(item):
+                """Never/invalid first, then oldest successful timestamp."""
+                _list_idx, playlist, _count = item
+                value = playlist.get("last_match_attempt")
+
+                if not value:
+                    return (0, datetime.min)
+
+                try:
+                    return (
+                        1,
+                        datetime.fromisoformat(value),
+                    )
+                except (TypeError, ValueError):
+                    return (0, datetime.min)
+
+            playlists_with_missing.sort(
+                key=match_attempt_sort_key
+            )
+
+            print("\nPlaylists with unmatched tracks:\n")
+
+            for display_idx, (
+                _list_idx,
+                playlist,
+                unmatched_count,
+            ) in enumerate(
+                playlists_with_missing,
+                1,
+            ):
+                last_attempt = playlist.get(
+                    "last_match_attempt"
+                )
+
+                if last_attempt:
+                    try:
+                        attempt_dt = datetime.fromisoformat(
+                            last_attempt
+                        )
+                        attempt_text = attempt_dt.strftime(
+                            "%Y-%m-%d %H:%M"
+                        )
+                    except (TypeError, ValueError):
+                        attempt_text = "Never"
+                else:
+                    attempt_text = "Never"
+
+                print(
+                    f"[{display_idx}] {playlist_favorite_marker(playlist)} "
+                    f"{playlist['plex_playlist_name']} "
+                    f"({source_display_label(playlist['source'])}) "
+                    f"- {unmatched_count} unmatched "
+                    f"- Last match attempt: {dimmed(attempt_text)}"
+                )
+
+            print("[a] All missing tracks (deduped)")
+            print("[f] Favorite playlists only")
+            print("[s] Select playlists")
+            print("[b] Back")
+            print("[x] Exit")
+
+            choice = input(
+                "\nSelect playlist: "
+            ).strip().lower()
+
+            if choice in ("", "b"):
+                return
+
+            if choice == "x":
+                sys.exit(0)
+
+            if choice == "a":
+                self.show_all_missing_tracks_deduped()
+                continue
+
+            if choice == "f":
+                favorite_playlists = [
+                    playlist
+                    for _list_idx, playlist, _count
+                    in playlists_with_missing
+                    if self._playlist_favorite(
+                        playlist
+                    )
+                ]
+
+                if not favorite_playlists:
+                    print(
+                        "✗ No favorite playlists currently have "
+                        "unmatched tracks"
+                    )
+                    continue
+
+                self.show_all_missing_tracks_deduped(
+                    playlists=favorite_playlists,
+                    heading="Missing tracks from favorite playlists",
+                )
+                continue
+
+            if choice == "s":
+                print(
+                    "\nSelect playlists with unmatched tracks:\n"
+                )
+
+                for select_idx, (
+                    _list_idx,
+                    playlist,
+                    unmatched_count,
+                ) in enumerate(
+                    playlists_with_missing,
+                    1,
+                ):
+                    print(
+                        f"[{select_idx}] {playlist_favorite_marker(playlist)} "
+                        f"{playlist['plex_playlist_name']} "
+                        f"({source_display_label(playlist['source'])}) "
+                        f"- {unmatched_count} unmatched"
+                    )
+
+                selection = input(
+                    "\nSelect playlists "
+                    "(examples: 1,3,5-7; b = Back): "
+                ).strip().lower()
+
+                if selection in ("", "b"):
+                    continue
+
+                if selection == "x":
+                    sys.exit(0)
+
+                try:
+                    selected_indexes = parse_index_selection(
+                        selection,
+                        len(playlists_with_missing),
+                    )
+                except ValueError:
+                    print("✗ Invalid selection")
+                    continue
+
+                selected_playlists = [
+                    playlists_with_missing[index][1]
+                    for index in selected_indexes
+                ]
+
+                self.show_all_missing_tracks_deduped(
+                    playlists=selected_playlists,
+                    heading="Missing tracks from selected playlists",
+                )
+                continue
+
+            try:
+                idx = int(choice)
+
+                if 1 <= idx <= len(playlists_with_missing):
+                    _list_idx, playlist, _count = (
+                        playlists_with_missing[idx - 1]
+                    )
+                    self._resolve_playlist_missing(
+                        playlist
+                    )
+                    continue
+
+            except ValueError:
+                pass
+
+            print("✗ Invalid choice")
+
+    def collect_all_missing_tracks_deduped(
+        self,
+        playlists: List[dict] = None,
+    ):
+        """
+        Return a deduplicated list of unresolved tracks.
+
+        When playlists is None, all registered playlists are included.
+        Otherwise only the supplied playlist subset contributes occurrences,
+        playlist counts, and playlist names.
+
+        Tracks are deduplicated by normalized title + artist. Album is shown
+        when available, preferring a non-empty/non-N/A album from any
+        occurrence. Results are sorted by unresolved occurrence count
+        descending, then playlist count descending, then artist/title.
+        """
+
+        if playlists is None:
+            playlists = self.config.config.get(
+                "playlists",
+                [],
+            )
+
+        deduped = {}
+
+        for playlist in playlists:
+            mapping_key = (
+                f"{playlist['source']}:{playlist['source_id']}"
+            )
+            unresolved = self.config.missing.get(
+                mapping_key,
+                [],
+            )
+
+            for track in unresolved:
+                title = repair_text(
+                    track.get("title", "")
+                ).strip()
+                artist = repair_text(
+                    track.get("artist", "")
+                ).strip()
+                album = repair_text(
+                    track.get("album", "")
+                ).strip()
+
+                key = (
+                    title.casefold(),
+                    artist.casefold(),
+                )
+
+                if key not in deduped:
+                    deduped[key] = {
+                        "title": title,
+                        "artist": artist,
+                        "album": album,
+                        "playlists": [],
+                        "playlist_count": 0,
+                        "occurrence_count": 0,
+                        "lost_occurrence_count": 0,
+                    }
+
+                entry = deduped[key]
+                entry["occurrence_count"] += 1
+
+                if track.get("status") == "lost":
+                    entry[
+                        "lost_occurrence_count"
+                    ] += 1
+
+                if album and album.casefold() != "n/a":
+                    current_album = (
+                        entry.get("album", "").strip()
+                    )
+
+                    if (
+                        not current_album
+                        or current_album.casefold() == "n/a"
+                    ):
+                        entry["album"] = album
+
+                playlist_name = playlist[
+                    "plex_playlist_name"
+                ]
+
+                if playlist_name not in entry["playlists"]:
+                    entry["playlists"].append(
+                        playlist_name
+                    )
+                    entry["playlist_count"] += 1
+
+        results = list(deduped.values())
+        results.sort(
+            key=lambda item: (
+                -item["occurrence_count"],
+                -item["playlist_count"],
+                item["artist"].casefold(),
+                item["title"].casefold(),
+                item["album"].casefold(),
+            )
+        )
+        return results
+
+    @staticmethod
+    def _same_missing_identity(
+        left: dict,
+        right: dict,
+    ) -> bool:
+        """Compare missing tracks using normalized title + artist."""
+        return (
+            repair_text(left.get("title", "")).casefold().strip()
+            == repair_text(right.get("title", "")).casefold().strip()
+            and repair_text(left.get("artist", "")).casefold().strip()
+            == repair_text(right.get("artist", "")).casefold().strip()
+        )
+
+    def _playlists_containing_missing_track(
+        self,
+        track: dict,
+        playlists: List[dict],
+    ) -> List[dict]:
+        """Return included playlists that currently contain this missing track."""
+        result = []
+
+        for playlist in playlists:
+            mapping_key = (
+                f"{playlist['source']}:{playlist['source_id']}"
+            )
+            unresolved = self.config.missing.get(
+                mapping_key,
+                [],
+            )
+
+            if any(
+                self._same_missing_identity(
+                    candidate,
+                    track,
+                )
+                for candidate in unresolved
+            ):
+                result.append(
+                    playlist
+                )
+
+        return result
+
+    def _apply_global_missing_match(
+        self,
+        track: dict,
+        selected_plex_track: dict,
+        playlists: List[dict],
+    ) -> int:
+        """Apply one explicit manual match across selected playlist occurrences."""
+        affected = 0
+        now = datetime.now().isoformat()
+
+        for playlist in playlists:
+            mapping_key = (
+                f"{playlist['source']}:{playlist['source_id']}"
+            )
+            unresolved = list(
+                self.config.missing.get(
+                    mapping_key,
+                    [],
+                )
+            )
+            remaining = []
+            matches = []
+
+            for candidate in unresolved:
+                if self._same_missing_identity(
+                    candidate,
+                    track,
+                ):
+                    matches.append(
+                        candidate
+                    )
+                else:
+                    remaining.append(
+                        candidate
+                    )
+
+            if not matches:
+                continue
+
+            playlist_mapping = self.config.mapping.setdefault(
+                mapping_key,
+                {},
+            )
+
+            plex_id = str(
+                selected_plex_track.get(
+                    "plex_id",
+                    "",
+                )
+            )
+
+            for occurrence in matches:
+                search_key = (
+                    f"{occurrence.get('title', '')}|"
+                    f"{occurrence.get('artist', '')}"
+                )
+                playlist_mapping[
+                    search_key
+                ] = plex_id
+
+                self._set_match_provenance(
+                    mapping_key,
+                    search_key,
+                    "manual",
+                    matched_track=selected_plex_track,
+                    plex_id=plex_id,
+                )
+                affected += 1
+
+            if remaining:
+                self.config.missing[
+                    mapping_key
+                ] = remaining
+            else:
+                self.config.missing.pop(
+                    mapping_key,
+                    None,
+                )
+
+            playlist[
+                "last_match_attempt"
+            ] = now
+
+        if affected:
+            self.config.save()
+
+        return affected
+
+    def _review_global_missing_track(
+        self,
+        track: dict,
+        playlists: List[dict],
+    ):
+        """
+        Review one deduped missing track once, then optionally apply that
+        manual match across every matching unresolved occurrence.
+        """
+        plex = self._get_plex()
+        plex_library = plex.search_library("")
+
+        if not plex_library:
+            print("✗ No Plex music tracks found")
+            return
+
+        candidates = []
+
+        for plex_track in plex_library:
+            details = Matcher.score_candidate(
+                track,
+                plex_track,
+            )
+            score = int(
+                round(
+                    details[
+                        "adjusted_score"
+                    ]
+                )
+            )
+
+            if score >= Matcher.MIN_DISPLAY_SCORE:
+                candidates.append(
+                    (
+                        score,
+                        details["identity_score"],
+                        details,
+                        plex_track,
+                    )
+                )
+
+        candidates.sort(
+            key=lambda item: (
+                item[0],
+                item[1],
+                item[2]["title_score"],
+                item[2]["raw_title_score"],
+                item[2]["artist_score"],
+                item[2]["album_score"] or 0,
+            ),
+            reverse=True,
+        )
+        displayed = candidates[:5]
+
+        while True:
+            print(
+                f"\nReviewing: "
+                f"{colored(track['title'], Colors.CYAN)} - "
+                f"{colored(track['artist'], Colors.GREEN)} "
+                f"{source_album_display(track)}"
+            )
+            print("\n  Best Plex candidates:")
+
+            if displayed:
+                for i, (
+                    score,
+                    identity_score,
+                    _details,
+                    candidate,
+                ) in enumerate(
+                    displayed,
+                    1,
+                ):
+                    album = candidate.get(
+                        "album",
+                        "",
+                    )
+                    album_text = (
+                        f" ({album})"
+                        if album
+                        else ""
+                    )
+                    confidence = (
+                        " [LOW CONFIDENCE]"
+                        if identity_score < Matcher.PROMPT_THRESHOLD
+                        else ""
+                    )
+                    print(
+                        f"  [{i}] "
+                        f"{candidate['title']} - "
+                        f"{candidate['artist']}"
+                        f"{album_text} "
+                        f"({score}%){confidence}"
+                    )
+            else:
+                print(
+                    "      No candidates above the normal display threshold."
+                )
+
+            print("  [m] Manual search")
+            print("  [b] Back")
+            print("  [x] Exit")
+
+            choice = input(
+                "  Select: "
+            ).strip().lower()
+
+            if choice in ("", "b"):
+                return
+
+            if choice == "x":
+                sys.exit(0)
+
+            selected = None
+
+            if choice == "m":
+                manual_choice = input(
+                    "  Search Plex title, artist, or album: "
+                ).strip().casefold()
+
+                if not manual_choice:
+                    continue
+
+                manual_results = []
+
+                for plex_track in plex_library:
+                    haystack = (
+                        f"{plex_track.get('title', '')} "
+                        f"{plex_track.get('artist', '')} "
+                        f"{plex_track.get('album', '')}"
+                    ).casefold()
+
+                    if manual_choice not in haystack:
+                        continue
+
+                    details = Matcher.score_candidate(
+                        track,
+                        plex_track,
+                    )
+                    manual_results.append(
+                        (
+                            int(
+                                round(
+                                    details["adjusted_score"]
+                                )
+                            ),
+                            details["identity_score"],
+                            plex_track,
+                        )
+                    )
+
+                manual_results.sort(
+                    key=lambda item: (
+                        item[0],
+                        item[1],
+                    ),
+                    reverse=True,
+                )
+                manual_results = manual_results[:10]
+
+                if not manual_results:
+                    print(
+                        "  ✗ No Plex matches found for that search"
+                    )
+                    continue
+
+                print("\n  Manual Plex matches:\n")
+
+                for i, (
+                    score,
+                    identity_score,
+                    candidate,
+                ) in enumerate(
+                    manual_results,
+                    1,
+                ):
+                    album = candidate.get("album", "")
+                    album_text = (
+                        f" ({album})"
+                        if album
+                        else ""
+                    )
+                    confidence = (
+                        " [LOW CONFIDENCE]"
+                        if identity_score < Matcher.PROMPT_THRESHOLD
+                        else ""
+                    )
+
+                    print(
+                        f"  [{i}] "
+                        f"{candidate['title']} - "
+                        f"{candidate['artist']}"
+                        f"{album_text} "
+                        f"({score}%){confidence}"
+                    )
+
+                manual_pick = input(
+                    "  Select (b = Back): "
+                ).strip().lower()
+
+                if manual_pick in ("", "b"):
+                    continue
+
+                if manual_pick == "x":
+                    sys.exit(0)
+
+                try:
+                    manual_index = (
+                        int(manual_pick) - 1
+                    )
+                except ValueError:
+                    print("  ✗ Invalid selection")
+                    continue
+
+                if not (
+                    0
+                    <= manual_index
+                    < len(manual_results)
+                ):
+                    print("  ✗ Invalid selection")
+                    continue
+
+                selected = manual_results[
+                    manual_index
+                ][2]
+
+            else:
+                try:
+                    candidate_index = int(
+                        choice
+                    ) - 1
+                except ValueError:
+                    print("  ✗ Invalid selection")
+                    continue
+
+                if not (
+                    0
+                    <= candidate_index
+                    < len(displayed)
+                ):
+                    print("  ✗ Invalid selection")
+                    continue
+
+                selected = displayed[
+                    candidate_index
+                ][3]
+
+            occurrence_playlists = (
+                self._playlists_containing_missing_track(
+                    track,
+                    playlists,
+                )
+            )
+
+            if not occurrence_playlists:
+                print("✓ This track is no longer unresolved.")
+                return
+
+            total_occurrences = 0
+
+            for playlist in occurrence_playlists:
+                mapping_key = (
+                    f"{playlist['source']}:{playlist['source_id']}"
+                )
+                total_occurrences += sum(
+                    1
+                    for unresolved_track
+                    in self.config.missing.get(
+                        mapping_key,
+                        [],
+                    )
+                    if self._same_missing_identity(
+                        unresolved_track,
+                        track,
+                    )
+                )
+
+            print(
+                f"\nSelected Plex match: "
+                f"{selected['title']} - "
+                f"{selected['artist']}"
+            )
+            print(
+                f"This can resolve {total_occurrences} occurrence"
+                f"{'s' if total_occurrences != 1 else ''} "
+                f"across {len(occurrence_playlists)} playlist"
+                f"{'s' if len(occurrence_playlists) != 1 else ''}."
+            )
+
+            apply_all = input(
+                "Apply this match to all of them? [Y/n]: "
+            ).strip().lower()
+
+            target_playlists = occurrence_playlists
+
+            if apply_all in ("n", "no"):
+                print("\nChoose playlist(s) to update:\n")
+
+                for i, playlist in enumerate(
+                    occurrence_playlists,
+                    1,
+                ):
+                    print(
+                        f"[{i}] {playlist_favorite_marker(playlist)} "
+                        f"{playlist['plex_playlist_name']} "
+                        f"({source_display_label(playlist['source'])})"
+                    )
+
+                selection = input(
+                    "\nSelect playlists "
+                    "(examples: 1,3,5-7; b = Back): "
+                ).strip().lower()
+
+                if selection in ("", "b"):
+                    return
+
+                if selection == "x":
+                    sys.exit(0)
+
+                try:
+                    indexes = parse_index_selection(
+                        selection,
+                        len(occurrence_playlists),
+                    )
+                except ValueError:
+                    print("✗ Invalid selection")
+                    return
+
+                target_playlists = [
+                    occurrence_playlists[
+                        index
+                    ]
+                    for index in indexes
+                ]
+
+            affected = self._apply_global_missing_match(
+                track,
+                selected,
+                target_playlists,
+            )
+
+            print(
+                f"✓ Saved manual match for "
+                f"{affected} unresolved occurrence"
+                f"{'s' if affected != 1 else ''}."
+            )
+            print("  Plex playlists were not synced.")
+            return
+
+    def show_all_missing_tracks_deduped(
+        self,
+        playlists: List[dict] = None,
+        heading: str = "All missing tracks across playlists",
+    ):
+        """Display and optionally resolve deduplicated unresolved tracks."""
+        if playlists is None:
+            playlists = self.config.config.get(
+                "playlists",
+                [],
+            )
+
+        while True:
+            deduped = self.collect_all_missing_tracks_deduped(
+                playlists=playlists,
+            )
+
+            if not deduped:
+                print("✓ No unmatched tracks to display")
+                return
+
+            print(
+                f"\n{heading} "
+                f"({len(deduped)} unique):\n"
+            )
+
+            for i, track in enumerate(
+                deduped,
+                1,
+            ):
+                lost_prefix = ""
+
+                if track.get(
+                    "lost_occurrence_count",
+                    0,
+                ):
+                    lost_prefix = (
+                        f"{colored('LOST', Colors.RED)} "
+                    )
+
+                print(
+                    f"[{i}] "
+                    f"{lost_prefix}"
+                    f"{colored(track['title'], Colors.CYAN)} - "
+                    f"{colored(track['artist'], Colors.GREEN)} "
+                    f"{source_album_display(track)}"
+                )
+
+                playlist_word = (
+                    "playlist"
+                    if track["playlist_count"] == 1
+                    else "playlists"
+                )
+                occurrence_word = (
+                    "occurrence"
+                    if track["occurrence_count"] == 1
+                    else "occurrences"
+                )
+
+                print(
+                    f"    Appears in "
+                    f"{track['playlist_count']} {playlist_word}, "
+                    f"{track['occurrence_count']} unresolved "
+                    f"{occurrence_word}"
+                )
+
+                if track.get(
+                    "lost_occurrence_count",
+                    0,
+                ):
+                    print(
+                        f"    LOST occurrences: "
+                        f"{track['lost_occurrence_count']}"
+                    )
+
+                print(
+                    f"    Playlists: "
+                    f"{', '.join(track['playlists'])}"
+                )
+
+            print("\n[number] Review one deduped track")
+            print("[b] Back")
+            print("[x] Exit")
+
+            choice = input(
+                "\nSelect: "
+            ).strip().lower()
+
+            if choice in ("", "b"):
+                return
+
+            if choice == "x":
+                sys.exit(0)
+
+            try:
+                selected_index = (
+                    int(choice) - 1
+                )
+            except ValueError:
+                print("✗ Invalid choice")
+                continue
+
+            if not (
+                0
+                <= selected_index
+                < len(deduped)
+            ):
+                print("✗ Invalid choice")
+                continue
+
+            self._review_global_missing_track(
+                deduped[selected_index],
+                playlists,
+            )
+
+
+    def _resolve_playlist_missing(
+        self,
+        playlist: dict,
+    ):
+        """
+        Resolve missing tracks for a specific playlist.
+
+        The overview supports two workflows:
+        - choose a track number to review only that one unresolved item;
+        - choose [t] to start the existing sequential triage flow.
+
+        Single-track review returns to this list afterward and leaves every
+        other unresolved track untouched.
+        """
+
+        mapping_key = (
+            f"{playlist['source']}:{playlist['source_id']}"
+        )
+
+        while True:
+            unmatched = list(
+                self.config.missing.get(
+                    mapping_key,
+                    [],
+                )
+            )
+
+            if not unmatched:
+                print(
+                    "✓ No unmatched tracks"
+                )
+                return
+
+            print(
+                f"\nMissing tracks for "
+                f"'{playlist['plex_playlist_name']}' "
+                f"({len(unmatched)} total):\n"
+            )
+
+            for i, track in enumerate(
+                unmatched,
+                1,
+            ):
+                lost_prefix = ""
+
+                if track.get(
+                    "status"
+                ) == "lost":
+                    lost_prefix = (
+                        f"{colored('LOST', Colors.RED)} "
+                    )
+
+                print(
+                    f"[{i}] "
+                    f"{lost_prefix}"
+                    f"{colored(track['title'], Colors.CYAN)} - "
+                    f"{colored(track['artist'], Colors.GREEN)} "
+                    f"{source_album_display(track)}"
+                )
+
+                if track.get(
+                    "status"
+                ) == "lost":
+                    self._print_previous_lost_match(
+                        track,
+                        indent="    ",
+                    )
+
+            print(
+                "\n[number] Review one track"
+            )
+            print("[t] Start triage")
+            print("[b] Back")
+            print("[x] Exit")
+
+            triage_choice = input(
+                "\nSelect: "
+            ).strip().lower()
+
+            if triage_choice in (
+                "",
+                "b",
+            ):
+                return
+
+            if triage_choice == "x":
+                sys.exit(0)
+
+            if triage_choice == "t":
+                sync_first = input(
+                    "Sync this playlist before reviewing missing tracks? "
+                    "[Y/n]: "
+                ).strip().lower()
+
+                if sync_first not in ("n", "no"):
+                    self.sync_playlist(
+                        playlist
+                    )
+                    mapping_key = (
+                        f"{playlist['source']}:"
+                        f"{playlist['source_id']}"
+                    )
+                    refreshed = self.config.missing.get(
+                        mapping_key,
+                        [],
+                    )
+
+                    if not refreshed:
+                        print(
+                            "✓ Sync refreshed the playlist and there are "
+                            "no unmatched tracks left to triage."
+                        )
+                        return
+
+                    print(
+                        f"✓ Sync complete. {len(refreshed)} unmatched "
+                        "tracks remain for triage."
+                    )
+
+                self._triage_playlist_missing(
+                    playlist,
+                )
+                return
+
+            try:
+                selected_index = (
+                    int(
+                        triage_choice
+                    )
+                    - 1
+                )
+            except ValueError:
+                print(
+                    "✗ Invalid choice"
+                )
+                continue
+
+            if not (
+                0
+                <= selected_index
+                < len(unmatched)
+            ):
+                print(
+                    "✗ Invalid choice"
+                )
+                continue
+
+            self._triage_playlist_missing(
+                playlist,
+                selected_index=selected_index,
+            )
+
+    def _triage_playlist_missing(
+        self,
+        playlist: dict,
+        selected_index: int = None,
+    ):
+        """
+        Run Option 5 matching for either the full unresolved list or one item.
+
+        selected_index=None keeps the existing sequential triage behavior.
+        A numeric selected_index reviews only that item and returns to the
+        missing-track overview when finished.
+        """
+
+        mapping_key = (
+            f"{playlist['source']}:{playlist['source_id']}"
+        )
+
+        all_unmatched = list(
+            self.config.missing.get(
+                mapping_key,
+                [],
+            )
+        )
+
+        if not all_unmatched:
+            print(
+                "✓ No unmatched tracks"
+            )
+            return
+
+        single_track_mode = (
+            selected_index is not None
+        )
+
+        if single_track_mode:
+            if not (
+                0
+                <= selected_index
+                < len(all_unmatched)
+            ):
+                print(
+                    "✗ Invalid track selection"
+                )
+                return
+
+            untouched_before = (
+                all_unmatched[
+                    :selected_index
+                ]
+            )
+            untouched_after = (
+                all_unmatched[
+                    selected_index + 1:
+                ]
+            )
+            unmatched = [
+                all_unmatched[
+                    selected_index
+                ]
+            ]
+        else:
+            selected_index = None
+            untouched_before = []
+            untouched_after = []
+            unmatched = all_unmatched
+
+        # Count this as a match-fixing attempt only after the user explicitly
+        # starts triage. Simply viewing the missing-track list does not update
+        # the timestamp.
+        playlist["last_match_attempt"] = (
+            datetime.now().isoformat()
+        )
+        self.config.save()
+
+        plex = self._get_plex()
+
+        playlist_mapping = self.config.mapping.get(
+            mapping_key,
+            {},
+        )
+
+        plex_library = plex.search_library("")
+
+        if not plex_library:
+            print("✗ No Plex music tracks found")
+            return
+
+        # Older missing_tracks.json entries only stored title/artist.
+        # Re-fetch the source playlist once so we can recover album metadata
+        # before ranking candidates. If the source fetch fails, Option 5
+        # still works using title/artist only.
+        try:
+            source_type = playlist["source"]
+            source_url = playlist.get("source_url", "")
+            source_id = playlist.get("source_id", "")
+
+            api = (
+                SpotifyAPI()
+                if source_type == "spotify"
+                else AppleMusicAPI()
+            )
+
+            source_tracks, _ = api.get_playlist_tracks(
+                source_url
+                if source_type in ("spotify", "applemusic")
+                else source_id,
+                fetch_artwork=False,
+            )
+
+            source_lookup = {
+                (
+                    str(t.get("title", "")).casefold().strip(),
+                    str(t.get("artist", "")).casefold().strip(),
+                ): t
+                for t in source_tracks
+            }
+
+            recovered = 0
+
+            for track in unmatched:
+                if track.get("album"):
+                    continue
+
+                key = (
+                    str(track.get("title", "")).casefold().strip(),
+                    str(track.get("artist", "")).casefold().strip(),
+                )
+
+                source_track = source_lookup.get(key)
+
+                if source_track:
+                    if source_track.get("album"):
+                        track["album"] = source_track.get("album", "")
+                        recovered += 1
+
+                    if source_track.get("source_id"):
+                        track["source_id"] = source_track.get(
+                            "source_id",
+                            "",
+                        )
+
+            if recovered:
+                print(
+                    f"  ✓ Recovered album metadata for "
+                    f"{recovered} missing tracks"
+                )
+
+        except Exception as e:
+            print(
+                f"  ⚠ Could not refresh source metadata for "
+                f"Option 5: {e}"
+            )
+
+        if single_track_mode:
+            print(
+                "\nReviewing selected unmatched track:\n"
+            )
+        else:
+            print(
+                f"\nResolving {len(unmatched)} "
+                "unmatched tracks:\n"
+            )
+
+        # In single-track mode, preserve all untouched unresolved tracks in
+        # their original positions. Only the chosen track is reviewed.
+        still_unmatched = list(
+            untouched_before
+        )
+        track_index = 0
+
+        while track_index < len(unmatched):
+            track = unmatched[track_index]
+
+            # Score EVERY Plex track. This is intentionally different from
+            # automatic matching: the user asked to see the best available
+            # choices even when none reaches the normal confidence threshold.
+            candidates = []
+
+            for plex_track in plex_library:
+                details = Matcher.score_candidate(
+                    track,
+                    plex_track,
+                )
+
+                score = int(
+                    round(details["adjusted_score"])
+                )
+
+                if score >= Matcher.MIN_DISPLAY_SCORE:
+                    candidates.append(
+                        (
+                            score,
+                            details["identity_score"],
+                            details,
+                            plex_track,
+                        )
+                    )
+
+            candidates.sort(
+                key=lambda item: (
+                    item[0],  # adjusted score
+                    item[1],  # raw title/artist identity
+                    item[2]["title_score"],
+                    item[2]["raw_title_score"],
+                    item[2]["artist_score"],
+                    item[2]["album_score"] or 0,
+                ),
+                reverse=True,
+            )
+
+            displayed_candidates = candidates[:5]
+
+            lost_prefix = ""
+
+            if track.get("status") == "lost":
+                lost_prefix = (
+                    f"{colored('LOST', Colors.RED)} "
+                )
+
+            display_position = (
+                selected_index + 1
+                if single_track_mode
+                else track_index + 1
+            )
+            display_total = (
+                len(all_unmatched)
+                if single_track_mode
+                else len(unmatched)
+            )
+
+            print(
+                f"\n[{display_position}/{display_total}] "
+                f"{lost_prefix}"
+                f"{colored(track['title'], Colors.CYAN)} - "
+                f"{colored(track['artist'], Colors.GREEN)} "
+                f"{source_album_display(track)}"
+            )
+
+            if track.get("status") == "lost":
+                self._print_previous_lost_match(
+                    track,
+                    indent="  ",
+                )
+
+            print("\n  Best Plex candidates:")
+
+            if displayed_candidates:
+                for i, (
+                    score,
+                    identity_score,
+                    details,
+                    cand,
+                ) in enumerate(
+                    displayed_candidates,
+                    1,
+                ):
+                    album = cand.get("album", "")
+                    cand_title = colored(
+                        cand["title"],
+                        Colors.CYAN,
+                    )
+                    cand_artist = colored(
+                        cand["artist"],
+                        Colors.GREEN,
+                    )
+                    album_str = (
+                        f" {colored(f'({album})', Colors.DIM + Colors.YELLOW)}"
+                        if album
+                        else ""
+                    )
+
+                    confidence_note = ""
+                    if identity_score < Matcher.PROMPT_THRESHOLD:
+                        confidence_note = " [LOW CONFIDENCE]"
+
+                    penalty_note = ""
+                    if details["album_penalty"]:
+                        kinds = ", ".join(
+                            sorted(
+                                details["plex_album_types"]
+                                - details["requested_variant_types"]
+                            )
+                        )
+                        penalty_note = (
+                            f" [-{details['album_penalty']} "
+                            f"{kinds}]"
+                        )
+
+                    title_variant_note = ""
+                    if details["title_variant_penalty"]:
+                        kinds = ", ".join(
+                            sorted(
+                                (
+                                    details["plex_title_release_types"]
+                                    & Matcher.VERSION_TYPES
+                                )
+                                - details["requested_variant_types"]
+                            )
+                        )
+                        title_variant_note = (
+                            f" [-{details['title_variant_penalty']} "
+                            f"{kinds} title]"
+                        )
+
+                    intent_note = ""
+                    if details["release_intent_penalty"]:
+                        missing = ", ".join(
+                            sorted(
+                                details["requested_variant_types"]
+                                - details["candidate_variant_types"]
+                            )
+                        )
+                        intent_note = (
+                            f" [-{details['release_intent_penalty']} "
+                            f"title missing {missing}]"
+                        )
+
+                    print(
+                        f"  [{i}] {cand_title} - "
+                        f"{cand_artist}{album_str} "
+                        f"({score}%){penalty_note}{title_variant_note}{intent_note}"
+                        f"{confidence_note}"
+                    )
+            else:
+                print("      No Plex tracks available.")
+
+            print("  [s] Skip")
+            print("  [m] Manual search")
+            print("  [i] Ignore permanently")
+
+            if single_track_mode:
+                print("  [b] Back to missing-track list")
+            else:
+                print("  [f] Finish triage & sync now")
+
+            print("  [x] Exit")
+
+            choice = input(
+                "  Select: "
+            ).strip().lower()
+
+            if (
+                single_track_mode
+                and choice in ("", "b")
+            ):
+                still_unmatched.append(
+                    track
+                )
+                track_index += 1
+                continue
+
+            if (
+                choice == "f"
+                and not single_track_mode
+            ):
+                # End this triage session without losing our place.
+                # Keep the current track plus everything not yet reviewed.
+                still_unmatched.extend(
+                    unmatched[track_index:]
+                )
+
+                # Persist all mappings and remaining unmatched tracks BEFORE
+                # starting the Plex sync.
+                self.config.mapping[mapping_key] = (
+                    playlist_mapping
+                )
+
+                if still_unmatched:
+                    self.config.missing[mapping_key] = (
+                        still_unmatched
+                    )
+                else:
+                    self.config.missing.pop(
+                        mapping_key,
+                        None,
+                    )
+
+                self.config.save()
+
+                print(
+                    f"\n✓ Triage progress saved. "
+                    f"{len(still_unmatched)} tracks remain unmatched."
+                )
+
+                print(
+                    f"\n→ Syncing "
+                    f"'{playlist['plex_playlist_name']}' "
+                    "to Plex now..."
+                )
+
+                self.sync_playlist(playlist)
+
+                remaining_after_sync = len(
+                    self.config.missing.get(
+                        mapping_key,
+                        [],
+                    )
+                )
+
+                if remaining_after_sync:
+                    print(
+                        "\n✓ Triage session finished. "
+                        "You can return to Option 5 later "
+                        "to continue the remaining tracks."
+                    )
+                else:
+                    print(
+                        "\n✓ Triage session finished. "
+                        "No unresolved tracks remain."
+                    )
+
+                return
+
+            if choice == "x":
+                # Save any matches already made in this session before exit.
+                still_unmatched.extend(
+                    unmatched[track_index:]
+                )
+
+                if single_track_mode:
+                    still_unmatched.extend(
+                        untouched_after
+                    )
+
+                self.config.mapping[mapping_key] = (
+                    playlist_mapping
+                )
+                self.config.missing[mapping_key] = (
+                    still_unmatched
+                )
+                self.config.save()
+                sys.exit(0)
+
+            if choice == "i":
+                self._ignore_track(
+                    mapping_key,
+                    track,
+                )
+                print(
+                    f"  ✓ Permanently ignored: "
+                    f"{track['title']} - {track['artist']}"
+                )
+                track_index += 1
+                continue
+
+            if choice == "m":
+                manual_choice = input(
+                    "  Search Plex title, artist, or album: "
+                ).strip().lower()
+
+                if not manual_choice:
+                    still_unmatched.append(track)
+                    track_index += 1
+                    continue
+
+                manual_candidates = []
+
+                for plex_track in plex_library:
+                    haystack = (
+                        f"{plex_track.get('title', '')} "
+                        f"{plex_track.get('artist', '')} "
+                        f"{plex_track.get('album', '')}"
+                    ).casefold()
+
+                    if manual_choice not in haystack:
+                        continue
+
+                    details = Matcher.score_candidate(
+                        track,
+                        plex_track,
+                    )
+
+                    manual_score = int(
+                        round(details["adjusted_score"])
+                    )
+
+                    manual_candidates.append(
+                        (
+                            manual_score,
+                            details["identity_score"],
+                            details,
+                            plex_track,
+                        )
+                    )
+
+                manual_candidates.sort(
+                    key=lambda item: (
+                        item[0],
+                        item[1],
+                        item[2]["title_score"],
+                        item[2]["artist_score"],
+                    ),
+                    reverse=True,
+                )
+
+                displayed_manual = (
+                    manual_candidates[:10]
+                )
+
+                if displayed_manual:
+                    print(
+                        f"\n  Found "
+                        f"{len(manual_candidates)} "
+                        f"Plex matches:\n"
+                    )
+
+                    for i, (
+                        score,
+                        identity_score,
+                        details,
+                        match,
+                    ) in enumerate(
+                        displayed_manual,
+                        1,
+                    ):
+                        album = match.get(
+                            "album",
+                            "",
+                        )
+                        match_title = colored(
+                            match["title"],
+                            Colors.CYAN,
+                        )
+                        match_artist = colored(
+                            match["artist"],
+                            Colors.GREEN,
+                        )
+                        album_str = (
+                            f" "
+                            f"{colored(f'({album})', Colors.DIM + Colors.YELLOW)}"
+                            if album
+                            else ""
+                        )
+
+                        confidence_note = ""
+                        if (
+                            identity_score
+                            < Matcher.PROMPT_THRESHOLD
+                        ):
+                            confidence_note = (
+                                " [LOW CONFIDENCE]"
+                            )
+
+                        penalty_note = ""
+                        if details["album_penalty"]:
+                            kinds = ", ".join(
+                                sorted(
+                                    details["plex_album_types"]
+                                    - details["requested_variant_types"]
+                                )
+                            )
+                            penalty_note = (
+                                f" [-"
+                                f"{details['album_penalty']} "
+                                f"{kinds}]"
+                            )
+
+                        title_variant_note = ""
+                        if details["title_variant_penalty"]:
+                            kinds = ", ".join(
+                                sorted(
+                                    (
+                                        details["plex_title_release_types"]
+                                        & Matcher.VERSION_TYPES
+                                    )
+                                    - details["requested_variant_types"]
+                                )
+                            )
+                            title_variant_note = (
+                                f" [-{details['title_variant_penalty']} "
+                                f"{kinds} title]"
+                            )
+
+                        intent_note = ""
+                        if details["release_intent_penalty"]:
+                            missing = ", ".join(
+                                sorted(
+                                    details["requested_variant_types"]
+                                    - details["candidate_variant_types"]
+                                )
+                            )
+                            intent_note = (
+                                f" [-{details['release_intent_penalty']} "
+                                f"title missing {missing}]"
+                            )
+
+                        print(
+                            f"    [{i}] "
+                            f"{match_title} - "
+                            f"{match_artist}"
+                            f"{album_str} "
+                            f"({score}%)"
+                            f"{penalty_note}"
+                            f"{title_variant_note}"
+                            f"{intent_note}"
+                            f"{confidence_note}"
+                        )
+
+                    print(
+                        "    [c] Cancel manual search"
+                    )
+
+                    sub_choice = input(
+                        "    Select: "
+                    ).strip().lower()
+
+                    if sub_choice == "c":
+                        still_unmatched.append(track)
+                        track_index += 1
+                        continue
+
+                    try:
+                        sub_ch = int(sub_choice)
+
+                        if (
+                            1
+                            <= sub_ch
+                            <= len(displayed_manual)
+                        ):
+                            selected = (
+                                displayed_manual[
+                                    sub_ch - 1
+                                ][3]
+                            )
+
+                            search_key = (
+                                f"{track['title']}|"
+                                f"{track['artist']}"
+                            )
+
+                            playlist_mapping[
+                                search_key
+                            ] = selected["plex_id"]
+                            self._set_match_provenance(
+                                mapping_key,
+                                search_key,
+                                "manual",
+                                matched_track=selected,
+                                plex_id=selected.get("plex_id"),
+                            )
+
+                            print(
+                                f"    ✓ Matched to: "
+                                f"{selected['title']} - "
+                                f"{selected['artist']}"
+                            )
+                        else:
+                            print(
+                                "    ✗ Invalid selection"
+                            )
+                            still_unmatched.append(
+                                track
+                            )
+
+                    except ValueError:
+                        print(
+                            "    ✗ Invalid selection"
+                        )
+                        still_unmatched.append(track)
+
+                else:
+                    print(
+                        "  ✗ No Plex matches found "
+                        "for that search"
+                    )
+                    still_unmatched.append(track)
+
+                track_index += 1
+                continue
+
+            if choice == "s":
+                still_unmatched.append(track)
+                track_index += 1
+                continue
+
+            try:
+                ch = int(choice)
+
+                if (
+                    1
+                    <= ch
+                    <= len(displayed_candidates)
+                ):
+                    selected = (
+                        displayed_candidates[
+                            ch - 1
+                        ][3]
+                    )
+
+                    search_key = (
+                        f"{track['title']}|"
+                        f"{track['artist']}"
+                    )
+
+                    playlist_mapping[
+                        search_key
+                    ] = selected["plex_id"]
+                    self._set_match_provenance(
+                        mapping_key,
+                        search_key,
+                        "manual",
+                        matched_track=selected,
+                        plex_id=selected.get("plex_id"),
+                    )
+
+                    print(
+                        f"  ✓ Matched to: "
+                        f"{selected['title']} - "
+                        f"{selected['artist']}"
+                    )
+
+                else:
+                    print(
+                        "  ✗ Invalid selection; "
+                        "track left unmatched"
+                    )
+                    still_unmatched.append(track)
+
+            except ValueError:
+                print(
+                    "  ✗ Invalid selection; "
+                    "track left unmatched"
+                )
+                still_unmatched.append(track)
+
+            track_index += 1
+
+        if single_track_mode:
+            still_unmatched.extend(
+                untouched_after
+            )
+
+        self.config.mapping[mapping_key] = (
+            playlist_mapping
+        )
+
+        if still_unmatched:
+            self.config.missing[mapping_key] = (
+                still_unmatched
+            )
+        else:
+            self.config.missing.pop(
+                mapping_key,
+                None,
+            )
+
+        self.config.save()
+
+        print("\n✓ Saved matches")
+
+        if still_unmatched:
+            print(
+                f"⚠ {len(still_unmatched)} tracks "
+                "remain unmatched"
+            )
+        else:
+            print(
+                "✓ All previously unmatched tracks "
+                "have been resolved"
+            )
+
+        if single_track_mode:
+            print(
+                "✓ Single-track review complete. "
+                "Returning to the missing-track list."
+            )
+            return
+
+        # Offer to immediately rebuild the Plex playlist using the mappings
+        # that were just saved in Option 5.
+        sync_now = input(
+            "\nSync this playlist to Plex now? (y/n): "
+        ).strip().lower()
+
+        if sync_now in ("y", "yes"):
+            print(
+                f"\n→ Syncing "
+                f"'{playlist['plex_playlist_name']}' "
+                "to Plex..."
+            )
+            self.sync_playlist(playlist)
+        else:
+            print(
+                "✓ Matches saved. Plex playlist was not synced."
+            )
+
+
+def print_menu(
+    dev_mode: bool = False,
+):
+    """Print main menu."""
+
+    print("\n" + "=" * 50)
+    print(
+        f"{APP_NAME} v{VERSION} - Spotify/Apple Music to Plex"
+    )
+    print("=" * 50)
+    print("[1] Add new Spotify/Apple Music playlist")
+    print("[2] Sync playlists")
+    print("[3] View registered playlists")
+    print("[4] Resolve missing tracks")
+    print("[5] Edit playlist matches")
+    print("[6] Sync history")
+    print("[7] Remove playlist")
+    print("[8] Settings")
+
+    if dev_mode:
+        print("[9] Developer tools")
+
+    print("[x] Exit")
+    print("=" * 50)
+
+
+def show_playlists(config: Config):
+    """Show registered playlists, oldest last-sync first."""
+
+    playlists = sorted(
+        config.config["playlists"],
+        key=lambda p: oldest_timestamp_sort_key(
+            p,
+            "last_synced",
+        ),
+    )
+
+    if not playlists:
+        print("\n✗ No playlists registered")
+        return
+
+    print("\nRegistered playlists:\n")
+
+    for i, p in enumerate(playlists, 1):
+        print(
+            f"[{i}] {playlist_favorite_marker(p)} "
+            f"{p['plex_playlist_name']}"
+        )
+        print(
+            f"    Source: {source_display_label(p['source'])}"
+        )
+        print(
+            f"    URL: {dimmed(p['source_url'][:60] + '...')}"
+        )
+        print(
+            f"    Last sync: "
+            f"{dimmed(format_timestamp(p.get('last_synced')))}"
+        )
+        print(
+            f"    Auto sync: "
+            f"{auto_sync_display(Syncer._auto_sync_enabled(p), symbol=True)}\n"
+        )
+
+
+def show_sync_history(config: Config):
+    """Show sync history."""
+
+    playlists = config.config["playlists"]
+
+    history = []
+
+    for p in playlists:
+        if p.get("last_synced"):
+            history.append(
+                {
+                    "name": p[
+                        "plex_playlist_name"
+                    ],
+                    "favorite": p.get(
+                        "favorite",
+                        False,
+                    ) is True,
+                    "time": datetime.fromisoformat(
+                        p["last_synced"]
+                    ),
+                }
+            )
+
+    if not history:
+        print("\n✗ No sync history")
+        return
+
+    history.sort(
+        key=lambda x: x["time"],
+        reverse=True,
+    )
+
+    print(
+        "\nSync history (most recent first):\n"
+    )
+
+    for i, h in enumerate(history[:10], 1):
+        history_marker = (
+            colored("★", Colors.YELLOW)
+            if h.get("favorite") is True
+            else dimmed("☆")
+        )
+        print(
+            f"{i}. {history_marker} {h['name']} - "
+            f"{dimmed(h['time'].strftime('%Y-%m-%d %H:%M'))}"
+        )
+
+
+def pick_playlist(
+    config: Config,
+    action: str = "sync",
+):
+    """Let user pick one playlist."""
+
+    playlists = list(
+        config.config["playlists"]
+    )
+
+    if action == "sync":
+        playlists.sort(
+            key=lambda p: oldest_timestamp_sort_key(
+                p,
+                "last_synced",
+            )
+        )
+
+    if not playlists:
+        print("\n✗ No playlists registered")
+        return None
+
+    print(
+        f"\nSelect playlist to {action}:\n"
+    )
+
+    for i, p in enumerate(playlists, 1):
+        line = (
+            f"[{i}] {playlist_favorite_marker(p)} "
+            f"{p['plex_playlist_name']} "
+            f"({source_display_label(p['source'])})"
+        )
+
+        if action == "sync":
+            line += (
+                f" - Last sync: "
+                f"{dimmed(format_timestamp(p.get('last_synced')))}"
+            )
+
+        print(line)
+
+    print("[b] Back")
+    print("[x] Exit")
+
+    choice = input(
+        "\nSelect: "
+    ).strip().lower()
+
+    if choice in ("", "b"):
+        return None
+
+    if choice == "x":
+        sys.exit(0)
+
+    try:
+        idx = int(choice)
+
+        if 1 <= idx <= len(playlists):
+            return playlists[idx - 1]
+
+    except ValueError:
+        pass
+
+    print("✗ Invalid choice")
+    return None
+
+
+def pick_playlists_to_sync(
+    config: Config,
+) -> List[dict]:
+    """Select one or more playlists, oldest last-sync first."""
+
+    playlists = sorted(
+        config.config["playlists"],
+        key=lambda p: oldest_timestamp_sort_key(
+            p,
+            "last_synced",
+        ),
+    )
+
+    if not playlists:
+        print("\n✗ No playlists registered")
+        return []
+
+    print(
+        "\nSelect one or more playlists to sync:\n"
+    )
+
+    for i, playlist in enumerate(
+        playlists,
+        1,
+    ):
+        print(
+            f"[{i}] {playlist_favorite_marker(playlist)} "
+            f"{playlist['plex_playlist_name']} "
+            f"({source_display_label(playlist['source'])}) "
+            f"- Last sync: "
+            f"{dimmed(format_timestamp(playlist.get('last_synced')))} "
+            f"- Auto sync: "
+            f"{auto_sync_display(Syncer._auto_sync_enabled(playlist))}"
+        )
+
+    print(
+        "\nEnter selections separated by commas "
+        "(example: 1,3,5). Ranges such as 1-3 also work."
+    )
+    print("[b] Back")
+    print("[x] Exit")
+
+    choice = input(
+        "\nSelect: "
+    ).strip().lower()
+
+    if choice in ("", "b"):
+        return []
+
+    if choice == "x":
+        sys.exit(0)
+
+    try:
+        indices = parse_index_selection(
+            choice,
+            len(playlists),
+        )
+    except ValueError:
+        print("✗ Invalid selection")
+        return []
+
+    return [
+        playlists[index]
+        for index in indices
+    ]
+
+
+def sync_playlists_menu(
+    config: Config,
+    syncer: Syncer,
+):
+    """Manual playlist sync submenu."""
+
+    while True:
+        print("\nSync playlists:\n")
+        print("[1] Sync all playlists")
+        print("[2] Sync favorite playlists")
+        print("[3] Sync specific playlist")
+        print("[b] Back")
+        print("[x] Exit")
+
+        choice = input("\nSelect: ").strip().lower()
+
+        if choice in ("", "b"):
+            return
+        if choice == "x":
+            sys.exit(0)
+        if choice == "1":
+            syncer.sync_all()
+            continue
+        if choice == "2":
+            syncer.sync_favorites()
+            continue
+        if choice == "3":
+            selected_playlists = pick_playlists_to_sync(
+                config
+            )
+            for playlist in selected_playlists:
+                syncer.sync_playlist(
+                    playlist
+                )
+            continue
+
+        print("✗ Invalid choice")
+
+
+def interactive_menu(
+    dev_mode: bool = False,
+):
+    """Main interactive menu."""
+
+    config = Config()
+    syncer = Syncer(config)
+
+    while True:
+        print_menu(
+            dev_mode=dev_mode,
+        )
+
+        choice = input(
+            "Enter choice: "
+        ).strip().lower()
+
+        if not choice:
+            print("✗ Please enter a valid option")
+            continue
+
+        if choice == "1":
+            url = input(
+                "\nPaste playlist URL "
+                "(Spotify or Apple Music): "
+            ).strip()
+
+            if url:
+                syncer.add_source(url)
+            else:
+                print("✗ No URL provided")
+
+        elif choice == "2":
+            sync_playlists_menu(
+                config,
+                syncer,
+            )
+
+        elif choice == "3":
+            show_playlists(config)
+
+        elif choice == "4":
+            syncer.resolve_missing_interactive()
+
+        elif choice == "5":
+            syncer.edit_playlist_matches()
+
+        elif choice == "6":
+            show_sync_history(config)
+
+        elif choice == "7":
+            playlist = pick_playlist(
+                config,
+                "remove",
+            )
+
+            if playlist:
+                confirm = (
+                    input(
+                        f"\nRemove "
+                        f"'{playlist['plex_playlist_name']}'?"
+                        " (y/n): "
+                    )
+                    .strip()
+                    .lower()
+                )
+
+                if confirm == "y":
+                    idx = config.config[
+                        "playlists"
+                    ].index(playlist)
+
+                    config.remove_playlist(idx)
+                    print("✓ Removed")
+
+        elif choice == "8":
+            syncer.settings_interactive()
+
+        elif choice == "9" and dev_mode:
+            syncer.developer_menu_interactive()
+
+        elif choice == "x":
+            print("\nGoodbye!")
+            sys.exit(0)
+
+        else:
+            print("✗ Invalid choice")
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    """Build the command-line interface."""
+    parser = argparse.ArgumentParser(
+        description=(
+            f"{APP_NAME} v{VERSION} - Sync Spotify and Apple Music "
+            "playlists to Plex. Run without arguments for the "
+            "interactive menu."
+        )
+    )
+
+    parser.add_argument(
+        "--sync-all",
+        action="store_true",
+        help=(
+            "Sync registered playlists whose auto-sync setting is ON "
+            "to Plex non-interactively using saved mappings."
+        ),
+    )
+
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "With --sync-all, test source fetching and matching without "
+            "changing Plex or saving local matching state."
+        ),
+    )
+
+    parser.add_argument(
+        "-devmode",
+        "--devmode",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+
+    return parser
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    """Run either the automated CLI action or the interactive menu."""
+    parser = build_arg_parser()
+    args = parser.parse_args(argv)
+
+    if args.dry_run and not args.sync_all:
+        parser.error(
+            "--dry-run must be used with --sync-all"
+        )
+
+    try:
+        with ProcessLock():
+            if args.sync_all:
+                config = Config()
+
+                # --sync-all must remain fully automated. Avoid Config.get_plex()
+                # here because it can launch the interactive Plex setup flow.
+                plex_cfg = config.config.get(
+                    "plex",
+                    {},
+                )
+
+                if (
+                    not plex_cfg.get("url")
+                    or not plex_cfg.get("token")
+                ):
+                    print(
+                        "✗ Plex is not configured. "
+                        "Run without arguments and configure Plex first."
+                    )
+                    return 1
+
+                if not config.ensure_plex_music_library(
+                    interactive=False,
+                    save=not args.dry_run,
+                ):
+                    return 1
+
+                if not config.config.get("playlists"):
+                    print("✗ No playlists registered")
+                    return 1
+
+                syncer = Syncer(config)
+                totals = syncer.sync_all(
+                    dry_run=args.dry_run,
+                    respect_auto_sync=True,
+                )
+
+                if (
+                    isinstance(totals, dict)
+                    and totals.get("errors", 0)
+                ):
+                    return 1
+
+                return 0
+
+            interactive_menu(
+                dev_mode=args.devmode,
+            )
+            return 0
+
+    except RuntimeError as e:
+        if str(e).startswith(
+            "Another Playlist Bridge process"
+        ):
+            print(f"✗ {e}")
+            return 1
+        raise
+
+
+if __name__ == "__main__":
+    sys.exit(main())

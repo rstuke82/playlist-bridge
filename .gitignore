@@ -7,23 +7,33 @@ source_snapshots.json
 ignored_tracks.json
 artist_aliases.json
 
-# Ignore all backup files
-*.bak
-
-# Local logs
-cron.log
-*.log
-
-# Local/testing scripts
-spotify-test.py
-sync copy.py
-
 # Python
 __pycache__/
-*.pyc
+*.py[cod]
 .venv/
 venv/
 
-# Local environment / OS files
+# Node / React / Vite
+web/node_modules/
+web/dist/
+web/.vite/
+
+# Environment / secrets
 .env
+.env.*
+!.env.example
+web/.env
+web/.env.*
+!web/.env.example
+
+# Editors / OS
 .DS_Store
+.vscode/
+.idea/
+
+# Logs
+*.log
+cron.log
+
+# Local backup files
+*.bak
