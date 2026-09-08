@@ -1,11 +1,11 @@
 # Playlist Bridge
 
 **Version:** 2.0.0-beta.1  
-**Build:** 20260906.4
+**Build:** 20260908.6
 
 Playlist Bridge syncs public **Spotify** and **Apple Music** playlists to playlists in your local **Plex music library**.
 
-Version 2.0 adds a self-hosted **React + TypeScript** web interface with a **FastAPI** backend while retaining the existing matching engine, CLI, and JSON state files during the 2.0 beta series.
+Version 2.0 adds a self-hosted **React + TypeScript** web interface with a **FastAPI** backend while retaining the existing matching engine, CLI, with SQLite runtime storage.
 
 > **Beta software:** back up your Playlist Bridge JSON state files before installing a new beta build.
 
@@ -21,39 +21,106 @@ Version 2.0 adds a self-hosted **React + TypeScript** web interface with a **Fas
 - Saving a missing-track match syncs the affected playlists automatically
 - Plex configuration directly in the Settings page
 - Existing Playlist Bridge CLI remains available
-- Existing JSON state remains compatible
+- Automatic legacy JSON import with preserved backups
 - Atomic state writes and process locking
 - Webhook notification foundation for later 2.0 betas
 
-## State files
+## Persistent storage and migration
 
-Playlist Bridge continues to use JSON files in the project root:
+Native installs use the current working directory, or `PLAYLIST_BRIDGE_DATA_DIR` when set. Docker uses `/data`.
 
-```text
-config.json
-mapping.json
-missing_tracks.json
-match_metadata.json
-source_snapshots.json
-ignored_tracks.json
-artist_aliases.json
-```
+- `config.json`: startup settings (Plex connection, server/data directory settings).
+- `playlist-bridge.db`: registered playlists, favorites, auto-sync, mappings, provenance, missing/ignored tracks, snapshots, sync history, artist aliases, notification settings/history where present, and health results/history.
 
-Keep these files when upgrading from 1.5. They contain your registered playlists, Plex configuration, saved mappings, favorites, Auto Sync settings, ignored tracks, aliases, and source snapshots.
+At first startup, legacy config and `mapping.json`, `missing_tracks.json`, `match_metadata.json`, `source_snapshots.json`, `ignored_tracks.json`, and `artist_aliases.json` are imported transactionally. Plain and schema-wrapped JSON are accepted. Imported values are checked for exact preservation before commit. Originals are preserved as `.pre-sqlite.bak` files and inside the migration backup table. Legacy state JSON is never read as live state again. Config is reduced to startup settings. Invalid legacy files stop migration without altering the originals; correct them and restart to retry.
 
-A simple backup before upgrading is recommended:
+Back up the entire data directory with the application stopped before upgrading. After migration, retain the database and config when updating. To roll back to a pre-SQLite build, restore the pre-migration backups into a separate directory; later SQLite changes are not exported to legacy JSON.
+
+Missing, empty, `{}`, and partial config files allow the UI to launch. Artist aliases now live in SQLite; editing the old alias JSON no longer changes matching. CLI alias management remains available. First use initializes/migrates storage even for a CLI dry run; subsequent dry-run matching does not save sync state.
+
+## Docker installation (macOS and Ubuntu)
+
+Install Docker Desktop on macOS or Docker Engine with the Compose plugin on Ubuntu.
+Docker includes Python and the compiled React UI; Node and Python are not needed on the host.
+
+From this extracted project directory, build and start:
 
 ```bash
-mkdir -p backup-state
-cp config.json mapping.json missing_tracks.json match_metadata.json \
-  source_snapshots.json ignored_tracks.json artist_aliases.json backup-state/ 2>/dev/null || true
+docker compose up -d --build
+docker compose ps
 ```
 
-## Requirements
+Open `http://localhost:8173` (or `http://SERVER-IP:8173`), then configure Plex in **Settings**.
+Missing, blank, and `{}` config files are valid; no Plex connection is needed for the UI or `/api/health` to start.
+Use a Plex address reachable from the container; `localhost` inside Docker refers to the container itself.
+
+Compose mounts `./data` at `/data`. Keep that directory when updating or recreating the container.
+To migrate an existing native install, stop its web service and scheduled CLI syncs, back up its state,
+and copy the existing config and legacy state JSON files into `./data` before starting Docker.
+Do not run the native and container installations against the same data at the same time.
+
+To change the port, put this in a `.env` file alongside `docker-compose.yml`:
+
+```dotenv
+PLAYLIST_BRIDGE_PORT=8174
+```
+
+Compose uses that port for both the host mapping and backend. The healthcheck follows it automatically.
+`PLAYLIST_BRIDGE_DATA_DIR` can also select a data directory for native runs; relative paths resolve from the working directory.
+Inside this Compose service it stays `/data`; change the left side of `./data:/data` to relocate host storage.
+
+### Updating a locally built image
+
+Replace the source files with the new build (or pull the beta branch), then:
+
+```bash
+docker compose up -d --build
+docker compose logs --tail=50
+```
+
+### Using GHCR images
+
+After a maintainer publishes the image to GHCR, use:
+
+```bash
+docker compose pull
+docker compose up -d --no-build
+```
+
+The default image is `ghcr.io/rstuke82/playlist-bridge:beta`. This archive does not publish an image.
+To pin this build, set `PLAYLIST_BRIDGE_IMAGE=ghcr.io/rstuke82/playlist-bridge:2.0.0-beta.1-build.20260908.6`
+in `.env` once that tag is published. The `beta` and `2.0.0-beta.1` tags may advance; the build tag identifies this build.
+Beta images should never be tagged `latest`.
+
+Maintainers can build and tag for GHCR with:
+
+```bash
+docker build --build-arg VCS_REF="$(git rev-parse HEAD)" \
+  -t ghcr.io/rstuke82/playlist-bridge:2.0.0-beta.1-build.20260908.6 \
+  -t ghcr.io/rstuke82/playlist-bridge:2.0.0-beta.1 \
+  -t ghcr.io/rstuke82/playlist-bridge:beta .
+docker login ghcr.io
+docker push ghcr.io/rstuke82/playlist-bridge:2.0.0-beta.1-build.20260908.6
+docker push ghcr.io/rstuke82/playlist-bridge:2.0.0-beta.1
+docker push ghcr.io/rstuke82/playlist-bridge:beta
+```
+
+The image includes OCI title, description, source, version, revision, and a separate build label.
+See the [Dockerfile reference](https://docs.docker.com/reference/dockerfile/) and
+[GitHub Container Registry documentation](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry).
+
+To run the CLI in the running container:
+
+```bash
+docker compose exec playlist-bridge python sync.py
+docker compose exec playlist-bridge python sync.py --sync-all
+```
+
+## Native requirements
 
 - macOS or Ubuntu
 - Python 3.9 or newer
-- Node.js 20 or newer
+- Node.js 22.12 or newer
 - npm
 - Git
 - Plex Media Server with a music library
@@ -79,7 +146,7 @@ brew install git python node
 ```bash
 sudo apt update
 sudo apt install -y git python3 python3-venv python3-pip curl
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
 sudo apt install -y nodejs
 ```
 
@@ -92,7 +159,7 @@ npm --version
 git --version
 ```
 
-Node.js should be version 20 or newer.
+Node.js should be version 22.12 or newer.
 
 ### 2. Clone Playlist Bridge
 
@@ -125,7 +192,7 @@ When the environment is active, your shell prompt will normally begin with `(.ve
 
 ```bash
 cd web
-npm install
+npm ci
 npm run build
 cd ..
 ```
@@ -140,18 +207,18 @@ From the project root with the Python virtual environment active:
 python -m playlist_bridge web
 ```
 
-Playlist Bridge listens on port `8787`.
+Playlist Bridge listens on port `8173`; set `PLAYLIST_BRIDGE_PORT` to override it.
 
 On the same computer, open:
 
 ```text
-http://localhost:8787
+http://localhost:8173
 ```
 
 From another computer on your network, open:
 
 ```text
-http://SERVER-IP:8787
+http://SERVER-IP:8173
 ```
 
 Stop the server with **Ctrl+C**.
@@ -181,11 +248,11 @@ Vite normally serves the development UI at:
 http://localhost:5173
 ```
 
-Development API requests are proxied to FastAPI on port `8787`.
+Development API requests are proxied to FastAPI on port `8173`. If you override the backend port, update the proxy target in `web/vite.config.ts` to match.
 
 ## Updating an existing beta installation
 
-Back up the JSON state files first, then:
+Stop the app and back up the full data directory first, then:
 
 ```bash
 git switch beta
@@ -193,13 +260,13 @@ git pull
 source .venv/bin/activate
 pip install -r requirements.txt
 cd web
-npm install
+npm ci
 npm run build
 cd ..
 python -m playlist_bridge web
 ```
 
-Do not delete the existing JSON state files during an update.
+Keep the database, config, and migration backups during updates.
 
 ## Running automatically on Ubuntu with systemd
 
@@ -260,6 +327,8 @@ python -m playlist_bridge version
 
 The Dashboard health check is intentionally **read-only**. It fetches the current source playlist URL and compares it with the Plex library and destination playlist without performing a sync.
 
+Each playlist has an independently collapsible Health section with placeholders before its first check and a Last updated timestamp. Results persist across navigation and restarts. Check All Health updates each row as its check completes.
+
 A health result includes:
 
 - source track count
@@ -273,10 +342,14 @@ A health result includes:
 
 Running a health check does **not** modify Plex playlists, mappings, source snapshots, missing-track state, or `last_synced`.
 
+## Playlist details and match fixes
+
+Click a registered playlist name to view its full live source track list, saved Plex matches and Automatic / Manual / Legacy / LOST / Unresolved status. Sync Now and Check Health are available there. Fix Match can replace an existing match using scored candidates or text search. Choose all unresolved occurrences or selected playlists; only affected playlists sync after saving.
+
 ## Missing-track fixes
 
 When a deduplicated missing track is matched from the web UI, Playlist Bridge saves the match as a manual mapping across the affected unresolved occurrences and then syncs the affected playlists so the correction is immediately reflected in Plex.
 
 ## Beta notes
 
-The 2.0 beta series is an architectural transition. The existing matching engine currently remains available behind the new API while components are progressively separated into reusable backend modules. JSON compatibility and CLI support are being preserved throughout that transition.
+The 2.0 beta series is an architectural transition. The existing matching engine currently remains available behind the new API while components are progressively separated into reusable backend modules. Legacy JSON is imported automatically; CLI support remains available.

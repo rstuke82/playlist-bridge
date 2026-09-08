@@ -6,6 +6,7 @@ export type Playlist = {
   favorite: boolean
   auto_sync: boolean
   last_synced?: string | null
+  health?: PlaylistHealth
   saved_matches: number
   unresolved: number
   lost: number
@@ -26,6 +27,7 @@ export type PlaylistHealth = {
   source_added_since_last_sync: number
   source_removed_since_last_sync: number
   healthy: boolean
+  checked_at: string
   read_only: boolean
 }
 
@@ -80,6 +82,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  detail: (key: string) => request<any>(`/api/playlists/${encodeURIComponent(key)}/detail`),
   health: () => request<any>('/api/health'),
   playlists: () => request<Playlist[]>('/api/playlists'),
   playlistHealth: (key: string) => request<PlaylistHealth>(`/api/playlists/${encodeURIComponent(key)}/health`),
@@ -96,12 +99,12 @@ export const api = {
   syncFavorites: () => request<any>('/api/sync/favorites', { method: 'POST' }),
   syncOne: (key: string) => request<any>(`/api/sync/${encodeURIComponent(key)}`, { method: 'POST' }),
   missing: (scope: 'all' | 'favorites' = 'all') => request<MissingTrack[]>(`/api/missing?scope=${scope}`),
-  candidates: (track: Pick<MissingTrack, 'title' | 'artist' | 'album'>) =>
+  candidates: (track: Pick<MissingTrack, 'title' | 'artist' | 'album'> & { query?: string }) =>
     request<Candidate[]>('/api/missing/candidates', { method: 'POST', body: JSON.stringify(track) }),
-  saveMatch: (track: MissingTrack, plex_id: string) =>
+  saveMatch: (track: MissingTrack, plex_id: string, options: {playlist_keys?: string[]; replace_playlist_key?: string} = {}) =>
     request<{ affected: number; synced_playlists: number }>('/api/missing/match', {
       method: 'POST',
-      body: JSON.stringify({ title: track.title, artist: track.artist, album: track.album || '', plex_id }),
+      body: JSON.stringify({ title: track.title, artist: track.artist, album: track.album || '', plex_id, ...options }),
     }),
   plexSettings: () => request<PlexSettings>('/api/settings/plex'),
   discoverPlex: (body: { url: string; token: string }) =>

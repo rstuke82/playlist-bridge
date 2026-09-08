@@ -438,7 +438,7 @@ except ImportError:
 
 APP_NAME = "Playlist Bridge"
 VERSION = "2.0.0-beta.1"
-BUILD = "20260906.4"
+BUILD = "20260908.6"
 
 # Color codes for terminal output
 class Colors:
@@ -789,7 +789,7 @@ def _atomic_write_json(path: Path, data, *, ensure_ascii: bool = True):
 
 def _process_lock_path() -> Path:
     """Return a per-working-directory lock path outside the Git checkout."""
-    identity = str(Path.cwd().resolve())
+    identity = str(CONFIG_DIR.resolve())
     digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
     return Path(tempfile.gettempdir()) / f"playlist-bridge-{digest}.lock"
 
@@ -846,7 +846,7 @@ class ProcessLock:
 
 
 # Config file locations - stored in project root
-CONFIG_DIR = Path.cwd()
+CONFIG_DIR = Path(os.environ.get("PLAYLIST_BRIDGE_DATA_DIR") or Path.cwd()).expanduser().resolve()
 CONFIG_FILE = CONFIG_DIR / "config.json"
 MAPPING_FILE = CONFIG_DIR / "mapping.json"
 MISSING_FILE = CONFIG_DIR / "missing_tracks.json"
@@ -878,443 +878,60 @@ class Config:
     }
 
     def __init__(self):
-        CONFIG_DIR.mkdir(exist_ok=True)
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
-        self._loaded_schema_versions = {}
-        self._migration_needed = set()
-
-        self.config = self._load_config()
-        self.mapping = self._load_mapping()
-        self.missing = self._load_missing()
-        self.match_metadata = self._load_state_dict(
-            "match_metadata",
-            {},
-        )
-        self.source_snapshots = self._load_state_dict(
-            "source_snapshots",
-            {},
-        )
-        self.ignored_tracks = self._load_state_dict(
-            "ignored_tracks",
-            {},
-        )
-        self.artist_aliases = self._load_artist_aliases()
+        from .storage import Repository, read_json, STARTUP_KEYS
+        self.repository = Repository(CONFIG_DIR)
+        self.config = read_json(CONFIG_FILE)
+        self.config.update(self.repository.load("runtime"))
+        if not isinstance(self.config.get("plex"), dict):
+            self.config["plex"] = {}
+        self.config.setdefault("playlists", [])
+        for name in ("mapping", "missing", "match_metadata", "source_snapshots", "ignored_tracks", "artist_aliases"):
+            setattr(self, name, self.repository.load(name))
+        self._baseline = copy.deepcopy(self._buckets())
         Matcher.set_artist_aliases(
             self.artist_aliases
         )
 
-    @staticmethod
-    def _load_artist_aliases(
-        path: Path = None,
-    ) -> dict:
-        """Load the global user-editable artist alias map."""
-        alias_path = (
-            Path(path)
-            if path is not None
-            else ARTIST_ALIASES_FILE
-        )
-
-        if not alias_path.exists():
-            return {}
-
-        try:
-            with open(
-                alias_path,
-                encoding="utf-8",
-            ) as f:
-                raw = json.load(f)
-        except (OSError, ValueError) as e:
-            raise RuntimeError(
-                f"Could not read {alias_path.name}: {e}"
-            ) from e
-
-        if not isinstance(raw, dict):
-            raise RuntimeError(
-                f"{alias_path.name} must contain a JSON object "
-                "mapping Plex artist names to alias lists."
-            )
-
-        cleaned = {}
-        seen_aliases = {}
-
-        for canonical, aliases in raw.items():
-            if not isinstance(canonical, str):
-                raise RuntimeError(
-                    f"{alias_path.name} contains a non-string artist name."
-                )
-
-            canonical_name = repair_text(canonical).strip()
-
-            if not canonical_name:
-                raise RuntimeError(
-                    f"{alias_path.name} contains an empty canonical artist."
-                )
-
-            if isinstance(aliases, str):
-                alias_values = [aliases]
-            elif isinstance(aliases, list):
-                alias_values = aliases
-            else:
-                raise RuntimeError(
-                    f"{alias_path.name}: aliases for '{canonical_name}' "
-                    "must be a string or list of strings."
-                )
-
-            cleaned_aliases = []
-            canonical_norm = canonical_name.casefold()
-
-            for alias in alias_values:
-                if not isinstance(alias, str):
-                    raise RuntimeError(
-                        f"{alias_path.name}: aliases for '{canonical_name}' "
-                        "must contain only strings."
-                    )
-
-                alias_name = repair_text(alias).strip()
-                alias_norm = alias_name.casefold()
-
-                if not alias_name or alias_norm == canonical_norm:
-                    continue
-
-                prior = seen_aliases.get(alias_norm)
-                if prior and prior.casefold() != canonical_norm:
-                    raise RuntimeError(
-                        f"{alias_path.name}: alias '{alias_name}' is assigned "
-                        f"to both '{prior}' and '{canonical_name}'."
-                    )
-
-                seen_aliases[alias_norm] = canonical_name
-
-                if alias_norm not in {
-                    value.casefold()
-                    for value in cleaned_aliases
-                }:
-                    cleaned_aliases.append(alias_name)
-
-            cleaned[canonical_name] = cleaned_aliases
-
-        return cleaned
-
     def reload_artist_aliases(self):
         """Reload artist aliases and update the matcher immediately."""
-        self.artist_aliases = self._load_artist_aliases()
+        self.artist_aliases = self.repository.load("artist_aliases")
         Matcher.set_artist_aliases(
             self.artist_aliases
         )
 
     def save_artist_aliases(self):
         """Persist the standalone alias file atomically and reload aliases."""
-        _atomic_write_json(
-            ARTIST_ALIASES_FILE,
-            self.artist_aliases,
-            ensure_ascii=False,
-        )
+        self.repository.save({"artist_aliases": self.artist_aliases})
         self.reload_artist_aliases()
 
     @staticmethod
     def _ensure_artist_alias_shell():
-        """Create an empty artist_aliases.json shell without overwriting it."""
-        if ARTIST_ALIASES_FILE.exists():
-            return
+        pass
 
-        with open(
-            ARTIST_ALIASES_FILE,
-            "w",
-            encoding="utf-8",
-        ) as f:
-            f.write("{}\n")
+    def _buckets(self):
+        from .storage import STARTUP_KEYS
+        buckets = {name: getattr(self, name) for name in (
+            "mapping", "missing", "match_metadata", "source_snapshots", "ignored_tracks", "artist_aliases")}
+        buckets["runtime"] = {k: v for k, v in self.config.items() if k not in STARTUP_KEYS}
+        return buckets
 
-    @staticmethod
-    def _state_wrapper(data: dict) -> dict:
-        """Wrap one state object using the current on-disk schema."""
-        return {
-            "_schema_version": STATE_SCHEMA_VERSION,
-            "data": data,
-        }
-
-    @staticmethod
-    def _schema_backup_path(path: Path) -> Path:
-        """Return the one-time backup path used before schema migration."""
-        return path.with_name(
-            f"{path.name}.pre-schema-{STATE_SCHEMA_VERSION}.bak"
-        )
-
-    @staticmethod
-    def _validate_state_data(
-        name: str,
-        data,
-    ) -> dict:
-        """Require every state payload to be a JSON object."""
-        if not isinstance(data, dict):
-            raise RuntimeError(
-                f"{name}.json contains an unsupported root value. "
-                "Expected a JSON object."
-            )
-
-        return data
-
-    @staticmethod
-    def _migrate_state_data(
-        name: str,
-        data: dict,
-        from_version: int,
-    ) -> dict:
-        """
-        Migrate a state payload to STATE_SCHEMA_VERSION.
-
-        Schema 0 is the pre-versioned Playlist Bridge format. The 0 -> 1
-        migration adds the version/data wrapper only; the payload itself does
-        not need to change.
-        """
-        version = from_version
-        migrated = data
-
-        while version < STATE_SCHEMA_VERSION:
-            if version == 0:
-                version = 1
-                continue
-
-            if version == 1:
-                # Schema 2 adds ignored_tracks.json and the optional
-                # per-playlist auto_sync flag. Existing payloads need no
-                # transformation; absent values use compatible defaults.
-                version = 2
-                continue
-
-            raise RuntimeError(
-                f"No migration path is implemented for {name}.json "
-                f"from schema {version} to {STATE_SCHEMA_VERSION}."
-            )
-
-        return migrated
-
-    def _load_state_dict(
-        self,
-        name: str,
-        default: dict,
-    ) -> dict:
-        """
-        Load legacy or schema-versioned state.
-
-        Legacy files are treated as schema 0 and migrated only in memory.
-        They are backed up and rewritten the next time Config.save() runs.
-        This preserves dry-run's no-write guarantee.
-        """
-        path = self.STATE_FILES[name]
-
-        if not path.exists():
-            self._loaded_schema_versions[name] = (
-                STATE_SCHEMA_VERSION
-            )
-            return copy.deepcopy(default)
-
-        try:
-            with open(path) as f:
-                raw = json.load(f)
-        except (OSError, ValueError) as e:
-            raise RuntimeError(
-                f"Could not read {path.name}: {e}"
-            ) from e
-
-        loaded_version = 0
-        data = raw
-
-        if (
-            isinstance(raw, dict)
-            and "_schema_version" in raw
-        ):
-            version_value = raw.get(
-                "_schema_version"
-            )
-
-            if not isinstance(version_value, int):
-                raise RuntimeError(
-                    f"{path.name} has an invalid _schema_version. "
-                    "Expected an integer."
-                )
-
-            loaded_version = version_value
-
-            if loaded_version > STATE_SCHEMA_VERSION:
-                raise RuntimeError(
-                    f"{path.name} uses schema {loaded_version}, but this "
-                    f"Playlist Bridge build only supports through schema "
-                    f"{STATE_SCHEMA_VERSION}. Use a newer Playlist Bridge "
-                    "version rather than risking state-file corruption."
-                )
-
-            if "data" not in raw:
-                raise RuntimeError(
-                    f"{path.name} is schema-versioned but has no 'data' "
-                    "payload."
-                )
-
-            data = raw["data"]
-
-        data = self._validate_state_data(
-            name,
-            data,
-        )
-
-        self._loaded_schema_versions[
-            name
-        ] = loaded_version
-
-        if loaded_version < STATE_SCHEMA_VERSION:
-            self._migration_needed.add(name)
-            data = self._migrate_state_data(
-                name,
-                data,
-                loaded_version,
-            )
-
-        return data
-
-    def _load_config(self) -> dict:
-        return self._load_state_dict(
-            "config",
-            {
-                "plex": {},
-                "playlists": [],
-            },
-        )
-
-    def _load_mapping(self) -> dict:
-        return self._load_state_dict(
-            "mapping",
-            {},
-        )
-
-    def _load_missing(self) -> dict:
-        data = self._load_state_dict(
-            "missing",
-            {},
-        )
-
-        for tracks in data.values():
-            if not isinstance(tracks, list):
-                continue
-
-            for track in tracks:
-                if not isinstance(track, dict):
-                    continue
-
-                for field in (
-                    "title",
-                    "artist",
-                    "album",
-                ):
-                    if field in track:
-                        track[field] = repair_text(
-                            track.get(field, "")
-                        )
-
-                previous_match = track.get(
-                    "previous_match"
-                )
-
-                if isinstance(previous_match, dict):
-                    for field in (
-                        "title",
-                        "artist",
-                        "album",
-                    ):
-                        if field in previous_match:
-                            previous_match[field] = repair_text(
-                                previous_match.get(field, "")
-                            )
-
-        return data
-
-    def _backup_before_schema_upgrade(
-        self,
-        name: str,
-    ):
-        """Create a one-time byte-for-byte backup before schema rewrite."""
-        if name not in self._migration_needed:
-            return
-
-        path = self.STATE_FILES[name]
-
-        if not path.exists():
-            return
-
-        backup_path = self._schema_backup_path(
-            path
-        )
-
-        if backup_path.exists():
-            return
-
-        shutil.copy2(
-            path,
-            backup_path,
-        )
-
-    def _save_state_only(
-        self,
-        name: str,
-        data: dict,
-    ):
-        """Persist one schema-managed state file without rewriting the rest."""
-        self._backup_before_schema_upgrade(
-            name
-        )
-        path = self.STATE_FILES[name]
-
-        _atomic_write_json(
-            path,
-            self._state_wrapper(data),
-        )
-
-        self._loaded_schema_versions[name] = (
-            STATE_SCHEMA_VERSION
-        )
-        self._migration_needed.discard(name)
+    def _save_state_only(self, name, data):
+        self.repository.save({name: data}, self._baseline)
+        self._baseline[name] = copy.deepcopy(data)
 
     def save_missing_only(self):
-        """Persist missing_tracks.json only."""
-        self._save_state_only(
-            "missing",
-            self.missing,
-        )
-        self._ensure_artist_alias_shell()
+        self._save_state_only("missing", self.missing)
 
     def save(self):
-        """
-        Save all state using the current schema.
-
-        Older/legacy files are backed up once before the first rewrite.
-        """
-        state = {
-            "config": self.config,
-            "mapping": self.mapping,
-            "missing": self.missing,
-            "match_metadata": self.match_metadata,
-            "source_snapshots": self.source_snapshots,
-            "ignored_tracks": self.ignored_tracks,
-        }
-
-        for name, data in state.items():
-            self._backup_before_schema_upgrade(
-                name
-            )
-
-            path = self.STATE_FILES[name]
-
-            _atomic_write_json(
-                path,
-                self._state_wrapper(data),
-            )
-
-            self._loaded_schema_versions[
-                name
-            ] = STATE_SCHEMA_VERSION
-            self._migration_needed.discard(
-                name
-            )
-
-        self._ensure_artist_alias_shell()
+        from .storage import STARTUP_KEYS, read_json
+        buckets = self._buckets()
+        self.repository.save(buckets, self._baseline)
+        self._baseline = copy.deepcopy(buckets)
+        startup = {k: v for k, v in self.config.items() if k in STARTUP_KEYS}
+        if read_json(CONFIG_FILE) != startup:
+            self.repository.save_startup(startup)
 
     @staticmethod
     def _get_plex_music_libraries(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
 from collections import Counter
 from pathlib import Path
 from typing import List, Literal, Optional
@@ -28,7 +29,14 @@ from .legacy import (
 from .notifications import WebhookNotifier, WebhookSettings
 
 
+@contextlib.asynccontextmanager
+async def lifespan(app):
+    Config()
+    yield
+
+
 app = FastAPI(
+    lifespan=lifespan,
     title="Playlist Bridge API",
     version=__version__,
 )
@@ -72,6 +80,7 @@ class MissingCandidateRequest(BaseModel):
     title: str
     artist: str
     album: str = ""
+    query: str = ""
     limit: int = Field(default=10, ge=1, le=50)
 
 
@@ -81,6 +90,7 @@ class MissingMatchRequest(BaseModel):
     album: str = ""
     plex_id: str
     playlist_keys: Optional[List[str]] = None
+    replace_playlist_key: Optional[str] = None
 
 
 class NotificationSettingsRequest(BaseModel):
@@ -120,6 +130,7 @@ def _playlist_payload(config: Config, playlist: dict) -> dict:
         "unresolved": len(missing),
         "lost": sum(1 for track in missing if track.get("status") == "lost"),
         "ignored": len(config.ignored_tracks.get(key, {})),
+        "health": config.repository.load("health").get(key),
     }
 
 
@@ -359,7 +370,7 @@ def sync_one(playlist_key: str):
 
 @app.get("/api/playlists/{playlist_key:path}/health")
 def playlist_health(playlist_key: str):
-    """Read-only source/Plex comparison. This endpoint never syncs or saves state."""
+    """Read-only source/Plex comparison. Only health results/history are persisted."""
     config = _config()
     playlist = next(
         (p for p in config.config.get("playlists", []) if _playlist_key(p) == playlist_key),
@@ -413,7 +424,7 @@ def playlist_health(playlist_key: str):
         unresolved = len(unmatched)
         plex_count = len(actual_ids)
 
-        return {
+        result = {
             "key": mapping_key,
             "name": playlist.get("plex_playlist_name", ""),
             "source": source_type,
@@ -436,6 +447,37 @@ def playlist_health(playlist_key: str):
             "read_only": True,
             "log": "\n".join(part for part in [source_log, library_log, match_log, playlist_log] if part).strip(),
         }
+        config.repository.save_health(mapping_key, result)
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get("/api/playlists/{playlist_key:path}/detail")
+def playlist_detail(playlist_key: str):
+    config = _config()
+    playlist = next((p for p in config.config.get("playlists", []) if _playlist_key(p) == playlist_key), None)
+    if playlist is None:
+        raise HTTPException(status_code=404, detail="Playlist not found")
+    try:
+        _, url, source = _source_for_url(playlist.get("source_url", ""))
+        tracks, metadata = source.get_playlist_tracks(url, fetch_artwork=False)
+        syncer = Syncer(config)
+        library = {str(t.get("plex_id")): t for t in syncer._get_plex().search_library("")}
+        rows = []
+        for index, track in enumerate(tracks):
+            search_key = f"{track.get('title', '')}|{track.get('artist', '')}"
+            plex_id = config.mapping.get(playlist_key, {}).get(search_key)
+            match = library.get(str(plex_id)) if plex_id is not None else None
+            status = syncer._get_match_provenance(playlist_key, search_key).capitalize() if match else ('LOST' if plex_id else 'Unresolved')
+            if not match and any(t.get('status') == 'lost' and syncer._same_missing_identity(t, track) for t in config.missing.get(playlist_key, [])):
+                status = 'LOST'
+            if syncer._find_ignored_track_key(playlist_key, track):
+                status = 'Ignored'
+            rows.append({**track, "index": index, "status": status, "match": match, "plex_id": plex_id})
+        return {"playlist": _playlist_payload(config, playlist), "metadata": metadata, "tracks": rows}
     except HTTPException:
         raise
     except Exception as exc:
@@ -515,6 +557,8 @@ def missing_candidates(request: MissingCandidateRequest):
     }
     rows = []
     for track in library:
+        if request.query and request.query.casefold() not in " ".join(str(track.get(k, "")) for k in ("title", "artist", "album")).casefold():
+            continue
         details = Matcher.score_candidate(source, track)
         rows.append(
             {
@@ -551,7 +595,7 @@ def save_missing_match(request: MissingMatchRequest):
         config = _config()
         syncer = Syncer(config)
         playlists = config.config.get("playlists", [])
-        if request.playlist_keys:
+        if request.playlist_keys is not None:
             wanted = set(request.playlist_keys)
             playlists = [p for p in playlists if _playlist_key(p) in wanted]
 
@@ -573,11 +617,29 @@ def save_missing_match(request: MissingMatchRequest):
         if selected is None:
             raise HTTPException(status_code=404, detail="Plex track not found")
 
-        affected = syncer._apply_global_missing_match(
-            source_track,
-            selected,
-            affected_playlists,
-        )
+        target = None
+        if request.replace_playlist_key:
+            target = next((p for p in config.config.get("playlists", [])
+                           if _playlist_key(p) == request.replace_playlist_key), None)
+            if target is None:
+                raise HTTPException(status_code=404, detail="Playlist not found")
+            if target not in affected_playlists and any(
+                syncer._same_missing_identity(t, source_track)
+                for t in config.missing.get(request.replace_playlist_key, [])
+            ):
+                affected_playlists.append(target)
+
+        affected = syncer._apply_global_missing_match(source_track, selected, affected_playlists)
+
+        if target is not None:
+            key = request.replace_playlist_key
+            search_key = f"{request.title}|{request.artist}"
+            config.mapping.setdefault(key, {})[search_key] = request.plex_id
+            syncer._set_match_provenance(key, search_key, "manual", matched_track=selected, plex_id=request.plex_id)
+            config.save()
+            if target not in affected_playlists:
+                affected_playlists.append(target)
+                affected += 1
 
         sync_results = []
         combined_log = []
@@ -642,10 +704,14 @@ if WEB_DIST.exists():
 def run():
     import uvicorn
 
+    port = int(os.environ.get("PLAYLIST_BRIDGE_PORT") or "8173")
+    if not 1 <= port <= 65535:
+        raise ValueError("PLAYLIST_BRIDGE_PORT must be between 1 and 65535")
+
     uvicorn.run(
         "playlist_bridge.api:app",
         host="0.0.0.0",
-        port=8787,
+        port=port,
         reload=False,
     )
 

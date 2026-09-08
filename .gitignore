@@ -37,3 +37,11 @@ cron.log
 
 # Local backup files
 *.bak
+# Container/native persistent data and local backups
+/data/
+/backup-state/
+*.bak
+*.db
+*.db-shm
+*.db-wal
+*.zip

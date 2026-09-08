@@ -1,3 +1,10 @@
+# v2.0.0-beta.1 — build 20260908.6
+
+- SQLite runtime storage with automatic validated legacy migration and preserved backups.
+- Persistent, collapsible playlist health with incremental results and timestamps.
+- Playlist details and manual Fix Match for existing mappings, with selected/apply-all unresolved occurrences.
+- Version, matching heuristics, CLI entry points and Docker port remain unchanged.
+
 # Changelog
 
 All notable changes to Playlist Bridge are documented here.

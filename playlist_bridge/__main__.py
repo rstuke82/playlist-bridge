@@ -21,7 +21,7 @@ def main() -> int:
     print("Usage:")
     print("  python sync.py                 # existing CLI")
     print("  python sync.py --sync-all      # automated CLI sync")
-    print("  python -m playlist_bridge web  # web UI/API on port 8787")
+    print("  python -m playlist_bridge web  # web UI/API on port 8173")
     return 0
 
 
