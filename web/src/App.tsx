@@ -1,12 +1,13 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, Job, activeJob, Playlist, MissingTrack } from './api'
 import General from './General'
+import { usePolling } from './usePolling'
 import MatchPicker from './MatchPicker'
 import HealthCard, { stamp } from './HealthCard'
 import JobsPanel, { JobRow, actionName } from './JobsPanel'
 
 type Enqueue=(action:string,payload?:any)=>Promise<Job>
-const currentRoute=()=>{const raw=location.hash.slice(1);try{const key=decodeURIComponent(raw);if(key.startsWith('spotify:')||key.startsWith('apple:'))return `playlist/${encodeURIComponent(key)}`}catch{}return raw||'dashboard'}
+const currentRoute=()=>{const raw=location.hash.slice(1);try{const key=decodeURIComponent(raw);if(key.startsWith('spotify:')||key.startsWith('apple:')||key.startsWith('applemusic:'))return `playlist/${encodeURIComponent(key)}`}catch{}return raw||'dashboard'}
 const link=(key:string)=>`#playlist/${encodeURIComponent(key)}`
 function ordered<T>(rows:T[],value:(r:T)=>any,direction:string){return [...rows].sort((a,b)=>{const x=value(a),y=value(b);if(x===null||x===undefined||x==='')return y===null||y===undefined||y===''?0:1;if(y===null||y===undefined||y==='')return -1;const n=typeof x==='number'?x-y:String(x).localeCompare(String(y),undefined,{numeric:true,sensitivity:'base'});return direction==='asc'?n:-n})}
 function Direction({value,onChange}:{value:string;onChange:(s:string)=>void}){return <select aria-label="Sort direction" value={value} onChange={e=>onChange(e.target.value)}><option value="asc">Ascending</option><option value="desc">Descending</option></select>}
@@ -19,14 +20,40 @@ export default function App(){
   const [playlists,setPlaylists]=useState<Playlist[]>([]),[missing,setMissing]=useState<MissingTrack[]>([]),[jobs,setJobs]=useState<Job[]>([]),[health,setHealth]=useState<any>({})
   const [submitted,setSubmitted]=useState('')
   const [message,setMessage]=useState(''),[globalQuery,setGlobalQuery]=useState(''),[search,setSearch]=useState<any>(null)
-  async function refresh(){const [p,m,j,h]=await Promise.all([api.playlists(),api.missing(),api.jobs(),api.health()]);setPlaylists(p);setMissing(m);setJobs(j);setHealth(h)}
-  useEffect(()=>{refresh().catch(e=>setMessage(e.message));const timer=setInterval(()=>refresh().catch(()=>{}),2500);return()=>clearInterval(timer)},[])
+  const [revision,setRevision]=useState(0)
+  const jobsRef=useRef<Job[]>([])
+  const initializedJobs=useRef(false)
+  const refreshPage=useCallback(async()=>{
+    const reads:Promise<void>[]=[]
+    if(page==='dashboard'||page==='playlists') reads.push(api.playlists().then(setPlaylists))
+    if(page==='dashboard'||page==='missing') reads.push(api.missing().then(setMissing))
+    await Promise.all(reads)
+  },[page])
+  const readJobs=useCallback(async()=>{
+    const rows=await api.jobs()
+    const previous=new Map(jobsRef.current.map(j=>[j.id,j]))
+    if(initializedJobs.current && rows.some(j=>!activeJob(j) && (!previous.has(j.id)||activeJob(previous.get(j.id)!)))) setRevision(v=>v+1)
+    // Health jobs publish each completed playlist; merge these results directly.
+    const healthResults=rows.filter(j=>j.action==='health').flatMap(j=>j.result?.playlists||[]).filter(r=>r.ok&&r.result?.checked_at)
+    setPlaylists(current=>current.map(p=>{
+      const newest=healthResults.filter(r=>r.key===p.key).sort((a,b)=>b.result.checked_at.localeCompare(a.result.checked_at))[0]
+      return newest && (!p.health?.checked_at || newest.result.checked_at>p.health.checked_at)
+        ? {...p,health:newest.result,health_attempt:{attempted_at:newest.result.checked_at,error:null}} : p
+    }))
+    initializedJobs.current=true;jobsRef.current=rows;setJobs(rows)
+  },[])
+  usePolling(async()=>{try{await readJobs()}catch(e:any){setMessage(e.message)}},()=>jobsRef.current.some(activeJob)?3000:45000,'jobs-refresh')
+  usePolling(async()=>{try{setHealth(await api.health())}catch(e:any){setMessage(e.message)}},()=>45000,'health-refresh')
+  useEffect(()=>{refreshPage().catch(e=>setMessage(e.message))},[refreshPage,revision])
+  const refresh=useCallback(async()=>{
+    await Promise.all([refreshPage(),readJobs(),api.health().then(setHealth)])
+  },[refreshPage,readJobs])
   useEffect(()=>{let active=true;setSearch(null);if(!globalQuery.trim())return;const timer=setTimeout(()=>api.search(globalQuery.trim()).then(r=>{if(active)setSearch(r)}).catch(e=>{if(active)setMessage(e.message)}),300);return()=>{active=false;clearTimeout(timer)}},[globalQuery])
-  const enqueue:Enqueue=async(action,payload={})=>{try{const job=await api.enqueue(action,payload);setSubmitted(job.id);setMessage(`${actionName(action)} job queued. You can keep using Playlist Bridge.`);await refresh();return job}catch(e:any){setMessage(e.message);throw e}}
+  const enqueue:Enqueue=async(action,payload={})=>{try{const job=await api.enqueue(action,payload);setSubmitted(job.id);setMessage(`${actionName(action)} job queued. You can keep using Playlist Bridge.`);await readJobs();return job}catch(e:any){setMessage(e.message);throw e}}
   useEffect(()=>{const job=jobs.find(j=>j.id===submitted);if(job&&!activeJob(job)){setMessage(`${actionName(job.action)} ${job.status}${job.error?`: ${job.error}`:'.'}`);setSubmitted('')}},[jobs,submitted])
   const active=jobs.filter(activeJob)
   async function favorite(p:Playlist){try{await api.updatePlaylist(p.key,{favorite:!p.favorite});await refresh()}catch(e:any){setMessage(e.message)}}
-  return <div className="shell"><aside><div className="brand">Playlist Bridge</div><nav>{['dashboard','playlists','missing'].map(p=><button className={page===p?'active':''} key={p} onClick={()=>{location.hash=p}}>{p[0].toUpperCase()+p.slice(1)}</button>)}</nav><div className="sidebar-bottom"><button className={page==='settings'?'active':''} onClick={()=>{location.hash='settings'}}>Settings</button><div className="sidebar-version">{health.version||'2.0.0-beta.3'}</div></div></aside>
+  return <div className="shell"><aside><div className="brand">Playlist Bridge</div><nav>{['dashboard','playlists','missing'].map(p=><button className={page===p?'active':''} key={p} onClick={()=>{location.hash=p}}>{p[0].toUpperCase()+p.slice(1)}</button>)}</nav><div className="sidebar-bottom"><button className={page==='settings'?'active':''} onClick={()=>{location.hash='settings'}}>Settings</button><div className="sidebar-version">{health.version||'2.0.0-beta.4'}</div></div></aside>
   <main><header><div><h1>{detail?'Playlist details':page[0]?.toUpperCase()+page.slice(1)}</h1><p role="status">{message||'Spotify / Apple Music → Plex'}</p></div><label className="global-search">Search Playlist Bridge<input placeholder="Playlist name, track or artist" aria-label="Search Playlist Bridge" value={globalQuery} onChange={e=>setGlobalQuery(e.target.value)}/></label></header>
     {globalQuery&&<section className="panel"><div className="panel-head"><h2>Search results</h2><button onClick={()=>setGlobalQuery('')}>Close search</button></div><p className="muted">Track search uses saved source lists, health results and mappings. Sync or check health to refresh the index.</p>{search?<><p>{search.playlists.length} playlists · {search.track_count} matching tracks {search.track_count>200?'(first 200 shown)':''}</p>{search.playlists.map((p:any)=><p key={p.key}><a href={link(p.key)} onClick={()=>setGlobalQuery('')}>{p.name}</a></p>)}{search.tracks.map((t:any,i:number)=><p key={i}>{t.title} — {t.artist} · <a href={link(t.playlist_key)} onClick={()=>setGlobalQuery('')}>{t.playlist_name}</a></p>)}</>:<p>Searching…</p>}</section>}
     {!!active.length&&<div className="progress-banner"><span className="spinner"/><span>{active.length} active job(s) · {active.find(j=>j.status!=='queued')?.progress||'Queued'} <a href="#settings/jobs">View jobs / cancel</a></span></div>}
@@ -71,10 +98,29 @@ function IgnoreDialog({track,close,done}:{track:MissingTrack;close:()=>void;done
 }
 function Detail({playlistKey,latest,enqueue,refresh,jobs}:{playlistKey:string;latest?:Playlist;enqueue:Enqueue;refresh:()=>Promise<void>;jobs:Job[]}){
  const [data,setData]=useState<any>(null),[error,setError]=useState(''),[query,setQuery]=useState(''),[selected,setSelected]=useState<any>(null),[loading,setLoading]=useState(false)
- async function load(){setLoading(true);setError('');try{setData(await api.detail(playlistKey))}catch(e:any){setError(e.message)}finally{setLoading(false)}}
- useEffect(()=>{load()},[playlistKey])
- const completed=jobs.filter(j=>j.status==='completed').map(j=>j.id).join(',')
- useEffect(()=>{if(data)load()},[completed])
+ const mounted=useRef(false), inflight=useRef<Promise<void>|null>(null), reload=useRef(false)
+ const load=useCallback(async()=>{
+   if(inflight.current){reload.current=true;return inflight.current}
+   const work=(async()=>{
+     do {
+       reload.current=false
+       if(mounted.current){setLoading(true);setError('')}
+       try{const result=await api.detail(playlistKey);if(mounted.current)setData(result)}
+       catch(e:any){if(mounted.current)setError(e.message)}
+       finally{if(mounted.current)setLoading(false)}
+     }while(reload.current&&mounted.current)
+   })()
+   inflight.current=work
+   try{await work}finally{inflight.current=null}
+ },[playlistKey])
+ useEffect(()=>{mounted.current=true;if(!inflight.current)void load();return()=>{mounted.current=false}},[load])
+ const seenJobs=useRef<Map<string,string>|null>(null)
+ useEffect(()=>{
+   const previous=seenJobs.current
+   seenJobs.current=new Map(jobs.map(j=>[j.id,j.status]))
+   if(previous && jobs.some(j=>j.status==='completed' && previous.has(j.id) && previous.get(j.id)!=='completed' && j.action!=='health' &&
+      (j.payload.scope==='all'||j.payload.scope==='favorites'||j.payload.scope==='automatic'||j.payload.playlist_keys?.includes(playlistKey)||j.result?.key===playlistKey))) void load()
+ },[jobs,playlistKey,load])
  async function run(action:string){try{await enqueue(action,{scope:'selected',playlist_keys:[playlistKey]})}catch(e:any){setError(e.message)}}
  return <section className="panel"><a href="#playlists">← Back to playlists</a>{error&&<p role="alert" className="error">{error}</p>}{loading&&<p role="status">Loading source tracks and Plex matches…</p>}{data?<><h2>{data.playlist.name}</h2><p>{data.metadata.description}</p><div className="actions"><button onClick={()=>run('sync')}>Sync Now</button><button onClick={()=>run('health')}>Check Health</button><button disabled={loading} onClick={load}>Refresh tracks</button></div><HealthCard playlist={latest||data.playlist}/><input className="track-search" placeholder="Search within this playlist" aria-label="Search within playlist" value={query} onChange={e=>setQuery(e.target.value)}/>{data.tracks.filter((t:any)=>`${t.title} ${t.artist} ${t.album||''} ${t.match?.title||''}`.toLowerCase().includes(query.toLowerCase())).map((t:any)=><div className="missing-row" key={t.index}><div className="grow"><strong>{t.index+1}. {t.title}</strong><small>{t.artist} · {t.album||'N/A'}</small><small>Plex: {t.match?`${t.match.title} — ${t.match.artist}`:'No match'}</small></div><span className="pill">{t.status}</span><button disabled={t.status==='Ignored'} onClick={()=>setSelected(t)}>{t.plex_id?'Fix Match':'Review Match'}</button></div>)}</>:!loading&&<button onClick={load}>Retry loading playlist</button>}{selected&&<MatchPicker track={selected} playlistKey={playlistKey} onClose={()=>setSelected(null)} onSave={async(c,keys)=>{await enqueue('fix_match',{title:selected.title,artist:selected.artist,album:selected.album||'',plex_id:c.plex_id,playlist_keys:keys,replace_playlist_key:playlistKey});await refresh()}}/>}</section>
 }
@@ -84,5 +130,5 @@ function Logs(){
  const [entries,setEntries]=useState<any[]>([]),[level,setLevel]=useState(''),[action,setAction]=useState(''),[error,setError]=useState(''),[clear,setClear]=useState(false),[busy,setBusy]=useState(false)
  async function load(){setBusy(true);try{setEntries((await api.logs(level,action)).entries);setError('')}catch(e:any){setError(e.message)}finally{setBusy(false)}}
  useEffect(()=>{load()},[level,action])
- return <section className="panel"><div className="panel-head"><h2>Logs</h2><div className="actions"><button disabled={busy} onClick={load}>Refresh logs</button><button onClick={()=>setClear(true)}>Clear logs</button></div></div><p className="muted">Latest 1,000 entries retained; up to 200 shown. Tokens are redacted. Jobs retain their own results when logs are cleared.</p>{clear&&<div className="health-error">Clear all stored application logs? <button onClick={async()=>{try{await api.clearLogs();setClear(false);await load()}catch(e:any){setError(e.message)}}}>Confirm clear</button><button onClick={()=>setClear(false)}>Cancel</button></div>}<div className="toolbar"><label>Level<select value={level} onChange={e=>setLevel(e.target.value)}><option value="">All levels</option><option value="INFO">Information</option><option value="ERROR">Errors</option></select></label><label>Action<select value={action} onChange={e=>setAction(e.target.value)}><option value="">All actions</option>{['sync','health','analyze','add','fix_match','ignore','startup','jobs'].map(a=><option key={a} value={a}>{actionName(a)}</option>)}</select></label></div>{error&&<p className="error">{error}</p>}<div className="log-view">{entries.map(row=><article className="log-entry" key={row.id}><small>{stamp(row.created_at)} · {row.level} · {actionName(row.operation)}</small><pre>{row.message}</pre></article>)}</div>{!entries.length&&<p>No matching logs.</p>}</section>
+ return <section className="panel"><div className="panel-head"><h2>Logs</h2><div className="actions"><button disabled={busy} onClick={load}>Refresh logs</button><button onClick={()=>setClear(true)}>Clear logs</button></div></div><p className="muted">Latest 1,000 entries retained (up to 99 additional entries between cleanups); up to 200 shown. Tokens are redacted. Jobs retain their own results when logs are cleared.</p>{clear&&<div className="health-error">Clear all stored application logs? <button onClick={async()=>{try{await api.clearLogs();setClear(false);await load()}catch(e:any){setError(e.message)}}}>Confirm clear</button><button onClick={()=>setClear(false)}>Cancel</button></div>}<div className="toolbar"><label>Level<select value={level} onChange={e=>setLevel(e.target.value)}><option value="">All levels</option><option value="INFO">Information</option><option value="ERROR">Errors</option></select></label><label>Action<select value={action} onChange={e=>setAction(e.target.value)}><option value="">All actions</option>{['sync','health','analyze','add','fix_match','ignore','startup','jobs'].map(a=><option key={a} value={a}>{actionName(a)}</option>)}</select></label></div>{error&&<p className="error">{error}</p>}<div className="log-view">{entries.map(row=><article className="log-entry" key={row.id}><small>{stamp(row.created_at)} · {row.level} · {actionName(row.operation)}</small><pre>{row.message}</pre></article>)}</div>{busy?<p role="status">Loading logs…</p>:!entries.length&&<p>No matching logs.</p>}</section>
 }

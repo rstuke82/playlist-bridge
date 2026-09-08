@@ -1,6 +1,8 @@
 """Transactional SQLite repository; legacy JSON is imported exactly once."""
 from contextlib import contextmanager
 import json
+import threading
+from functools import lru_cache
 import sqlite3
 from pathlib import Path
 from datetime import datetime, timezone
@@ -25,6 +27,18 @@ def read_json(path):
         return raw
     except (ValueError, TypeError, KeyError) as exc:
         raise RuntimeError(f'Could not read {path.name}: {exc}') from exc
+
+
+_repository_lock = threading.Lock()
+
+@lru_cache(maxsize=16)
+def _repository(directory):
+    return Repository(directory)
+
+def get_repository(directory):
+    # Cache schema initialization only; connections and state remain request-local.
+    with _repository_lock:
+        return _repository(str(Path(directory).resolve()))
 
 
 class Repository:
@@ -66,6 +80,16 @@ class Repository:
                 db.execute("CREATE INDEX jobs_status ON jobs(status,created_at)")
                 db.execute("CREATE TABLE schedules(id TEXT PRIMARY KEY,name TEXT NOT NULL,action TEXT NOT NULL,scope TEXT NOT NULL,cron TEXT NOT NULL,timezone TEXT NOT NULL,enabled INTEGER NOT NULL,next_run TEXT NOT NULL)")
                 db.execute('PRAGMA user_version=3')
+            for statement in (
+                'CREATE INDEX IF NOT EXISTS logs_level_id ON application_logs(level,id DESC)',
+                'CREATE INDEX IF NOT EXISTS logs_operation_id ON application_logs(operation,id DESC)',
+                'CREATE INDEX IF NOT EXISTS logs_level_operation_id ON application_logs(level,operation,id DESC)',
+                'CREATE INDEX IF NOT EXISTS health_playlist_time ON health_history(playlist_key,checked_at DESC)',
+                "CREATE INDEX IF NOT EXISTS jobs_display ON jobs(CASE WHEN status IN ('queued','running','cancelling') THEN 0 ELSE 1 END,created_at DESC)",
+                'CREATE INDEX IF NOT EXISTS jobs_schedule_status ON jobs(schedule_id,status)',
+                'CREATE INDEX IF NOT EXISTS schedules_due ON schedules(enabled,next_run)',
+            ):
+                db.execute(statement)
         # Durable originals in the transaction make backup completion restart-safe.
         with self.connect() as db:
             backups = db.execute('SELECT name,content FROM migration_backups').fetchall()
@@ -121,12 +145,14 @@ class Repository:
 
     def add_log(self, level, operation, message):
         with self.connect() as db:
-            db.execute('INSERT INTO application_logs(created_at,level,operation,message) VALUES (?,?,?,?)',
+            cursor = db.execute('INSERT INTO application_logs(created_at,level,operation,message) VALUES (?,?,?,?)',
                        (datetime.now(timezone.utc).isoformat(), level, operation, message[:16000]))
-            db.execute('DELETE FROM application_logs WHERE id NOT IN (SELECT id FROM application_logs ORDER BY id DESC LIMIT 1000)')
+            # Batch cleanup: at most 99 extra rows between trims.
+            if cursor.lastrowid % 100 == 0:
+                db.execute('DELETE FROM application_logs WHERE id < (SELECT id FROM application_logs ORDER BY id DESC LIMIT 1 OFFSET 999)')
 
     def logs(self, limit=100, level=None, action=None):
-        clauses, params = [], []
+        clauses, params = ['id >= COALESCE((SELECT id FROM application_logs ORDER BY id DESC LIMIT 1 OFFSET 999), 0)'], []
         if level:
             clauses.append('level=?'); params.append(level)
         if action:

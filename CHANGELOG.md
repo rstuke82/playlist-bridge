@@ -1,3 +1,14 @@
+# v2.0.0-beta.4 — build 20260908.8
+
+- Replace global 2.5-second refresh with non-overlapping, completion-scheduled job/health polling; coalesce concurrent GETs including React StrictMode mounts.
+- Fetch page lists on entry and state changes; fetch settings data only in its mounted section. Remove schedules interval polling.
+- Give browser requests deadlines and detail loads a stable, serialized lifecycle with errors/retry. Refresh details only for relevant completed changes.
+- Isolate detail generation in a two-worker pool with a 60-second HTTP deadline and busy responses. Retain occupied capacity until timed-out workers actually exit. Use strict Plex errors instead of silently returning failed reads as missing matches.
+- Move request logging off the event loop. Reuse repository initialization, keep request-local state, omit read-only baselines, and load lightweight endpoint namespaces on demand. Read health buckets once per playlist-list request.
+- Batch log cleanup every 100 inserts, retaining the same visible 1,000-entry window. Add log, job, schedule, and health-history indexes without a schema-format change.
+- Execute health batches with three workers, incremental saved results, cancellation checkpoints, and no sync-state saves. Remove health's global stdout capture lock; persist structured result summaries and diagnostics.
+- Revalidate HTML and cache hashed assets as immutable. Keep Docker default port 8173.
+
 # v2.0.0-beta.3
 
 Overview dashboard; background jobs and cron schedules; safe job cancellation; detailed health drift; last-sync dates; universal ignore and linked missing memberships; playlist/missing sorting and filters; track and playlist search; improved add feedback; Settings sections and log controls. SQLite schema 3. Separate build numbers removed.

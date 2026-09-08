@@ -437,7 +437,7 @@ except ImportError:
     Image = None
 
 APP_NAME = "Playlist Bridge"
-VERSION = "2.0.0-beta.3"
+VERSION = "2.0.0-beta.4"
 
 # Color codes for terminal output
 class Colors:
@@ -876,22 +876,32 @@ class Config:
         "ignored_tracks": IGNORED_TRACKS_FILE,
     }
 
-    def __init__(self):
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-
-        from .storage import Repository, read_json, STARTUP_KEYS
-        self.repository = Repository(CONFIG_DIR)
+    def __init__(self, *, read_only=False, namespaces=None):
+        from .storage import get_repository, read_json
+        self.repository = get_repository(CONFIG_DIR)
+        self.read_only = read_only
         self.config = read_json(CONFIG_FILE)
         self.config.update(self.repository.load("runtime"))
         if not isinstance(self.config.get("plex"), dict):
             self.config["plex"] = {}
         self.config.setdefault("playlists", [])
-        for name in ("mapping", "missing", "match_metadata", "source_snapshots", "ignored_tracks", "artist_aliases"):
+        names = ("mapping", "missing", "match_metadata", "source_snapshots", "ignored_tracks", "artist_aliases")
+        for name in (names if not read_only or namespaces is None else namespaces):
             setattr(self, name, self.repository.load(name))
-        self._baseline = copy.deepcopy(self._buckets())
-        Matcher.set_artist_aliases(
-            self.artist_aliases
-        )
+        self._baseline = None if read_only else copy.deepcopy(self._buckets())
+        if "artist_aliases" in self.__dict__:
+            Matcher.set_artist_aliases(self.artist_aliases)
+
+    def __getattr__(self, name):
+        if name in ("mapping", "missing", "match_metadata", "source_snapshots", "ignored_tracks", "artist_aliases", "health", "health_attempts"):
+            value = self.repository.load(name)
+            setattr(self, name, value)
+            return value
+        raise AttributeError(name)
+
+    def _assert_writable(self):
+        if self.read_only:
+            raise RuntimeError("Cannot save a read-only configuration")
 
     def reload_artist_aliases(self):
         """Reload artist aliases and update the matcher immediately."""
@@ -901,6 +911,7 @@ class Config:
         )
 
     def save_artist_aliases(self):
+        self._assert_writable()
         """Persist the standalone alias file atomically and reload aliases."""
         self.repository.save({"artist_aliases": self.artist_aliases})
         self.reload_artist_aliases()
@@ -917,6 +928,7 @@ class Config:
         return buckets
 
     def _save_state_only(self, name, data):
+        self._assert_writable()
         self.repository.save({name: data}, self._baseline)
         self._baseline[name] = copy.deepcopy(data)
 
@@ -924,6 +936,7 @@ class Config:
         self._save_state_only("missing", self.missing)
 
     def save(self):
+        self._assert_writable()
         from .storage import STARTUP_KEYS, read_json
         buckets = self._buckets()
         self.repository.save(buckets, self._baseline)

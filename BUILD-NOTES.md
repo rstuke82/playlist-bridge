@@ -1,24 +1,39 @@
-# v2.0.0-beta.3
+# Playlist Bridge 2.0.0-beta.4
 
-This release uses the version alone; there is no separate build number.
+Build: `20260908.8`. The uploaded beta.3 had removed its separate build number; this resumes after the prior numbered build `20260908.7` while keeping the version exactly `2.0.0-beta.4`.
 
-- Dashboard overview and statistics, bulk sync actions, and Add Playlist with durable progress and error feedback.
-- Playlist filters, sorting, last sync/health timestamps, named health drift details, and global/local track search.
-- Missing-track sorting, linked playlist memberships, explained counts, and selected or universal ignore rules with restoration.
-- Persistent background jobs, manual execution, cron schedules with timezones, cancellation, and partial results.
-- Settings General / Logs / Jobs sections, action filters and clear logs.
+## Package
 
-SQLite schema 3 preserves existing state and adds jobs and schedules. Stop the app and back up the complete data directory before upgrading. Restore that backup to roll back to beta 2. Docker continues to use port 8173 and /data. No image is published by this archive.
+Built from the uploaded `Playlist Bridge.zip`. Includes Python source, frontend source and lockfile, compiled frontend, Dockerfile, Compose file, documentation, and regression tests. Excludes private runtime data, credentials, backups, virtual environments, and node_modules. Keep your existing `data/` directory when replacing the source files.
 
-Cancellation stops at safe checkpoints and retains completed changes. The web service must remain running for schedules. Queued jobs resume after restart; interrupted running jobs are not replayed automatically. Matching heuristics and CLI behavior are preserved.
+## Changes
 
-## Validation
+- One completion-scheduled polling loop per resource, shared in-flight GETs, jobs at 3 seconds active / 45 seconds idle, health at 45 seconds.
+- Page-specific list loads on entry or completed state changes, settings reads on section entry, and no schedule polling.
+- Health results merge from incremental background-job results without repeatedly fetching playlist lists.
+- Serialized detail loads with browser timeout, retry/error display, and relevant-job refresh; separate two-worker backend pool and 60-second API deadline. A timed-out worker retains its slot until it exits, preventing an unbounded backlog. Existing per-call network timeouts remain unchanged.
+- Strict Plex detail errors, off-event-loop request logging, cached repository setup, fresh request-local state, lazy read-only namespace loads, and no read-only baseline deep copies.
+- One health/attempt load per playlist-list request; batch log cleanup with the same newest-1,000 visible window; additive SQLite indexes, still schema version 3.
+- Three concurrent read-only health checks with incremental persistence and safe cancellation. Matching heuristics and CLI command behavior are preserved.
+- HTML cache revalidation and immutable hashed assets.
 
-- Python compilation and all 33 regression tests passed, including legacy JSON migration/counts, beta database upgrades, empty config, persisted read-only health, manual provenance, universal ignore, job cancellation/partial results, cron timing, and verified/partial add behavior.
-- Frontend TypeScript/Vite production build passed.
-- Browser checks covered dashboard statistics, incremental health results, named drift, favorite filters, ignore/restore, linked memberships, schedule creation/pause, background cancellation, add analysis/completion, and saved manual match replacement.
-- Docker Compose configuration and local ARM64 multi-stage image build passed. Disposable containers verified port 8173 startup, beta 2 SQLite upgrade, and persisted health errors/logs after recreation with the same /data. Empty configuration initialized successfully.
+## Validation completed
 
-Validation used deterministic service fixtures, not personal Plex or source-service accounts. The local image is playlist-bridge:2.0.0-beta.3; GHCR publishing and a multi-platform image are separate steps.
+- Python compile/syntax passed.
+- `npm run build` passed and production assets are included.
+- 40 Python regression tests passed, including actual ASGI route/middleware requests for key endpoints, detail success/error/timeout/busy responses, and Logs responsiveness during blocked detail work.
+- Health tests verified concurrency of three, incremental persisted results, cancellation, and unchanged sync/mapping/missing/snapshot/last_synced state.
+- SQLite migration/idempotence, existing schema-3 state compatibility, log retention, and added indexes passed using disposable fixtures.
+- Docker Compose configuration parsed successfully. No Docker image was built or run; Docker daemon was unavailable, and further local testing was stopped at the user's request.
+- Frontend polling/navigation structure was reviewed and compiled. No live-browser or real Spotify/Apple/Plex account validation was performed.
 
-The archive includes complete project source, compiled frontend, Docker files, documentation and tests. Local test Python files remain gitignored as requested. Personal data and development dependencies are excluded.
+## Server update
+
+Stop the existing service and back up `data/`. Replace project source files with this release while retaining `data/` and your `.env`. Then run:
+
+```sh
+docker compose up -d --build
+docker compose logs --tail=50
+```
+
+This is a source release; it does not publish or update the GHCR `beta` tag. Use `--build` to build the supplied source. Docker continues to use port 8173 by default.

@@ -1,6 +1,6 @@
 # Playlist Bridge
 
-**Version:** 2.0.0-beta.3
+**Version:** 2.0.0-beta.4 · **Build:** 20260908.8
 
 Playlist Bridge syncs public **Spotify** and **Apple Music** playlists to playlists in your local **Plex music library**.
 
@@ -10,7 +10,11 @@ Version 2.0 adds a self-hosted **React + TypeScript** web interface with a **Fas
 
 ## Current beta features
 
-Beta 3 adds an overview dashboard, detailed health drift, persistent background jobs and cron schedules, universal ignore rules, playlist filters and sorting, track search, and action-filtered logs. Releases now use the version alone, without a separate build number.
+Beta 4 focuses on performance and stability. It retains the dashboard, persisted health details, background jobs, schedules, matching engine, and CLI from beta 3. The version remains `2.0.0-beta.4`; separate build metadata is `20260908.8`.
+
+Playlist and missing-track lists load on page entry and state changes. Jobs refresh every 3 seconds while active and every 45 seconds while idle; server health refreshes every 45 seconds. Settings data loads when its section opens. Health batches check up to three playlists concurrently and show completed results incrementally. Playlist details return a timeout error after 60 seconds; retry if the source or Plex is slow. Two detail requests can run at once; additional requests receive a busy message. Existing Spotify, Apple Music, and Plex network timeouts remain in place.
+
+Beta 4 adds SQLite indexes without changing schema version 3 or stored data formats. Log cleanup runs every 100 inserts; the visible log window remains the newest 1,000 entries. HTML revalidates after upgrades, while hashed assets use long-lived immutable caching.
 
 - React + TypeScript web interface
 - FastAPI backend
@@ -89,18 +93,18 @@ docker compose up -d --no-build
 ```
 
 The default image is `ghcr.io/rstuke82/playlist-bridge:beta`. This archive does not publish an image.
-To pin this build, set `PLAYLIST_BRIDGE_IMAGE=ghcr.io/rstuke82/playlist-bridge:2.0.0-beta.3`
-in `.env` once that tag is published. The `beta` tag advances between releases; use the version tag to select beta 3.
+To pin this build, set `PLAYLIST_BRIDGE_IMAGE=ghcr.io/rstuke82/playlist-bridge:2.0.0-beta.4`
+in `.env` once that tag is published. The `beta` tag advances between releases; use the version tag to select beta 4.
 Beta images should never be tagged `latest`.
 
 Maintainers can build and tag for GHCR with:
 
 ```bash
 docker build --build-arg VCS_REF="$(git rev-parse HEAD)" \
-  -t ghcr.io/rstuke82/playlist-bridge:2.0.0-beta.3 \
+  -t ghcr.io/rstuke82/playlist-bridge:2.0.0-beta.4 \
   -t ghcr.io/rstuke82/playlist-bridge:beta .
 docker login ghcr.io
-docker push ghcr.io/rstuke82/playlist-bridge:2.0.0-beta.3
+docker push ghcr.io/rstuke82/playlist-bridge:2.0.0-beta.4
 docker push ghcr.io/rstuke82/playlist-bridge:beta
 ```
 

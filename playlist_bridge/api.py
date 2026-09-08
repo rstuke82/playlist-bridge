@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+from starlette.concurrency import run_in_threadpool
 import contextlib
 import io
 import os
@@ -16,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 import requests
 
-from . import __version__
+from . import __version__, __build__
 from . import jobs
 from datetime import datetime, timezone
 from .legacy import (
@@ -115,8 +118,8 @@ class NotificationSettingsRequest(BaseModel):
     notify_sync_all_summary: bool = True
 
 
-def _config() -> Config:
-    return Config()
+def _config(read_only=False, namespaces=None) -> Config:
+    return Config(read_only=read_only, namespaces=namespaces)
 
 
 def _playlist_key(playlist: dict) -> str:
@@ -142,8 +145,8 @@ def _playlist_payload(config: Config, playlist: dict) -> dict:
         "unresolved": len(missing),
         "lost": sum(1 for track in missing if track.get("status") == "lost"),
         "ignored": len(config.ignored_tracks.get(key, {})),
-        "health": config.repository.load("health").get(key),
-        "health_attempt": config.repository.load("health_attempts").get(key),
+        "health": config.health.get(key),
+        "health_attempt": config.health_attempts.get(key),
     }
 
 
@@ -159,7 +162,7 @@ def _source_for_url(url: str):
 
 def _record_log(level, operation, message, config=None):
     try:
-        config = config or _config()
+        config = config or _config(read_only=True, namespaces=[])
         context = jobs.current()
         config.repository.add_log(level, context.action if context else operation, redact(message, config))
     except Exception:
@@ -172,14 +175,18 @@ async def log_operations(request, call_next):
     try:
         response = await call_next(request)
     except Exception:
-        _record_log("ERROR", "request", f"{request.method} request failed unexpectedly. Check the server console.")
+        await run_in_threadpool(_record_log, "ERROR", "request", f"{request.method} request failed unexpectedly. Check the server console.")
         raise
     route = request.scope.get("route")
     path = getattr(route, "path", "")
     if path.startswith("/api/") and path not in ("/api/health", "/api/settings/logs"):
         if request.method != "GET" or response.status_code >= 400:
-            _record_log("ERROR" if response.status_code >= 400 else "INFO", path,
+            await run_in_threadpool(_record_log, "ERROR" if response.status_code >= 400 else "INFO", path,
                         f"{request.method} completed with HTTP {response.status_code}")
+    if request.url.path.startswith('/assets/') and response.status_code == 200:
+        response.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
+    elif not request.url.path.startswith('/api/'):
+        response.headers['Cache-Control'] = 'no-cache, max-age=0, must-revalidate'
     return response
 
 
@@ -194,7 +201,7 @@ def _capture(callable_obj, *args, **kwargs):
     except Exception:
         _record_log("ERROR", getattr(callable_obj, "__name__", "operation"), stream.getvalue() or "Operation failed")
         raise
-    output = redact(stream.getvalue(), _config())
+    output = redact(stream.getvalue(), _config(read_only=True, namespaces=[]))
     if output.strip():
         _record_log("INFO", getattr(callable_obj, "__name__", "operation"), output)
     return result, output
@@ -240,7 +247,7 @@ def _validated_plex_libraries(url: str, token: str) -> List[dict]:
 
 @app.get("/api/health")
 def health():
-    config = _config()
+    config = _config(read_only=True, namespaces=[])
     playlists = config.config.get("playlists", [])
     unresolved = 0
     lost = 0
@@ -252,6 +259,7 @@ def health():
     return {
         "status": "ok",
         "version": __version__,
+        "build": __build__,
         "playlists": len(playlists),
         "favorites": sum(1 for p in playlists if p.get("favorite") is True),
         "unresolved": unresolved,
@@ -265,7 +273,7 @@ def health():
 
 @app.get("/api/playlists")
 def list_playlists():
-    config = _config()
+    config = _config(read_only=True, namespaces=[])
     return [
         _playlist_payload(config, playlist)
         for playlist in config.config.get("playlists", [])
@@ -445,9 +453,13 @@ def sync_one(playlist_key: str):
         return {"summary": result, "log": log}
 
 
+def _health_call(fn, *args, **kwargs):
+    return fn(*args, **kwargs), ""
+
+
 def playlist_health(playlist_key: str):
     """Read-only source/Plex comparison. Only health results/history are persisted."""
-    config = _config()
+    config = _config(read_only=True)
     playlist = next(
         (p for p in config.config.get("playlists", []) if _playlist_key(p) == playlist_key),
         None,
@@ -465,7 +477,7 @@ def playlist_health(playlist_key: str):
         jobs.progress("Reading source playlist")
         stage = "source playlist"
         source_type, source_url, source_api = _source_for_url(playlist.get("source_url", ""))
-        (source_tracks, _metadata), source_log = _capture(
+        (source_tracks, _metadata), source_log = _health_call(
             source_api.get_playlist_tracks,
             source_url,
             fetch_artwork=False,
@@ -473,12 +485,12 @@ def playlist_health(playlist_key: str):
 
         jobs.progress("Checking Plex library matches")
         stage = "Plex library"
-        plex_library, library_log = _capture(plex.search_library, "")
+        plex_library, library_log = _health_call(plex.search_library, "")
         if not plex_library:
             raise HTTPException(status_code=502, detail="The selected Plex music library returned no tracks. Check the library selection in Settings → Plex.")
 
         mapping_key = _playlist_key(playlist)
-        match_result, match_log = _capture(
+        match_result, match_log = _health_call(
             syncer._match_source_tracks,
             source_tracks,
             mapping_key,
@@ -491,7 +503,7 @@ def playlist_health(playlist_key: str):
         jobs.progress("Comparing destination playlist")
         stage = "Plex destination playlist"
         plex_playlist_id = str(playlist.get("plex_playlist_id", ""))
-        plex_items, playlist_log = _capture(plex.get_playlist_items, plex_playlist_id)
+        plex_items, playlist_log = _health_call(plex.get_playlist_items, plex_playlist_id)
         actual_ids = [
             str(item.get("plex_id"))
             for item in plex_items
@@ -563,9 +575,8 @@ def playlist_health(playlist_key: str):
         raise HTTPException(status_code=502, detail=message) from exc
 
 
-@app.get("/api/playlists/{playlist_key:path}/detail")
 def playlist_detail(playlist_key: str):
-    config = _config()
+    config = _config(read_only=True)
     playlist = next((p for p in config.config.get("playlists", []) if _playlist_key(p) == playlist_key), None)
     if playlist is None:
         raise HTTPException(status_code=404, detail="Playlist not found")
@@ -573,7 +584,7 @@ def playlist_detail(playlist_key: str):
         _, url, source = _source_for_url(playlist.get("source_url", ""))
         tracks, metadata = source.get_playlist_tracks(url, fetch_artwork=False)
         syncer = Syncer(config)
-        library = {str(t.get("plex_id")): t for t in syncer._get_plex().search_library("")}
+        library = {str(t.get("plex_id")): t for t in _health_plex(config).search_library("")}
         rows = []
         for index, track in enumerate(tracks):
             search_key = f"{track.get('title', '')}|{track.get('artist', '')}"
@@ -589,12 +600,36 @@ def playlist_detail(playlist_key: str):
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(status_code=502, detail=redact("Could not load playlist details: " + str(exc), config)) from exc
+
+
+# A separate, bounded pool keeps slow external I/O away from lightweight routes.
+DETAIL_TIMEOUT = 60
+_detail_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="playlist-detail")
+_detail_slots = threading.BoundedSemaphore(2)
+
+@app.get("/api/playlists/{playlist_key:path}/detail")
+async def playlist_detail_route(playlist_key: str):
+    if not _detail_slots.acquire(blocking=False):
+        raise HTTPException(503, "Playlist details are busy. Please retry shortly.")
+    try:
+        future = _detail_pool.submit(playlist_detail, playlist_key)
+    except BaseException:
+        _detail_slots.release()
+        raise
+    # Keep the slot occupied after a timeout until the actual worker exits.
+    future.add_done_callback(lambda _: _detail_slots.release())
+    wrapped = asyncio.wrap_future(future)
+    wrapped.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+    try:
+        return await asyncio.wait_for(asyncio.shield(wrapped), DETAIL_TIMEOUT)
+    except asyncio.TimeoutError:
+        raise HTTPException(504, "Playlist details timed out after 60 seconds. Check source/Plex connectivity and retry.") from None
 
 
 @app.get("/api/settings/plex")
 def get_plex_settings():
-    config = _config()
+    config = _config(read_only=True, namespaces=[])
     plex = config.config.get("plex", {})
     token = str(plex.get("token", ""))
     return {
@@ -608,7 +643,7 @@ def get_plex_settings():
 
 @app.post("/api/settings/plex/discover")
 def discover_plex_libraries(request: PlexDiscoverRequest):
-    config = _config()
+    config = _config(read_only=True, namespaces=[])
     existing = config.config.get("plex", {})
     token = request.token.strip() or str(existing.get("token", "")).strip()
     libraries = _validated_plex_libraries(request.url, token)
@@ -645,7 +680,7 @@ def put_plex_settings(request: PlexSettingsRequest):
 
 @app.get("/api/missing")
 def missing_tracks(scope: Literal["all", "favorites"] = "all"):
-    config = _config()
+    config = _config(read_only=True, namespaces=[])
     playlists = config.config.get("playlists", [])
     if scope == "favorites":
         playlists = [p for p in playlists if p.get("favorite") is True]
@@ -667,7 +702,7 @@ def missing_tracks(scope: Literal["all", "favorites"] = "all"):
 
 @app.post("/api/missing/candidates")
 def missing_candidates(request: MissingCandidateRequest):
-    config = _config()
+    config = _config(read_only=True)
     syncer = Syncer(config)
     plex = syncer._get_plex()
     library = plex.search_library("")
@@ -785,7 +820,7 @@ def save_missing_match(request: MissingMatchRequest):
 
 @app.get("/api/settings/notifications")
 def get_notification_settings():
-    config = _config()
+    config = _config(read_only=True, namespaces=[])
     return WebhookSettings.from_dict(
         config.config.get("notifications")
     ).to_dict()
@@ -803,7 +838,7 @@ def put_notification_settings(request: NotificationSettingsRequest):
 
 @app.post("/api/settings/notifications/test")
 def test_notification():
-    config = _config()
+    config = _config(read_only=True, namespaces=[])
     settings = WebhookSettings.from_dict(config.config.get("notifications"))
     if not settings.enabled or not settings.url:
         raise HTTPException(status_code=400, detail="Webhook notifications are not enabled/configured")
@@ -821,7 +856,7 @@ def test_notification():
 @app.get("/api/settings/logs")
 def get_logs(limit: int = Query(default=100, ge=1, le=500),
              level: Optional[Literal["INFO", "ERROR"]] = None, action: Optional[str] = None):
-    config = _config()
+    config = _config(read_only=True, namespaces=[])
     rows = config.repository.logs(limit, level, action)
     for row in rows:
         row['message'] = redact(row['message'], config)
@@ -843,7 +878,9 @@ class ScheduleRequest(BaseModel):
 
 
 def job_store():
-    return jobs.Store(_config().repository)
+    from .storage import get_repository
+    from .legacy import CONFIG_DIR
+    return jobs.Store(get_repository(CONFIG_DIR))
 
 
 def validated_payload(action, payload):
@@ -917,7 +954,7 @@ def update_schedule(schedule_id: str, request: ScheduleRequest):
 
 @app.delete('/api/schedules/{schedule_id}')
 def delete_schedule(schedule_id: str):
-    with _config().repository.connect() as db:
+    with job_store().repository.connect() as db:
         db.execute('DELETE FROM schedules WHERE id=?',(schedule_id,))
     return {'deleted':True}
 
@@ -931,6 +968,57 @@ def run_schedule(schedule_id: str):
     return store.get(store.enqueue(schedule['action'],{'scope':schedule['scope']},schedule_id))
 
 
+def _health_batch(playlists, config):
+    """Three read-only checks at a time; persist each completion and drain on cancel."""
+    ctx = jobs.current()
+    results = []
+    cancelled = False
+    remaining = iter(playlists)
+
+    def perform(playlist):
+        jobs._local.context = ctx
+        try:
+            if ctx:
+                ctx.checkpoint()
+            result = playlist_health(_playlist_key(playlist))
+            return {"key": _playlist_key(playlist), "name": playlist.get("plex_playlist_name"), "ok": True, "result": result}
+        except Exception as exc:
+            return {"key": _playlist_key(playlist), "name": playlist.get("plex_playlist_name"), "ok": False,
+                    "error": redact(getattr(exc, "detail", str(exc)), config)}
+        finally:
+            jobs._local.context = None
+
+    with ThreadPoolExecutor(max_workers=3, thread_name_prefix="playlist-health") as pool:
+        pending = set()
+        while True:
+            try:
+                if ctx:
+                    ctx.checkpoint()
+            except jobs.Cancelled:
+                cancelled = True
+            while not cancelled and len(pending) < 3:
+                playlist = next(remaining, None)
+                if playlist is None:
+                    break
+                pending.add(pool.submit(perform, playlist))
+            if not pending:
+                break
+            done, pending = wait(pending, return_when=FIRST_COMPLETED)
+            for future in done:
+                try:
+                    results.append(future.result())
+                except jobs.Cancelled:
+                    cancelled = True
+            if ctx:
+                ctx.store.update(ctx.id, result={"playlists": results},
+                                 progress=f"Health: {len(results)} of {len(playlists)} finished")
+    if cancelled:
+        raise jobs.Cancelled()
+    if any(not r['ok'] for r in results):
+        raise ValueError(f"{sum(not r['ok'] for r in results)} of {len(results)} playlists failed. See job results and logs.")
+    return {"playlists": results}
+
+
 def execute_job(action, payload):
     if action=='analyze':
         return analyze_playlist(PlaylistAnalyzeRequest(**payload))
@@ -938,7 +1026,7 @@ def execute_job(action, payload):
         return add_playlist(PlaylistAddRequest(**payload))
     if action=='fix_match':
         return save_missing_match(MissingMatchRequest(**payload))
-    config=_config()
+    config=_config(read_only=True, namespaces=[])
     scope=payload.get('scope','all')
     playlists=config.config.get('playlists',[])
     if scope=='favorites':
@@ -949,6 +1037,8 @@ def execute_job(action, payload):
         playlists=[p for p in playlists if _playlist_key(p) in payload.get('playlist_keys',[])]
     if not playlists:
         raise ValueError('No playlists match this job scope')
+    if action == 'health':
+        return _health_batch(playlists, config)
     results=[]
     for index,playlist in enumerate(playlists):
         jobs.progress(f"{index+1} of {len(playlists)}: {playlist.get('plex_playlist_name','')}")
@@ -1051,7 +1141,7 @@ def ignore_missing(request: IgnoreRequest):
 
 @app.get('/api/ignored')
 def list_ignored():
-    config=_config()
+    config=_config(read_only=True, namespaces=[])
     return [{'playlist_key':key,'ignore_key':identity,**track} for key,bucket in config.ignored_tracks.items() for identity,track in bucket.items()]
 
 
@@ -1071,13 +1161,13 @@ def restore_ignore(request: RestoreIgnoreRequest):
 
 @app.delete('/api/settings/logs')
 def clear_logs():
-    _config().repository.clear_logs()
+    job_store().repository.clear_logs()
     return {'cleared':True}
 
 
 @app.get('/api/search')
 def search_library(q: str = Query(min_length=1,max_length=200)):
-    config=_config()
+    config=_config(read_only=True, namespaces=[])
     query=q.casefold().strip()
     playlists=[]; tracks=[]
     health=config.repository.load('health')

@@ -76,16 +76,33 @@ export type Candidate = {
   release_intent_penalty: number
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
-    headers: { 'Content-Type': 'application/json', ...(init?.headers || {}) },
-    ...init,
-  })
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({}))
-    throw new Error(typeof body.detail === 'string' ? body.detail : `Request failed (${response.status}). Check Settings → Logs.`)
-  }
-  return response.json()
+const pending = new Map<string, Promise<any>>()
+async function send<T>(path:string, init?:RequestInit):Promise<T> {
+  const controller = new AbortController()
+  const timer = setTimeout(()=>controller.abort(), path.endsWith('/detail') ? 65000 : 30000)
+  try {
+    const response = await fetch(path, {...init, signal:controller.signal,
+      headers:{'Content-Type':'application/json', ...init?.headers}})
+    if (!response.ok) {
+      const body = await response.json().catch(()=>({}))
+      throw new Error(typeof body.detail === 'string' ? body.detail : `Request failed (${response.status}). Check Settings → Logs.`)
+    }
+    const result = await response.json()
+    if (init?.method && init.method !== 'GET') window.dispatchEvent(new Event('jobs-refresh'))
+    return result
+  } catch (error:any) {
+    if (error.name === 'AbortError') throw new Error('Request timed out. Check source/Plex connectivity and retry.')
+    throw error
+  } finally { clearTimeout(timer) }
+}
+function request<T>(path:string, init?:RequestInit):Promise<T> {
+  if (init?.method && init.method !== 'GET') return send<T>(path,init)
+  // Share in-flight reads, including React StrictMode's setup/cleanup/setup cycle.
+  const existing = pending.get(path)
+  if (existing) return existing
+  const promise = send<T>(path,init).finally(()=>pending.delete(path))
+  pending.set(path,promise)
+  return promise
 }
 
 export const api = {
