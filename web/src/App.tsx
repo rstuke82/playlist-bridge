@@ -1,274 +1,88 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
+import { api, Job, activeJob, Playlist, MissingTrack } from './api'
+import General from './General'
 import MatchPicker from './MatchPicker'
-import { useHealthChecks, HealthChecks } from './useHealthChecks'
-import { api, MissingTrack, Playlist, PlaylistHealth, PlexLibrary } from './api'
+import HealthCard, { stamp } from './HealthCard'
+import JobsPanel, { JobRow, actionName } from './JobsPanel'
 
-type Page = 'dashboard' | 'playlists' | 'missing' | 'settings'
+type Enqueue=(action:string,payload?:any)=>Promise<Job>
+const currentRoute=()=>{const raw=location.hash.slice(1);try{const key=decodeURIComponent(raw);if(key.startsWith('spotify:')||key.startsWith('apple:'))return `playlist/${encodeURIComponent(key)}`}catch{}return raw||'dashboard'}
+const link=(key:string)=>`#playlist/${encodeURIComponent(key)}`
+function ordered<T>(rows:T[],value:(r:T)=>any,direction:string){return [...rows].sort((a,b)=>{const x=value(a),y=value(b);if(x===null||x===undefined||x==='')return y===null||y===undefined||y===''?0:1;if(y===null||y===undefined||y==='')return -1;const n=typeof x==='number'?x-y:String(x).localeCompare(String(y),undefined,{numeric:true,sensitivity:'base'});return direction==='asc'?n:-n})}
+function Direction({value,onChange}:{value:string;onChange:(s:string)=>void}){return <select aria-label="Sort direction" value={value} onChange={e=>onChange(e.target.value)}><option value="asc">Ascending</option><option value="desc">Descending</option></select>}
 
-export default function App() {
-  const [route,setRoute]=useState(()=>location.hash.slice(1))
-  useEffect(()=>{const change=()=>setRoute(location.hash.slice(1));window.addEventListener('hashchange',change);return()=>window.removeEventListener('hashchange',change)},[])
-  const page:Page = (['dashboard','playlists','missing','settings'].includes(route) ? route : route ? 'playlists' : 'dashboard') as Page
-  let detailKey=''
-  try { detailKey=route.startsWith('playlist/')?decodeURIComponent(route.slice(9)):route&&!['dashboard','playlists','missing','settings'].includes(route)?decodeURIComponent(route):'' } catch { detailKey='' }
-  const [health, setHealth] = useState<any>(null)
-  const [playlists, setPlaylists] = useState<Playlist[]>([])
-  const [missing, setMissing] = useState<MissingTrack[]>([])
-  const [scope, setScope] = useState<'all' | 'favorites'>('all')
-  const [message, setMessage] = useState('')
-  const [busy, setBusy] = useState(false)
-
-  async function refresh() {
-    const [h, p, m] = await Promise.all([api.health(), api.playlists(), api.missing(scope)])
-    setHealth(h)
-    setPlaylists(p)
-    setMissing(m)
-  }
-
-  const checks = useHealthChecks(refresh)
-
-  useEffect(() => { refresh().catch(e => setMessage(e.message)) }, [scope])
-
-  async function run(label: string, action: () => Promise<any>) {
-    setBusy(true)
-    setMessage(`${label}…`)
-    try {
-      await action()
-      setMessage(`${label} complete`)
-      await refresh()
-    } catch (e: any) {
-      setMessage(e.message)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function toggleFavorite(playlist: Playlist) {
-    try {
-      await api.updatePlaylist(playlist.key, { favorite: !playlist.favorite })
-      await refresh()
-    } catch (e: any) {
-      setMessage(e.message)
-    }
-  }
-
-  const title = detailKey ? 'Playlist details' : page[0].toUpperCase() + page.slice(1)
-
-  return <div className="shell">
-    <aside>
-      <div className="brand">Playlist Bridge</div>
-      <nav>
-        {(['dashboard','playlists','missing'] as Page[]).map(p =>
-          <button className={page===p?'active':''} onClick={()=>{location.hash=p}} key={p}>{p[0].toUpperCase()+p.slice(1)}</button>
-        )}
-      </nav>
-      <div className="sidebar-bottom">
-        <button className={!detailKey && page==='settings'?'active':''} onClick={()=>{location.hash='settings'}}>Settings</button>
-        <div className="sidebar-version">
-          <span>{health?.version || '2.0.0-beta.2'}</span>
-          <small>Build {health?.build || '20260908.7'}</small>
-        </div>
-      </div>
-    </aside>
-    <main>
-      <header>
-        <div><h1>{title}</h1><p>{message || 'Spotify / Apple Music → Plex'}</p></div>
-        {page !== 'settings' && <div className="actions">
-          <button disabled={busy} onClick={()=>run('Sync favorites', api.syncFavorites)}>Sync Favorites</button>
-          <button className="primary" disabled={busy} onClick={()=>run('Sync all', api.syncAll)}>Sync All</button>
-        </div>}
-      </header>
-      {checks.status && <div className="progress-banner" role="status" aria-live="polite">{checks.running&&<span className="spinner"/>}{checks.status}</div>}
-      {!detailKey && page==='dashboard' && <Dashboard health={health} playlists={playlists} refresh={refresh} onToggleFavorite={toggleFavorite} setMessage={setMessage} checks={checks} />}
-      {!detailKey && page==='playlists' && <Playlists playlists={playlists} refresh={refresh} run={run} onToggleFavorite={toggleFavorite} checks={checks} />}
-      {!detailKey && page==='missing' && <Missing tracks={missing} scope={scope} setScope={setScope} refresh={refresh} />}
-      {!detailKey && page==='settings' && <Settings setMessage={setMessage} refresh={refresh} />}
-      {detailKey && <PlaylistDetail key={detailKey} playlistKey={detailKey} refresh={refresh} checks={checks}/>}
-    </main>
-  </div>
+export default function App(){
+  const [route,setRoute]=useState(currentRoute)
+  useEffect(()=>{const f=()=>setRoute(currentRoute());window.addEventListener('hashchange',f);return()=>window.removeEventListener('hashchange',f)},[])
+  const page=route.startsWith('playlist/')?'playlists':route.startsWith('settings')?'settings':route
+  let detail='';try{if(route.startsWith('playlist/'))detail=decodeURIComponent(route.slice(9))}catch{}
+  const [playlists,setPlaylists]=useState<Playlist[]>([]),[missing,setMissing]=useState<MissingTrack[]>([]),[jobs,setJobs]=useState<Job[]>([]),[health,setHealth]=useState<any>({})
+  const [submitted,setSubmitted]=useState('')
+  const [message,setMessage]=useState(''),[globalQuery,setGlobalQuery]=useState(''),[search,setSearch]=useState<any>(null)
+  async function refresh(){const [p,m,j,h]=await Promise.all([api.playlists(),api.missing(),api.jobs(),api.health()]);setPlaylists(p);setMissing(m);setJobs(j);setHealth(h)}
+  useEffect(()=>{refresh().catch(e=>setMessage(e.message));const timer=setInterval(()=>refresh().catch(()=>{}),2500);return()=>clearInterval(timer)},[])
+  useEffect(()=>{let active=true;setSearch(null);if(!globalQuery.trim())return;const timer=setTimeout(()=>api.search(globalQuery.trim()).then(r=>{if(active)setSearch(r)}).catch(e=>{if(active)setMessage(e.message)}),300);return()=>{active=false;clearTimeout(timer)}},[globalQuery])
+  const enqueue:Enqueue=async(action,payload={})=>{try{const job=await api.enqueue(action,payload);setSubmitted(job.id);setMessage(`${actionName(action)} job queued. You can keep using Playlist Bridge.`);await refresh();return job}catch(e:any){setMessage(e.message);throw e}}
+  useEffect(()=>{const job=jobs.find(j=>j.id===submitted);if(job&&!activeJob(job)){setMessage(`${actionName(job.action)} ${job.status}${job.error?`: ${job.error}`:'.'}`);setSubmitted('')}},[jobs,submitted])
+  const active=jobs.filter(activeJob)
+  async function favorite(p:Playlist){try{await api.updatePlaylist(p.key,{favorite:!p.favorite});await refresh()}catch(e:any){setMessage(e.message)}}
+  return <div className="shell"><aside><div className="brand">Playlist Bridge</div><nav>{['dashboard','playlists','missing'].map(p=><button className={page===p?'active':''} key={p} onClick={()=>{location.hash=p}}>{p[0].toUpperCase()+p.slice(1)}</button>)}</nav><div className="sidebar-bottom"><button className={page==='settings'?'active':''} onClick={()=>{location.hash='settings'}}>Settings</button><div className="sidebar-version">{health.version||'2.0.0-beta.3'}</div></div></aside>
+  <main><header><div><h1>{detail?'Playlist details':page[0]?.toUpperCase()+page.slice(1)}</h1><p role="status">{message||'Spotify / Apple Music → Plex'}</p></div><label className="global-search">Search Playlist Bridge<input placeholder="Playlist name, track or artist" aria-label="Search Playlist Bridge" value={globalQuery} onChange={e=>setGlobalQuery(e.target.value)}/></label></header>
+    {globalQuery&&<section className="panel"><div className="panel-head"><h2>Search results</h2><button onClick={()=>setGlobalQuery('')}>Close search</button></div><p className="muted">Track search uses saved source lists, health results and mappings. Sync or check health to refresh the index.</p>{search?<><p>{search.playlists.length} playlists · {search.track_count} matching tracks {search.track_count>200?'(first 200 shown)':''}</p>{search.playlists.map((p:any)=><p key={p.key}><a href={link(p.key)} onClick={()=>setGlobalQuery('')}>{p.name}</a></p>)}{search.tracks.map((t:any,i:number)=><p key={i}>{t.title} — {t.artist} · <a href={link(t.playlist_key)} onClick={()=>setGlobalQuery('')}>{t.playlist_name}</a></p>)}</>:<p>Searching…</p>}</section>}
+    {!!active.length&&<div className="progress-banner"><span className="spinner"/><span>{active.length} active job(s) · {active.find(j=>j.status!=='queued')?.progress||'Queued'} <a href="#settings/jobs">View jobs / cancel</a></span></div>}
+    {page==='dashboard'&&<><section className="cards"><Stat label="Playlists" value={playlists.length}/><Stat label="Favorites" value={playlists.filter(p=>p.favorite).length}/><Stat label="Automatic" value={playlists.filter(p=>p.auto_sync).length}/><Stat label="Missing tracks" value={missing.length}/><Stat label="Health drift" value={playlists.filter(p=>p.health&&!p.health.healthy).length}/><Stat label="Health errors" value={playlists.filter(p=>p.health_attempt?.error).length}/><Stat label="Active jobs" value={active.length}/><Stat label="Never synced" value={playlists.filter(p=>!p.last_synced).length}/></section>{!health.plex_configured&&<p className="health-error">Plex is not configured. <a href="#settings">Open General settings</a></p>}<section className="panel"><h2>Quick actions</h2><Bulk enqueue={enqueue}/><p className="muted">All and Favorites include playlists with automatic runs disabled. Automatics uses only playlists with Auto enabled.</p></section><AddPlaylist jobs={jobs} enqueue={enqueue}/><section className="panel"><h2>Recent activity</h2>{jobs.slice(0,4).map(j=><JobRow key={j.id} job={j} refresh={refresh}/>)}{!jobs.length&&<p>No jobs yet.</p>}</section></>}
+    {page==='playlists'&&!detail&&<Playlists playlists={playlists} enqueue={enqueue} refresh={refresh} favorite={favorite}/>}
+    {detail&&<Detail key={detail} playlistKey={detail} latest={playlists.find(p=>p.key===detail)} enqueue={enqueue} refresh={refresh} jobs={jobs}/>}
+    {page==='missing'&&<Missing tracks={missing} enqueue={enqueue} refresh={refresh}/>}
+    {page==='settings'&&<Settings tab={route.split('/')[1]||'general'} jobs={jobs} refresh={refresh} setMessage={setMessage}/>}
+  </main></div>
 }
-
-function Dashboard({health, playlists, onToggleFavorite, checks}:{health:any, playlists:Playlist[], refresh:()=>Promise<void>, onToggleFavorite:(p:Playlist)=>Promise<void>, setMessage:(m:string)=>void,checks:HealthChecks}) {
-  const last = useMemo(() => playlists.filter(p=>p.last_synced).sort((a,b)=>String(b.last_synced).localeCompare(String(a.last_synced)))[0], [playlists])
-  return <>
-    {!health?.plex_configured && <p className="muted">Plex not configured — open Settings to connect your server.</p>}
-    <section className="cards">
-      <Stat label="Playlists" value={health?.playlists ?? '—'} />
-      <Stat label="Favorites" value={health?.favorites ?? '—'} />
-      <Stat label="Unresolved" value={health?.unresolved ?? '—'} warn />
-      <Stat label="LOST" value={health?.lost ?? '—'} danger />
-    </section>
-    <section className="panel">
-      <div className="panel-head"><div><h2>Playlist health</h2><p className="muted">Read-only live check of the source playlist URL against Plex. Results are saved; Plex and sync state stay unchanged.</p></div><button disabled={checks.running||!playlists.length} onClick={()=>checks.checkAll(playlists)}>Check All Health</button></div>
-      <div className="rows">{playlists.map(p=><HealthRow playlist={p} health={checks.results[p.key] || p.health} checking={!!checks.checking[p.key]} error={checks.errors[p.key]} disabled={checks.running} key={p.key} check={()=>checks.checkOne(p)} toggleFavorite={()=>onToggleFavorite(p)} />)}</div>
-      {!playlists.length && <p>No playlists registered yet.</p>}
-    </section>
-    <section className="panel"><h2>Last sync</h2><p>{last ? `${last.name} — ${new Date(last.last_synced!).toLocaleString()}` : 'No sync history yet.'}</p></section>
-  </>
+function Stat({label,value}:{label:string;value:number}){return <div className="stat"><span>{label}</span><strong>{value}</strong></div>}
+function Bulk({enqueue}:{enqueue:Enqueue}){const [error,setError]=useState('');async function run(action:string,scope:string){try{await enqueue(action,{scope})}catch(e:any){setError(e.message)}}return <><div className="actions wrap"><button onClick={()=>run('sync','all')}>Sync All</button><button onClick={()=>run('sync','favorites')}>Sync Favorites</button><button onClick={()=>run('sync','automatic')}>Sync Automatics</button><button onClick={()=>run('health','all')}>Check All Health</button></div>{error&&<p className="error">{error}</p>}</>}
+function AddPlaylist({jobs,enqueue}:{jobs:Job[];enqueue:Enqueue}){
+ const [url,setUrl]=useState(''),[favorite,setFavorite]=useState(false),[auto,setAuto]=useState(true),[id,setId]=useState(''),[analysisId,setAnalysisId]=useState(''),[error,setError]=useState(''),[pending,setPending]=useState(false)
+ const job=jobs.find(j=>j.id===id),analysis=jobs.find(j=>j.id===analysisId)
+ async function run(action:string){setPending(true);setError('');try{const j=await enqueue(action,{url,favorite,auto_sync:auto});setId(j.id);if(action==='analyze')setAnalysisId(j.id)}catch(e:any){setError(e.message)}finally{setPending(false)}}
+ const busy=pending||!!(job&&activeJob(job))
+ return <section className="panel"><h2>Add playlist</h2><p className="muted">Analyze checks the source and matching first. Add creates the Plex playlist and registers it. Both run as background jobs.</p><form onSubmit={e=>{e.preventDefault();run('analyze')}}><div className="add"><input required aria-label="New playlist URL" placeholder="Spotify or Apple Music playlist URL" value={url} onChange={e=>{setUrl(e.target.value);setAnalysisId('');setId('')}} disabled={busy}/><button disabled={busy||!url.trim()}>Analyze</button></div><div className="toolbar"><label><input type="checkbox" checked={favorite} onChange={e=>setFavorite(e.target.checked)} disabled={busy}/> Favorite</label><label><input type="checkbox" checked={auto} onChange={e=>setAuto(e.target.checked)} disabled={busy}/> Automatic runs</label><button type="button" className="primary" disabled={busy||!url.trim()} onClick={()=>run('add')}>Add Playlist</button></div></form>
+ {analysis?.status==='completed'&&analysis.result&&<p>{analysis.result.name} · {analysis.result.source_tracks} source · {analysis.result.matched} matched · {analysis.result.unresolved} unresolved</p>}{error&&<p role="alert" className="error">{error}</p>}{job&&<div role="status"><strong>{actionName(job.action)}: {job.status}</strong><p>{job.progress}</p>{job.error&&<p role="alert" className="error">{job.error}</p>}{job.action==='add'&&job.status==='completed'&&job.result?.key&&<p>Playlist added successfully: <a href={link(job.result.key)}>{job.result.name}</a></p>}<a href="#settings/jobs">View job details / cancel</a></div>}
+ </section>
 }
-
-function Stat({label,value,warn,danger}:{label:string,value:any,warn?:boolean,danger?:boolean}) {
-  return <div className={`stat ${warn?'warn':''} ${danger?'danger':''}`}><span>{label}</span><strong>{value}</strong></div>
+function Playlists({playlists,enqueue,refresh,favorite}:{playlists:Playlist[];enqueue:Enqueue;refresh:()=>Promise<void>;favorite:(p:Playlist)=>void}){
+ const [query,setQuery]=useState(''),[favorites,setFavorites]=useState(false),[automatic,setAutomatic]=useState(false),[sort,setSort]=useState('name'),[direction,setDirection]=useState('asc'),[error,setError]=useState('')
+ const rows=ordered(playlists.filter(p=>(!favorites||p.favorite)&&(!automatic||p.auto_sync)&&p.name.toLowerCase().includes(query.toLowerCase())),p=>(p as any)[sort],direction)
+ async function run(fn:()=>Promise<any>){try{await fn();await refresh()}catch(e:any){setError(e.message)}}
+ return <section className="panel"><Bulk enqueue={enqueue}/><div className="toolbar"><input aria-label="Filter playlists by name" placeholder="Search playlist name" value={query} onChange={e=>setQuery(e.target.value)}/><label><input type="checkbox" checked={favorites} onChange={e=>setFavorites(e.target.checked)}/> Favorites only</label><label><input type="checkbox" checked={automatic} onChange={e=>setAutomatic(e.target.checked)}/> Automatic only</label><label>Sort<select value={sort} onChange={e=>setSort(e.target.value)}><option value="name">Name</option><option value="last_synced">Last synced</option><option value="added_at">Last added</option></select></label><Direction value={direction} onChange={setDirection}/></div><p>{rows.length} of {playlists.length} playlists · Both filters together show automatic favorites.</p>{error&&<p className="error">{error}</p>}
+ {rows.map(p=><article className="playlist-card" key={p.key}><div className="panel-head"><div><button className={`star-button ${p.favorite?'favorite':''}`} aria-label={p.favorite?'Remove favorite':'Add favorite'} onClick={()=>favorite(p)}>{p.favorite?'★':'☆'}</button> <a href={link(p.key)}>{p.name}</a><small> · {p.source}</small></div><span className={`pill ${p.auto_sync?'on':'off'}`}>{p.auto_sync?'AUTO ON':'AUTO OFF'}</span></div><p className="muted">{p.saved_matches} saved matches · {p.unresolved} unresolved · Added: {p.added_at?stamp(p.added_at):'Unknown (older playlist)'}</p><HealthCard playlist={p}/><div className="actions wrap"><button onClick={()=>run(()=>enqueue('sync',{scope:'selected',playlist_keys:[p.key]}))}>Sync Now</button><button onClick={()=>run(()=>enqueue('health',{scope:'selected',playlist_keys:[p.key]}))}>Check Health</button><button onClick={()=>run(()=>api.updatePlaylist(p.key,{auto_sync:!p.auto_sync}))}>{p.auto_sync?'Disable automatic':'Enable automatic'}</button></div></article>)}{!rows.length&&<p>No playlists match these filters.</p>}
+ </section>
 }
-
-function StarButton({playlist,onClick}:{playlist:Playlist,onClick?:()=>void}) {
-  if (!onClick) return <span className={`star ${playlist.favorite?'favorite':''}`}>{playlist.favorite?'★':'☆'}</span>
-  return <button className={`star-button ${playlist.favorite?'favorite':''}`} onClick={onClick} title={playlist.favorite?'Remove from favorites':'Add to favorites'} aria-label={playlist.favorite?'Remove from favorites':'Add to favorites'}>{playlist.favorite?'★':'☆'}</button>
+function Missing({tracks,enqueue,refresh}:{tracks:MissingTrack[];enqueue:Enqueue;refresh:()=>Promise<void>}){
+ const [query,setQuery]=useState(''),[sort,setSort]=useState('occurrence_count'),[direction,setDirection]=useState('desc'),[selected,setSelected]=useState<MissingTrack|null>(null),[ignore,setIgnore]=useState<MissingTrack|null>(null),[error,setError]=useState('')
+ const rows=ordered(tracks.filter(t=>`${t.title} ${t.artist} ${t.album||''}`.toLowerCase().includes(query.toLowerCase())),t=>(t as any)[sort],direction)
+ return <section className="panel"><h2>Missing tracks</h2><p className="muted">An occurrence is one appearance of a track. A playlist may contain the same track twice: that is 2 occurrences in 1 playlist. Expand the counts to see where it appears.</p><div className="toolbar"><input aria-label="Search missing tracks" placeholder="Track, artist or album" value={query} onChange={e=>setQuery(e.target.value)}/><label>Sort<select value={sort} onChange={e=>setSort(e.target.value)}><option value="title">Name</option><option value="last_checked">Last checked</option><option value="occurrence_count">Occurrences</option><option value="playlist_count">Playlist count</option></select></label><Direction value={direction} onChange={setDirection}/></div>{error&&<p role="status">{error}</p>}
+ {rows.map((t,i)=><article className="playlist-card" key={`${t.title}-${t.artist}`}><div className="panel-head"><div><strong>{t.title}</strong><p>{t.artist} · {t.album||'N/A'}</p></div><div className="actions"><button onClick={()=>setSelected(t)}>Review Match</button><button onClick={()=>setIgnore(t)}>Ignore</button></div></div><small>Last checked by sync/match: {stamp(t.last_checked)}</small><details><summary>{t.occurrence_count} occurrences in {t.playlist_count} playlists</summary>{t.memberships.map(m=><p key={m.key}><a href={link(m.key)}>{m.name}</a> · {m.count} occurrence(s)</p>)}</details></article>)}{!rows.length&&<p>No missing tracks match this view.</p>}
+ {selected&&<MatchPicker track={selected} onClose={()=>setSelected(null)} onSave={async(c,keys)=>{await enqueue('fix_match',{title:selected.title,artist:selected.artist,album:selected.album||'',plex_id:c.plex_id,playlist_keys:keys});setError('Match fix queued. Follow progress in Jobs.')}}/>}
+ {ignore&&<IgnoreDialog track={ignore} close={()=>setIgnore(null)} done={async()=>{await refresh();setError('Ignore saved. Plex changes apply on the next sync.')}}/>}
+ </section>
 }
-
-function PlaylistRow({playlist,onToggleFavorite}:{playlist:Playlist,onToggleFavorite?:()=>void}) {
-  return <div className="playlist-row">
-    <StarButton playlist={playlist} onClick={onToggleFavorite}/>
-    <div className="grow"><a href={`#playlist/${encodeURIComponent(playlist.key)}`}>{playlist.name}</a><small>{playlist.source} · {playlist.saved_matches} matched · {playlist.unresolved} unresolved</small></div>
-    <span className={playlist.auto_sync?'pill on':'pill off'}>{playlist.auto_sync?'AUTO ON':'AUTO OFF'}</span>
-  </div>
+function IgnoreDialog({track,close,done}:{track:MissingTrack;close:()=>void;done:()=>Promise<void>}){
+ const [universal,setUniversal]=useState(false),[keys,setKeys]=useState(track.memberships.map(m=>m.key)),[error,setError]=useState(''),[busy,setBusy]=useState(false)
+ return <div className="modal-backdrop"><div className="modal" role="dialog" aria-modal="true" aria-label="Ignore track"><h2>Ignore {track.title}</h2><p>{track.artist}</p><label><input type="checkbox" checked={universal} onChange={e=>setUniversal(e.target.checked)}/> Ignore universally — all current and future playlists</label>{!universal&&track.memberships.map(m=><label className="playlist-choice" key={m.key}><input type="checkbox" checked={keys.includes(m.key)} onChange={e=>setKeys(e.target.checked?[...keys,m.key]:keys.filter(k=>k!==m.key))}/>{m.name}</label>)}<p className="muted">Ignored tracks will be skipped by matching and removed from Plex on the next sync. Restore ignored rules in General settings.</p>{error&&<p className="error">{error}</p>}<div className="actions"><button disabled={busy} onClick={close}>Cancel</button><button disabled={busy||(!universal&&!keys.length)} onClick={async()=>{setBusy(true);try{await api.ignore({title:track.title,artist:track.artist,album:track.album||'',universal,playlist_keys:keys});await done();close()}catch(e:any){setError(e.message)}finally{setBusy(false)}}}>Ignore track</button></div></div></div>
 }
-
-function HealthRow({playlist,health,checking,check,toggleFavorite,error,disabled}:{playlist:Playlist,health?:PlaylistHealth,checking:boolean,check:()=>void,toggleFavorite:()=>void,error?:string,disabled?:boolean}) {
-  const failure = error !== undefined ? error : playlist.health_attempt?.error
-  return <div className="health-row">
-    <div className="health-top"><StarButton playlist={playlist} onClick={toggleFavorite}/><div className="grow"><a href={`#playlist/${encodeURIComponent(playlist.key)}`}>{playlist.name}</a><small>{playlist.source}</small></div>{health && <span className={health?.healthy?'pill on':'pill off'}>{health?.healthy?'HEALTHY':'DRIFT'}</span>}<button onClick={check} disabled={checking||disabled}>{checking?'Checking…':'Check Health'}</button></div>
-    {checking&&<p className="check-status" role="status"><span className="spinner"/>Checking health… This can take a little time for large playlists.</p>}
-    {!checking&&failure&&<div className="health-error" role="alert"><strong>{failure}</strong><p>{error===undefined&&playlist.health_attempt?.attempted_at&&`Last attempt: ${new Date(playlist.health_attempt.attempted_at).toLocaleString()}. `}{health?'Metrics below are from the last successful check.':'No successful health result yet.'} <a href="#settings">Open Settings</a></p></div>}
-    <details><summary>Health · Last successful check: {health?.checked_at ? new Date(health?.checked_at).toLocaleString() : 'Never'}</summary><div className="health-grid">
-      <HealthMetric label="Source" value={health?.source_tracks ?? '--'}/>
-      <HealthMetric label="Plex playlist" value={health?.plex_playlist_tracks ?? '--'}/>
-      <HealthMetric label="Matched in library" value={health?.matched_in_library ?? '--'}/>
-      <HealthMetric label="Unresolved" value={health?.unresolved ?? '--'} warn={(health?.unresolved ?? 0)>0}/>
-      <HealthMetric label="Ignored" value={health?.ignored ?? '--'}/>
-      <HealthMetric label="Missing from Plex" value={health?.missing_from_plex_playlist ?? '--'} warn={(health?.missing_from_plex_playlist ?? 0)>0}/>
-      <HealthMetric label="Extra in Plex" value={health?.extra_in_plex_playlist ?? '--'} warn={(health?.extra_in_plex_playlist ?? 0)>0}/>
-      <HealthMetric label="Source + / −" value={`${health?.source_added_since_last_sync ?? '--'} / ${health?.source_removed_since_last_sync ?? '--'}`} warn={(health?.source_added_since_last_sync ?? 0)>0||(health?.source_removed_since_last_sync ?? 0)>0}/>
-    </div></details>
-  </div>
+function Detail({playlistKey,latest,enqueue,refresh,jobs}:{playlistKey:string;latest?:Playlist;enqueue:Enqueue;refresh:()=>Promise<void>;jobs:Job[]}){
+ const [data,setData]=useState<any>(null),[error,setError]=useState(''),[query,setQuery]=useState(''),[selected,setSelected]=useState<any>(null),[loading,setLoading]=useState(false)
+ async function load(){setLoading(true);setError('');try{setData(await api.detail(playlistKey))}catch(e:any){setError(e.message)}finally{setLoading(false)}}
+ useEffect(()=>{load()},[playlistKey])
+ const completed=jobs.filter(j=>j.status==='completed').map(j=>j.id).join(',')
+ useEffect(()=>{if(data)load()},[completed])
+ async function run(action:string){try{await enqueue(action,{scope:'selected',playlist_keys:[playlistKey]})}catch(e:any){setError(e.message)}}
+ return <section className="panel"><a href="#playlists">← Back to playlists</a>{error&&<p role="alert" className="error">{error}</p>}{loading&&<p role="status">Loading source tracks and Plex matches…</p>}{data?<><h2>{data.playlist.name}</h2><p>{data.metadata.description}</p><div className="actions"><button onClick={()=>run('sync')}>Sync Now</button><button onClick={()=>run('health')}>Check Health</button><button disabled={loading} onClick={load}>Refresh tracks</button></div><HealthCard playlist={latest||data.playlist}/><input className="track-search" placeholder="Search within this playlist" aria-label="Search within playlist" value={query} onChange={e=>setQuery(e.target.value)}/>{data.tracks.filter((t:any)=>`${t.title} ${t.artist} ${t.album||''} ${t.match?.title||''}`.toLowerCase().includes(query.toLowerCase())).map((t:any)=><div className="missing-row" key={t.index}><div className="grow"><strong>{t.index+1}. {t.title}</strong><small>{t.artist} · {t.album||'N/A'}</small><small>Plex: {t.match?`${t.match.title} — ${t.match.artist}`:'No match'}</small></div><span className="pill">{t.status}</span><button disabled={t.status==='Ignored'} onClick={()=>setSelected(t)}>{t.plex_id?'Fix Match':'Review Match'}</button></div>)}</>:!loading&&<button onClick={load}>Retry loading playlist</button>}{selected&&<MatchPicker track={selected} playlistKey={playlistKey} onClose={()=>setSelected(null)} onSave={async(c,keys)=>{await enqueue('fix_match',{title:selected.title,artist:selected.artist,album:selected.album||'',plex_id:c.plex_id,playlist_keys:keys,replace_playlist_key:playlistKey});await refresh()}}/>}</section>
 }
-
-function HealthMetric({label,value,warn}:{label:string,value:any,warn?:boolean}) {
-  return <div className={`health-metric ${warn?'health-warn':''}`}><span>{label}</span><strong>{value}</strong></div>
-}
-
-function Playlists({playlists,refresh,run,onToggleFavorite,checks}:{playlists:Playlist[],refresh:()=>Promise<void>,run:(l:string,a:()=>Promise<any>)=>Promise<void>,onToggleFavorite:(p:Playlist)=>Promise<void>,checks:HealthChecks}) {
-  const [url,setUrl]=useState('')
-  const [analysis,setAnalysis]=useState<any>(null)
-  const [favorite,setFavorite]=useState(false)
-  const [autoSync,setAutoSync]=useState(true)
-  const [error,setError]=useState('')
-  async function analyze(){setError('');setAnalysis(null);try{setAnalysis(await api.analyzePlaylist(url))}catch(e:any){setError(e.message)}}
-  async function add(){try{await api.addPlaylist({url,favorite,auto_sync:autoSync});setUrl('');setAnalysis(null);await refresh()}catch(e:any){setError(e.message)}}
-  return <>
-    <section className="panel"><h2>Add playlist</h2><div className="add"><input value={url} onChange={e=>setUrl(e.target.value)} placeholder="Paste Spotify or Apple Music playlist URL"/><button onClick={analyze}>Analyze</button></div>
-      {error&&<p className="error">{error}</p>}
-      {analysis&&<div className="analysis"><div><strong>{analysis.name}</strong><p>{analysis.source_tracks} source · {analysis.matched} matched · {analysis.unresolved} unresolved</p></div><button className={`star-button add-star ${favorite?'favorite':''}`} onClick={()=>setFavorite(!favorite)} title="Favorite this playlist">{favorite?'★':'☆'}</button><label><input type="checkbox" checked={autoSync} onChange={e=>setAutoSync(e.target.checked)}/> Auto Sync</label><button className="primary" onClick={add}>Add Playlist</button></div>}
-    </section>
-    <section className="panel"><h2>Registered playlists</h2>{playlists.map(p=><div className="manage-row" key={p.key}><HealthRow playlist={p} health={checks.results[p.key]||p.health} error={checks.errors[p.key]} checking={!!checks.checking[p.key]} disabled={checks.running} check={()=>checks.checkOne(p)} toggleFavorite={()=>onToggleFavorite(p)}/><div className="row-actions"><button onClick={()=>run(`Sync ${p.name}`,()=>api.syncOne(p.key))}>Sync</button><button onClick={async()=>{await api.updatePlaylist(p.key,{auto_sync:!p.auto_sync});await refresh()}}>{p.auto_sync?'Disable Auto':'Enable Auto'}</button></div></div>)}</section>
-  </>
-}
-
-function Missing({tracks,scope,setScope,refresh}:{tracks:MissingTrack[],scope:'all'|'favorites',setScope:(s:'all'|'favorites')=>void,refresh:()=>Promise<void>}) {
-  const [selected,setSelected]=useState<MissingTrack|null>(null)
-  const [error,setError]=useState('')
-  function review(track:MissingTrack){setSelected(track);setError('')}
-  return <section className="panel"><div className="panel-head"><h2>Missing tracks</h2><div><button className={scope==='all'?'active-tab':''} onClick={()=>setScope('all')}>All</button><button className={scope==='favorites'?'active-tab':''} onClick={()=>setScope('favorites')}>★ Favorites</button></div></div>{error&&<p className={error.startsWith('Saved')?'success':'error'}>{error}</p>}
-    <div className="rows">{tracks.map((t,i)=><div className="missing-row" key={`${t.artist}-${t.title}-${i}`}><div className="grow"><strong>{t.title}</strong><small>{t.artist} {t.album?`· ${t.album}`:''} · {t.occurrence_count} occurrence(s) / {t.playlist_count} playlist(s)</small></div>{t.lost_occurrence_count?<span className="pill lost">LOST {t.lost_occurrence_count}</span>:null}<button onClick={()=>review(t)}>Review Match</button></div>)}</div>
-    {selected&&<MatchPicker track={selected} onClose={()=>setSelected(null)} onSave={async(candidate,keys)=>{
-      const result=await api.saveMatch(selected,candidate.plex_id,{playlist_keys:keys})
-      setError(`Saved across ${result.affected} occurrence(s) and synced ${result.synced_playlists} affected playlist(s)`)
-      await refresh()
-    }}/>}
-
-  </section>
-}
-
-function Settings({setMessage,refresh}:{setMessage:(m:string)=>void,refresh:()=>Promise<void>}) {
-  const [url,setUrl]=useState('')
-  const [token,setToken]=useState('')
-  const [tokenHint,setTokenHint]=useState('')
-  const [libraries,setLibraries]=useState<PlexLibrary[]>([])
-  const [libraryKey,setLibraryKey]=useState('')
-  const [libraryName,setLibraryName]=useState('')
-  const [busy,setBusy]=useState(false)
-  const [status,setStatus]=useState('')
-
-  useEffect(()=>{
-    api.plexSettings().then(settings=>{
-      setUrl(settings.url||'')
-      setTokenHint(settings.token_hint||'')
-      setLibraryKey(settings.music_library_key||'')
-      setLibraryName(settings.music_library_name||'')
-    }).catch(e=>setStatus(e.message))
-  },[])
-
-  async function discover(){
-    setBusy(true); setStatus('Connecting to Plex…')
-    try{
-      const result=await api.discoverPlex({url,token})
-      setLibraries(result.libraries)
-      if (!libraryKey && result.libraries.length===1) setLibraryKey(result.libraries[0].key)
-      setStatus(`Connected. Found ${result.libraries.length} music librar${result.libraries.length===1?'y':'ies'}.`)
-    }catch(e:any){setStatus(e.message)}
-    finally{setBusy(false)}
-  }
-
-  async function save(){
-    if(!libraryKey){setStatus('Select a music library first.');return}
-    setBusy(true); setStatus('Saving Plex settings…')
-    try{
-      const result=await api.savePlex({url,token,music_library_key:libraryKey})
-      setToken('')
-      setTokenHint(result.token_hint||'')
-      setLibraryName(result.music_library_name||'')
-      setStatus(`Connected to Plex · ${result.music_library_name}`)
-      setMessage('Plex configuration saved')
-      await refresh()
-    }catch(e:any){setStatus(e.message)}
-    finally{setBusy(false)}
-  }
-
-  return <><section className="panel settings-panel">
-    <div className="panel-head"><div><h2>Plex configuration</h2><p className="muted">Configure the Plex server used by Playlist Bridge.</p></div>{libraryName&&<span className="pill on">{libraryName}</span>}</div>
-    <div className="form-grid">
-      <label>Plex server URL<input value={url} onChange={e=>setUrl(e.target.value)} placeholder="http://plex-server:32400"/></label>
-      <label>Plex token<input type="password" value={token} onChange={e=>setToken(e.target.value)} placeholder={tokenHint?`Leave blank to keep ${tokenHint}`:'Enter Plex token'}/></label>
-      <label>Music library<select value={libraryKey} onChange={e=>setLibraryKey(e.target.value)}><option value="">{libraryName?`${libraryName} (current)`:'Discover libraries first'}</option>{libraries.map(l=><option key={l.key} value={l.key}>{l.name}</option>)}</select></label>
-    </div>
-    <div className="settings-actions"><button disabled={busy||!url} onClick={discover}>Test & Discover Libraries</button><button className="primary" disabled={busy||!url||!libraryKey} onClick={save}>Save Plex Settings</button></div>
-    {status&&<p className={status.startsWith('Connected')?'success':'muted'}>{status}</p>}
-  </section><Logs/></>
-}
-
-function PlaylistDetail({playlistKey,refresh,checks}:{playlistKey:string,refresh:()=>Promise<void>,checks:HealthChecks}) {
-  const [data,setData]=useState<any>(null)
-  const [error,setError]=useState('')
-  const [busy,setBusy]=useState(false)
-  const [selected,setSelected]=useState<any>(null)
-  async function load(){setData(await api.detail(playlistKey))}
-  useEffect(()=>{setData(null);load().catch(e=>setError(e.message))},[playlistKey])
-  async function action(fn:()=>Promise<any>){setBusy(true);setError('');try{await fn();await load();await refresh()}catch(e:any){setError(e.message)}finally{setBusy(false)}}
-  function review(t:any){setSelected(t);setError('')}
-  return <section className="panel"><a href="#playlists">← Back to playlists</a>{error&&<p className="error">{error}</p>}
-    {!data?<p>Loading playlist…</p>:<><h2>{data.playlist.name}</h2><p>{data.playlist.source} · {data.tracks.length} tracks · Last synced: {data.playlist.last_synced ? new Date(data.playlist.last_synced).toLocaleString() : 'Never'}</p>
-    <p>{data.metadata.description}</p><div className="actions"><button disabled={busy} onClick={()=>action(()=>api.syncOne(playlistKey))}>Sync Now</button></div>
-    <HealthRow playlist={data.playlist} health={checks.results[playlistKey]||data.playlist.health} error={checks.errors[playlistKey]} checking={!!checks.checking[playlistKey]} disabled={checks.running||busy} check={()=>checks.checkOne(data.playlist)} toggleFavorite={()=>action(()=>api.updatePlaylist(playlistKey,{favorite:!data.playlist.favorite}))}/>
-    {data.tracks.map((t:any)=><div className="missing-row" key={t.index}><div className="grow"><strong>{t.index+1}. {t.title}</strong><small>{t.artist} · {t.album || 'N/A'}</small><small>Plex: {t.match ? `${t.match.title} · ${t.match.artist} · ${t.match.album || 'N/A'}` : '—'}</small></div><span className="pill">{t.status}</span><button disabled={busy || t.status==='Ignored'} onClick={()=>review(t)}>{t.plex_id?'Fix Match':'Review Match'}</button></div>)}</>}
-    {selected&&<MatchPicker track={selected} playlistKey={playlistKey} onClose={()=>setSelected(null)} onSave={async(candidate,keys)=>{
-      await api.saveMatch(selected,candidate.plex_id,{replace_playlist_key:playlistKey,playlist_keys:keys})
-      await load();await refresh()
-    }}/>}
-
-  </section>
-}
-
+function Settings({tab,jobs,refresh,setMessage}:{tab:string;jobs:Job[];refresh:()=>Promise<void>;setMessage:(s:string)=>void}){return <><div className="settings-tabs">{['general','logs','jobs'].map(t=><a className={tab===t?'active-tab':''} href={`#settings/${t}`} key={t}>{t==='jobs'?'Jobs & schedules':t[0].toUpperCase()+t.slice(1)}</a>)}</div>{tab==='general'&&<><General refresh={refresh} setMessage={setMessage}/><Ignored/></>}{tab==='logs'&&<Logs/>}{tab==='jobs'&&<JobsPanel jobs={jobs} refresh={refresh}/>}</>}
+function Ignored(){const [rows,setRows]=useState<any[]>([]),[error,setError]=useState('');const load=()=>api.ignored().then(setRows);useEffect(()=>{load().catch(e=>setError(e.message))},[]);return <section className="panel"><h2>Ignored tracks</h2><p className="muted">Restoring a rule lets matching consider the track on its next sync.</p>{error&&<p className="error">{error}</p>}{rows.map((r,i)=><p key={i}>{r.title} — {r.artist} · {r.playlist_key==='__global__'?'Universal':r.playlist_key} <button onClick={async()=>{try{await api.restoreIgnore({playlist_key:r.playlist_key,ignore_key:r.ignore_key});await load()}catch(e:any){setError(e.message)}}}>Restore</button></p>)}{!rows.length&&<p>No ignored tracks.</p>}</section>}
 function Logs(){
-  const [entries,setEntries]=useState<Awaited<ReturnType<typeof api.logs>>['entries']>([])
-  const [level,setLevel]=useState('')
-  const [busy,setBusy]=useState(false)
-  const [error,setError]=useState('')
-  async function load(){setBusy(true);setError('');try{setEntries((await api.logs(level)).entries)}catch(e:any){setError(e.message)}finally{setBusy(false)}}
-  useEffect(()=>{load()},[level])
-  return <section className="panel"><div className="panel-head"><div><h2>Logs</h2><p className="muted">Recent web activity, health checks and sync output. The latest 1,000 entries are retained across restarts; this view shows up to 200.</p></div><button onClick={load} disabled={busy}>{busy?'Loading…':'Refresh logs'}</button></div>
-    <label>Show <select aria-label="Log level" value={level} onChange={e=>setLevel(e.target.value)}><option value="">All levels</option><option value="ERROR">Errors</option><option value="INFO">Information</option></select></label>
-    {error&&<p className="error" role="alert">{error}</p>}
-    {!busy&&!entries.length&&<p>No log entries for this filter yet.</p>}
-    <div className="log-view">{entries.map(row=><article className="log-entry" key={row.id}><small>{new Date(row.created_at).toLocaleString()} · {row.level} · {row.operation}</small><pre>{row.message}</pre></article>)}</div>
-  </section>
+ const [entries,setEntries]=useState<any[]>([]),[level,setLevel]=useState(''),[action,setAction]=useState(''),[error,setError]=useState(''),[clear,setClear]=useState(false),[busy,setBusy]=useState(false)
+ async function load(){setBusy(true);try{setEntries((await api.logs(level,action)).entries);setError('')}catch(e:any){setError(e.message)}finally{setBusy(false)}}
+ useEffect(()=>{load()},[level,action])
+ return <section className="panel"><div className="panel-head"><h2>Logs</h2><div className="actions"><button disabled={busy} onClick={load}>Refresh logs</button><button onClick={()=>setClear(true)}>Clear logs</button></div></div><p className="muted">Latest 1,000 entries retained; up to 200 shown. Tokens are redacted. Jobs retain their own results when logs are cleared.</p>{clear&&<div className="health-error">Clear all stored application logs? <button onClick={async()=>{try{await api.clearLogs();setClear(false);await load()}catch(e:any){setError(e.message)}}}>Confirm clear</button><button onClick={()=>setClear(false)}>Cancel</button></div>}<div className="toolbar"><label>Level<select value={level} onChange={e=>setLevel(e.target.value)}><option value="">All levels</option><option value="INFO">Information</option><option value="ERROR">Errors</option></select></label><label>Action<select value={action} onChange={e=>setAction(e.target.value)}><option value="">All actions</option>{['sync','health','analyze','add','fix_match','ignore','startup','jobs'].map(a=><option key={a} value={a}>{actionName(a)}</option>)}</select></label></div>{error&&<p className="error">{error}</p>}<div className="log-view">{entries.map(row=><article className="log-entry" key={row.id}><small>{stamp(row.created_at)} · {row.level} · {actionName(row.operation)}</small><pre>{row.message}</pre></article>)}</div>{!entries.length&&<p>No matching logs.</p>}</section>
 }

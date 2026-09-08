@@ -48,4 +48,4 @@ cron.log
 *.zip
 
 # Development Test Scripts
-/tests/**/*.py
+/tests/*

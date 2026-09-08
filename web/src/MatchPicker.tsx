@@ -56,7 +56,7 @@ export default function MatchPicker({track,playlistKey,onClose,onSave}:{
       <div className="modal-header"><h2 id="match-title">Choose a match</h2><button disabled={saving} onClick={onClose} aria-label="Close match picker">✕ Close</button></div>
       <div className="modal-body">
         <h3>{track.title}</h3><p>{track.artist} · {track.album||'N/A'}</p>
-        <p className="muted">Select a candidate, then Save Match. Cancel leaves the current match unchanged.</p>
+        <p className="muted">Select a candidate, then Save Match to queue the update. Cancel leaves the current match unchanged.</p>
         <label><input type="checkbox" checked={all} disabled={saving} onChange={e=>setAll(e.target.checked)}/> Apply to all matching unresolved occurrences</label>
         {!all&&playlists.map(p=><label className="playlist-choice" key={p.key}><input type="checkbox" disabled={saving||p.key===playlistKey} checked={keys.includes(p.key)} onChange={e=>setKeys(e.target.checked?[...keys,p.key]:keys.filter(k=>k!==p.key))}/>{p.name}{p.key===playlistKey?' (current playlist)':''}</label>)}
         {playlistKey&&<p className="muted">The current playlist's match will also be replaced. Only affected playlists sync.</p>}
@@ -67,7 +67,7 @@ export default function MatchPicker({track,playlistKey,onClose,onSave}:{
           {candidates.map(c=><button type="button" className={`candidate ${choice?.plex_id===c.plex_id?'chosen':''}`} aria-pressed={choice?.plex_id===c.plex_id} disabled={saving} key={c.plex_id} onClick={()=>setChoice(c)}><span><strong>{c.title}</strong><small>{c.artist} · {c.album||'N/A'}</small></span><b>{c.score}%</b></button>)}
         </>}
       </div>
-      <div className="modal-footer"><button disabled={saving} onClick={onClose}>Cancel</button><span role="status">{saving?'Saving and syncing affected playlists…':choice?`Selected: ${choice.title}`:'No changes saved'}</span><button className="primary" disabled={saving||loading||!choice||(!all&&!keys.length)} onClick={save}>{saving?'Saving…':'Save Match'}</button></div>
+      <div className="modal-footer"><button disabled={saving} onClick={onClose}>Cancel</button><span role="status">{saving?'Queuing match update…':choice?`Selected: ${choice.title}`:'No changes saved'}</span><button className="primary" disabled={saving||loading||!choice||(!all&&!keys.length)} onClick={save}>{saving?'Queuing…':'Save Match'}</button></div>
     </div>
   </div>
 }

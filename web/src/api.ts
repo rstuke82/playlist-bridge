@@ -1,3 +1,5 @@
+export type Job = {id:string;action:string;status:string;progress:string;error?:string;payload:any;result:any;created_at:string;started_at?:string;finished_at?:string}
+export const activeJob = (job:Job) => ['queued','running','cancelling'].includes(job.status)
 export type Playlist = {
   key: string
   name: string
@@ -5,6 +7,7 @@ export type Playlist = {
   source_url: string
   favorite: boolean
   auto_sync: boolean
+  added_at?: string | null
   last_synced?: string | null
   health?: PlaylistHealth
   health_attempt?: {attempted_at:string; error:string|null}
@@ -29,6 +32,7 @@ export type PlaylistHealth = {
   source_removed_since_last_sync: number
   healthy: boolean
   checked_at: string
+  drift_details?: Record<string, any[]>
   read_only: boolean
 }
 
@@ -54,6 +58,8 @@ export type MissingTrack = {
   playlist_count: number
   lost_occurrence_count?: number
   playlists: string[]
+  last_checked?: string | null
+  memberships: {key:string;name:string;count:number;last_checked?:string}[]
 }
 
 export type Candidate = {
@@ -83,7 +89,19 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  logs: (level:string) => request<{entries:{id:number;created_at:string;level:string;operation:string;message:string}[];retention:number}>(`/api/settings/logs?limit=200${level?`&level=${level}`:''}`),
+  jobs: () => request<Job[]>('/api/jobs'),
+  enqueue: (action:string,payload:any={}) => request<Job>('/api/jobs',{method:'POST',body:JSON.stringify({action,payload})}),
+  cancel: (id:string) => request<Job>(`/api/jobs/${id}/cancel`,{method:'POST'}),
+  schedules: () => request<any[]>('/api/schedules'),
+  saveSchedule: (data:any,id?:string) => request<any>(`/api/schedules${id?`/${id}`:''}`,{method:id?'PUT':'POST',body:JSON.stringify(data)}),
+  deleteSchedule: (id:string) => request<any>(`/api/schedules/${id}`,{method:'DELETE'}),
+  runSchedule: (id:string) => request<Job>(`/api/schedules/${id}/run`,{method:'POST'}),
+  ignore: (data:any) => request<any>('/api/missing/ignore',{method:'POST',body:JSON.stringify(data)}),
+  ignored: () => request<any[]>('/api/ignored'),
+  restoreIgnore: (data:any) => request<any>('/api/ignored/restore',{method:'POST',body:JSON.stringify(data)}),
+  search: (q:string) => request<any>(`/api/search?q=${encodeURIComponent(q)}`),
+  clearLogs: () => request<any>('/api/settings/logs',{method:'DELETE'}),
+  logs: (level:string,action='') => request<{entries:{id:number;created_at:string;level:string;operation:string;message:string}[];retention:number}>(`/api/settings/logs?limit=200${level?`&level=${level}`:''}${action?`&action=${encodeURIComponent(action)}`:''}`),
   detail: (key: string) => request<any>(`/api/playlists/${encodeURIComponent(key)}/detail`),
   health: () => request<any>('/api/health'),
   playlists: () => request<Playlist[]>('/api/playlists'),
@@ -104,7 +122,7 @@ export const api = {
   candidates: (track: Pick<MissingTrack, 'title' | 'artist' | 'album'> & { query?: string }) =>
     request<Candidate[]>('/api/missing/candidates', { method: 'POST', body: JSON.stringify(track) }),
   saveMatch: (track: MissingTrack, plex_id: string, options: {playlist_keys?: string[]; replace_playlist_key?: string} = {}) =>
-    request<{ affected: number; synced_playlists: number }>('/api/missing/match', {
+    request<Job>('/api/missing/match', {
       method: 'POST',
       body: JSON.stringify({ title: track.title, artist: track.artist, album: track.album || '', plex_id, ...options }),
     }),

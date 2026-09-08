@@ -1,3 +1,7 @@
+# v2.0.0-beta.3
+
+Overview dashboard; background jobs and cron schedules; safe job cancellation; detailed health drift; last-sync dates; universal ignore and linked missing memberships; playlist/missing sorting and filters; track and playlist search; improved add feedback; Settings sections and log controls. SQLite schema 3. Separate build numbers removed.
+
 # v2.0.0-beta.2 — build 20260908.7
 
 - Health checks show running indicators, numbered batch progress, and completion/failure status across navigation.

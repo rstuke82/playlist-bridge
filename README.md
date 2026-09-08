@@ -1,21 +1,20 @@
 # Playlist Bridge
 
-**Version:** 2.0.0-beta.2  
-**Build:** 20260908.7
+**Version:** 2.0.0-beta.3
 
 Playlist Bridge syncs public **Spotify** and **Apple Music** playlists to playlists in your local **Plex music library**.
 
 Version 2.0 adds a self-hosted **React + TypeScript** web interface with a **FastAPI** backend while retaining the existing matching engine, CLI, with SQLite runtime storage.
 
-> **Beta software:** back up your Playlist Bridge JSON state files before installing a new beta build.
+> **Beta software:** back up the complete data directory with the app stopped before upgrading.
 
 ## Current beta features
 
-Beta 2 adds Settings logs, visible health-check progress and actionable Plex failures, consistent playlist navigation, and an explicit Save Match / Cancel workflow.
+Beta 3 adds an overview dashboard, detailed health drift, persistent background jobs and cron schedules, universal ignore rules, playlist filters and sorting, track search, and action-filtered logs. Releases now use the version alone, without a separate build number.
 
 - React + TypeScript web interface
 - FastAPI backend
-- Dashboard with live, read-only playlist health checks
+- Dashboard statistics and bulk actions; read-only health details on Playlists
 - Add and analyze Spotify or Apple Music playlists from the web UI
 - Sync all playlists, favorites, or individual playlists
 - Clickable favorite stars and Auto Sync controls
@@ -90,24 +89,22 @@ docker compose up -d --no-build
 ```
 
 The default image is `ghcr.io/rstuke82/playlist-bridge:beta`. This archive does not publish an image.
-To pin this build, set `PLAYLIST_BRIDGE_IMAGE=ghcr.io/rstuke82/playlist-bridge:2.0.0-beta.2-build.20260908.7`
-in `.env` once that tag is published. The `beta` and `2.0.0-beta.2` tags may advance; the build tag identifies this build.
+To pin this build, set `PLAYLIST_BRIDGE_IMAGE=ghcr.io/rstuke82/playlist-bridge:2.0.0-beta.3`
+in `.env` once that tag is published. The `beta` tag advances between releases; use the version tag to select beta 3.
 Beta images should never be tagged `latest`.
 
 Maintainers can build and tag for GHCR with:
 
 ```bash
 docker build --build-arg VCS_REF="$(git rev-parse HEAD)" \
-  -t ghcr.io/rstuke82/playlist-bridge:2.0.0-beta.2-build.20260908.7 \
-  -t ghcr.io/rstuke82/playlist-bridge:2.0.0-beta.2 \
+  -t ghcr.io/rstuke82/playlist-bridge:2.0.0-beta.3 \
   -t ghcr.io/rstuke82/playlist-bridge:beta .
 docker login ghcr.io
-docker push ghcr.io/rstuke82/playlist-bridge:2.0.0-beta.2-build.20260908.7
-docker push ghcr.io/rstuke82/playlist-bridge:2.0.0-beta.2
+docker push ghcr.io/rstuke82/playlist-bridge:2.0.0-beta.3
 docker push ghcr.io/rstuke82/playlist-bridge:beta
 ```
 
-The image includes OCI title, description, source, version, revision, and a separate build label.
+The image includes OCI title, description, source, version, and revision labels.
 See the [Dockerfile reference](https://docs.docker.com/reference/dockerfile/) and
 [GitHub Container Registry documentation](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry).
 
@@ -319,7 +316,7 @@ Dry-run automated sync:
 python sync.py --sync-all --dry-run
 ```
 
-Show the 2.0 beta version/build:
+Show the 2.0 beta version:
 
 ```bash
 python -m playlist_bridge version
@@ -327,9 +324,9 @@ python -m playlist_bridge version
 
 ## Playlist health
 
-The Dashboard health check is intentionally **read-only**. It fetches the current source playlist URL and compares it with the Plex library and destination playlist without performing a sync.
+The playlist health check is intentionally **read-only**. It fetches the current source playlist URL and compares it with the Plex library and destination playlist without performing a sync.
 
-Each playlist has an independently collapsible Health section with placeholders before its first check and a Last updated timestamp. Results persist across navigation and restarts. Check All Health updates each row as its check completes and shows “Checking playlist X of Y”. Progress continues across page navigation. Connection failures appear beside the playlist with a Settings link and are preserved across refresh/restarts; the last successful metrics remain visible and are labeled as such.
+Each playlist has an independently collapsible Health section with placeholders before its first check and a Last updated timestamp. Results persist across navigation and restarts. Check All Health updates each row as its check completes and shows its current stage in the background job banner. Progress continues across page navigation. Connection failures appear beside the playlist with a Settings link and are preserved across refresh/restarts; the last successful metrics remain visible and are labeled as such.
 
 A health result includes:
 
@@ -359,6 +356,22 @@ The 2.0 beta series is an architectural transition. The existing matching engine
 
 ## Settings logs
 
-Settings includes a read-only Logs viewer with Refresh and level filtering. It shows recent web operations, health failures, and captured sync output, newest first. The latest 1,000 entries are stored in SQLite; the viewer shows up to 200. Plex tokens and recognized credentials are redacted. This is an application activity log, not a live Docker console or historical CLI log importer. Docker process/startup failures before the application opens its database remain available through `docker compose logs`.
+Settings includes a Logs viewer with Refresh, level and action filters, and Clear logs. It shows recent web operations, health failures, and captured sync output, newest first. The latest 1,000 entries are stored in SQLite; the viewer shows up to 200. Plex tokens and recognized credentials are redacted. This is an application activity log, not a live Docker console or historical CLI log importer. Docker process/startup failures before the application opens its database remain available through `docker compose logs`.
 
-Beta 1 SQLite databases upgrade automatically to schema 2, adding the log table while preserving existing runtime state and health results. Back up your data directory with the app stopped before upgrading. Beta 1 cannot open the newer schema; use your backup to roll back.
+Beta 1 and beta 2 SQLite databases upgrade automatically to schema 3, retaining runtime state and health results and adding persistent jobs and schedules. Earlier betas cannot open schema 3; restore your backup to roll back.
+
+## Background jobs and schedules
+
+Settings is organized into General, Logs, and Jobs. Web sync, health, analyze, add, and match-save operations enter a persistent SQLite queue. One worker executes jobs in the background; progress and results remain available after navigation or refresh. Sync All, Favorites, and Automatics are available on both Dashboard and Playlists. The Automatic flag selects playlists for automatic scopes; configure a schedule to run them periodically.
+
+Create sync or health schedules using a five-field cron expression and an IANA timezone (for example, `0 3 * * *` with `America/Chicago`). Schedules can be edited, paused, deleted, or run manually. The web backend must be running. Missed triggers are coalesced into one run, and a schedule does not overlap itself. Queued jobs survive restart; jobs interrupted during execution are marked interrupted and are not replayed automatically.
+
+Cancellation is cooperative: queued jobs stop immediately; running jobs stop at safe checkpoints. An in-flight network call or playlist update can finish first. Completed Plex changes and saved manual matches are retained. Restarting the app is not an undo operation. Existing CLI commands remain synchronous and retain their matching behavior.
+
+## Finding and organizing music
+
+Dashboard shows statistics and Add Playlist, including analysis, queue status, stages, errors, and a link to the registered playlist. Playlists supports combined Favorites and Automatic filters, name search, and ascending/descending sorting by name, last synced, or last added. Historical playlists without an added timestamp show an unknown date. Each playlist shows last synced and last successful health check; expand Health to see named missing/extra destination tracks, unresolved tracks, and source additions/removals. Run a fresh check to populate detailed drift for old results.
+
+Global search finds playlist names and tracks from saved source snapshots, health previews, missing records, and mappings; it does not search external music services. Open a playlist for its live source list and track filtering.
+
+Missing sorts by name, last checked, occurrences, or playlist count. Occurrences counts repeated track entries; playlist count counts distinct registered playlists. Expand memberships to navigate to each playlist. Ignore can apply to selected playlists or universally to current and future matching occurrences. Ignore changes local matching rules; the next sync updates Plex. Restore ignored rules from General settings.

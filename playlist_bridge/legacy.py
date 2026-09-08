@@ -437,8 +437,7 @@ except ImportError:
     Image = None
 
 APP_NAME = "Playlist Bridge"
-VERSION = "2.0.0-beta.2"
-BUILD = "20260908.7"
+VERSION = "2.0.0-beta.3"
 
 # Color codes for terminal output
 class Colors:
@@ -4913,10 +4912,7 @@ class Syncer:
         track: dict,
     ) -> Optional[str]:
         """Return the stored ignore key matching a source track."""
-        bucket = self._get_ignored_bucket(
-            mapping_key,
-            create=False,
-        )
+        bucket = {**self._get_ignored_bucket("__global__", create=False), **self._get_ignored_bucket(mapping_key, create=False)}
 
         candidate_keys = self._ignored_track_keys(
             track

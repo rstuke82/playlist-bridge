@@ -35,7 +35,7 @@ class Repository:
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             version = db.execute('PRAGMA user_version').fetchone()[0]
-            if version > 2:
+            if version > 3:
                 raise RuntimeError('Database requires a newer Playlist Bridge build')
             if version == 0:
                 db.execute('CREATE TABLE state (namespace TEXT, key TEXT, value TEXT NOT NULL, PRIMARY KEY(namespace,key))')
@@ -60,6 +60,12 @@ class Repository:
             if version == 1:
                 db.execute('CREATE TABLE application_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, level TEXT NOT NULL, operation TEXT NOT NULL, message TEXT NOT NULL)')
                 db.execute('PRAGMA user_version=2')
+                version = 2
+            if version == 2:
+                db.execute("CREATE TABLE jobs(id TEXT PRIMARY KEY,action TEXT NOT NULL,payload TEXT NOT NULL,status TEXT NOT NULL,progress TEXT,created_at TEXT,started_at TEXT,finished_at TEXT,result TEXT,error TEXT,cancel_requested INTEGER NOT NULL DEFAULT 0,schedule_id TEXT)")
+                db.execute("CREATE INDEX jobs_status ON jobs(status,created_at)")
+                db.execute("CREATE TABLE schedules(id TEXT PRIMARY KEY,name TEXT NOT NULL,action TEXT NOT NULL,scope TEXT NOT NULL,cron TEXT NOT NULL,timezone TEXT NOT NULL,enabled INTEGER NOT NULL,next_run TEXT NOT NULL)")
+                db.execute('PRAGMA user_version=3')
         # Durable originals in the transaction make backup completion restart-safe.
         with self.connect() as db:
             backups = db.execute('SELECT name,content FROM migration_backups').fetchall()
@@ -119,9 +125,18 @@ class Repository:
                        (datetime.now(timezone.utc).isoformat(), level, operation, message[:16000]))
             db.execute('DELETE FROM application_logs WHERE id NOT IN (SELECT id FROM application_logs ORDER BY id DESC LIMIT 1000)')
 
-    def logs(self, limit=100, level=None):
+    def logs(self, limit=100, level=None, action=None):
+        clauses, params = [], []
+        if level:
+            clauses.append('level=?'); params.append(level)
+        if action:
+            clauses.append('operation=?'); params.append(action)
         with self.connect() as db:
             rows = db.execute('SELECT id,created_at,level,operation,message FROM application_logs '
-                              + ('WHERE level=? ' if level else '') + 'ORDER BY id DESC LIMIT ?',
-                              (level, limit) if level else (limit,)).fetchall()
+                              + ('WHERE '+' AND '.join(clauses)+' ' if clauses else '') + 'ORDER BY id DESC LIMIT ?',
+                              (*params, limit)).fetchall()
         return [dict(zip(('id','created_at','level','operation','message'), row)) for row in rows]
+
+    def clear_logs(self):
+        with self.connect() as db:
+            db.execute('DELETE FROM application_logs')

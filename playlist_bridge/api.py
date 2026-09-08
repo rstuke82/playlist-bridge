@@ -16,7 +16,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 import requests
 
-from . import __build__, __version__
+from . import __version__
+from . import jobs
+from datetime import datetime, timezone
 from .legacy import (
     AppleMusicAPI,
     Config,
@@ -34,8 +36,14 @@ from .notifications import WebhookNotifier, WebhookSettings
 @contextlib.asynccontextmanager
 async def lifespan(app):
     config = Config()
-    config.repository.add_log("INFO", "startup", f"Playlist Bridge {__version__} build {__build__} started")
-    yield
+    config.repository.add_log("INFO", "startup", f"Playlist Bridge {__version__} started")
+    manager = jobs.Manager(config.repository)
+    manager.start()
+    app.state.jobs = manager
+    try:
+        yield
+    finally:
+        await __import__("asyncio").to_thread(manager.close)
 
 
 app = FastAPI(
@@ -128,6 +136,7 @@ def _playlist_payload(config: Config, playlist: dict) -> dict:
         "favorite": playlist.get("favorite", False) is True,
         "auto_sync": playlist.get("auto_sync", True) is not False,
         "last_synced": playlist.get("last_synced"),
+        "added_at": playlist.get("added_at"),
         "last_match_attempt": playlist.get("last_match_attempt"),
         "saved_matches": len(config.mapping.get(key, {})),
         "unresolved": len(missing),
@@ -151,7 +160,8 @@ def _source_for_url(url: str):
 def _record_log(level, operation, message, config=None):
     try:
         config = config or _config()
-        config.repository.add_log(level, operation, redact(message, config))
+        context = jobs.current()
+        config.repository.add_log(level, context.action if context else operation, redact(message, config))
     except Exception:
         # A diagnostic failure must not turn a successful sync into an error.
         pass
@@ -242,7 +252,6 @@ def health():
     return {
         "status": "ok",
         "version": __version__,
-        "build": __build__,
         "playlists": len(playlists),
         "favorites": sum(1 for p in playlists if p.get("favorite") is True),
         "unresolved": unresolved,
@@ -282,7 +291,6 @@ def update_playlist(playlist_key: str, request: PlaylistUpdateRequest):
         return _playlist_payload(config, playlist)
 
 
-@app.post("/api/playlists/analyze")
 def analyze_playlist(request: PlaylistAnalyzeRequest):
     config = _config()
     source_type, url, source_api = _source_for_url(request.url)
@@ -294,12 +302,15 @@ def analyze_playlist(request: PlaylistAnalyzeRequest):
         raise HTTPException(status_code=409, detail="Playlist is already registered")
 
     try:
+        jobs.progress("Reading source playlist")
         (tracks, metadata), source_log = _capture(
             source_api.get_playlist_tracks,
             url,
             fetch_artwork=False,
         )
+        jobs.progress("Matching source tracks against Plex")
         syncer = Syncer(config)
+        syncer.plex = _health_plex(config)
         match_result, match_log = _capture(
             syncer._match_source_tracks,
             tracks,
@@ -325,7 +336,6 @@ def analyze_playlist(request: PlaylistAnalyzeRequest):
     }
 
 
-@app.post("/api/playlists")
 def add_playlist(request: PlaylistAddRequest):
     with ProcessLock():
         config = _config()
@@ -337,8 +347,15 @@ def add_playlist(request: PlaylistAddRequest):
             raise HTTPException(status_code=409, detail="Playlist is already registered")
 
         try:
+            jobs.progress("Connecting to Plex")
+            plex = _health_plex(config)
+            jobs.progress("Reading source playlist and artwork")
             tracks, metadata = source_api.get_playlist_tracks(url, fetch_artwork=True)
+            if not tracks:
+                raise HTTPException(status_code=422, detail="Source returned no tracks. Check that the playlist is public and its URL is correct.")
             syncer = Syncer(config)
+            syncer.plex = plex
+            jobs.progress("Matching tracks against the Plex library")
             mapping_key = f"{source_type}:{playlist_id}"
             matched, unmatched, mapping, _library, _stats = syncer._match_source_tracks(
                 tracks,
@@ -347,7 +364,6 @@ def add_playlist(request: PlaylistAddRequest):
             )
             syncer._store_unmatched(mapping_key, unmatched)
             config.mapping[mapping_key] = mapping
-            config.save()
 
             if not matched:
                 raise HTTPException(
@@ -355,6 +371,7 @@ def add_playlist(request: PlaylistAddRequest):
                     detail="No source tracks matched Plex, so the playlist was not created",
                 )
 
+            jobs.progress(f"Creating Plex playlist with {len(matched)} matched tracks; {len(unmatched)} unresolved")
             plex_playlist_id = syncer._build_new_plex_playlist(
                 metadata.get("name", "Unknown Playlist"),
                 metadata.get("description", ""),
@@ -364,6 +381,7 @@ def add_playlist(request: PlaylistAddRequest):
             if not plex_playlist_id:
                 raise HTTPException(status_code=502, detail="Plex playlist creation failed")
 
+            jobs.progress("Saving playlist registration and source snapshot", check=False)
             playlist = config.add_playlist(
                 url,
                 source_type,
@@ -373,17 +391,33 @@ def add_playlist(request: PlaylistAddRequest):
             playlist["auto_sync"] = request.auto_sync
             playlist["favorite"] = request.favorite
             from datetime import datetime
-            playlist["last_synced"] = datetime.now().isoformat()
+            playlist["added_at"] = datetime.now(timezone.utc).isoformat()
+            # Preserve the registration even if Plex accepted only part of the update.
+            # This gives the user a repair target instead of creating duplicates on retry.
+            verification_error = None
+            try:
+                actual = plex.get_playlist_items(str(plex_playlist_id))
+                if Counter(str(t.get("plex_id")) for t in actual) != Counter(str(t) for t in matched):
+                    verification_error = "Plex did not retain all expected tracks."
+            except Exception as exc:
+                verification_error = f"Could not verify the new Plex playlist: {exc}"
+            if not verification_error:
+                playlist["last_synced"] = datetime.now(timezone.utc).isoformat()
             syncer._save_source_snapshot(mapping_key, tracks)
             config.save()
-            return _playlist_payload(config, playlist)
+            result = _playlist_payload(config, playlist)
+            if verification_error:
+                ctx = jobs.current()
+                if ctx:
+                    ctx.store.update(ctx.id, result=result)
+                raise HTTPException(status_code=502, detail=f"Playlist was created and registered, but {verification_error} Open it in Playlists and sync to repair; do not add it again.")
+            return result
         except HTTPException:
             raise
         except Exception as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
-@app.post("/api/sync/all")
 def sync_all():
     with ProcessLock():
         config = _config()
@@ -391,7 +425,6 @@ def sync_all():
         return {"summary": result, "log": log}
 
 
-@app.post("/api/sync/favorites")
 def sync_favorites():
     with ProcessLock():
         config = _config()
@@ -399,7 +432,6 @@ def sync_favorites():
         return {"summary": result, "log": log}
 
 
-@app.post("/api/sync/{playlist_key:path}")
 def sync_one(playlist_key: str):
     with ProcessLock():
         config = _config()
@@ -413,7 +445,6 @@ def sync_one(playlist_key: str):
         return {"summary": result, "log": log}
 
 
-@app.get("/api/playlists/{playlist_key:path}/health")
 def playlist_health(playlist_key: str):
     """Read-only source/Plex comparison. Only health results/history are persisted."""
     config = _config()
@@ -424,12 +455,14 @@ def playlist_health(playlist_key: str):
     if playlist is None:
         raise HTTPException(status_code=404, detail="Playlist not found")
 
+    jobs.progress("Connecting to Plex")
     stage = "Plex connection"
     _record_log("INFO", "health", f"Checking health: {playlist.get('plex_playlist_name', playlist_key)}", config)
     try:
         syncer = Syncer(config)
         plex = _health_plex(config)
         syncer.plex = plex
+        jobs.progress("Reading source playlist")
         stage = "source playlist"
         source_type, source_url, source_api = _source_for_url(playlist.get("source_url", ""))
         (source_tracks, _metadata), source_log = _capture(
@@ -438,6 +471,7 @@ def playlist_health(playlist_key: str):
             fetch_artwork=False,
         )
 
+        jobs.progress("Checking Plex library matches")
         stage = "Plex library"
         plex_library, library_log = _capture(plex.search_library, "")
         if not plex_library:
@@ -454,6 +488,7 @@ def playlist_health(playlist_key: str):
         )
         matched_ids, unmatched, _mapping, _library, stats = match_result
 
+        jobs.progress("Comparing destination playlist")
         stage = "Plex destination playlist"
         plex_playlist_id = str(playlist.get("plex_playlist_id", ""))
         plex_items, playlist_log = _capture(plex.get_playlist_items, plex_playlist_id)
@@ -475,6 +510,11 @@ def playlist_health(playlist_key: str):
         unresolved = len(unmatched)
         plex_count = len(actual_ids)
 
+        lookup = {str(t.get("plex_id")): t for t in [*plex_items, *plex_library]}
+        def differences(counts):
+            return [{"plex_id": key, "title": lookup.get(key, {}).get("title", key),
+                     "artist": lookup.get(key, {}).get("artist", ""), "count": count}
+                    for key, count in counts.items()]
         result = {
             "key": mapping_key,
             "name": playlist.get("plex_playlist_name", ""),
@@ -496,6 +536,14 @@ def playlist_health(playlist_key: str):
                 and source_removed == 0
             ),
             "read_only": True,
+            "drift_details": {
+                "missing_from_plex": differences(expected - actual),
+                "extra_in_plex": differences(actual - expected),
+                "unresolved": unmatched,
+                "source_added": source_changes.get("added", []),
+                "source_removed": source_changes.get("removed", []),
+            },
+            "source_preview": [{k:t.get(k, "") for k in ("title","artist","album","source_id")} for t in source_tracks],
             "log": "\n".join(part for part in [source_log, library_log, match_log, playlist_log] if part).strip(),
         }
         config.repository.save_health(mapping_key, result)
@@ -601,7 +649,20 @@ def missing_tracks(scope: Literal["all", "favorites"] = "all"):
     playlists = config.config.get("playlists", [])
     if scope == "favorites":
         playlists = [p for p in playlists if p.get("favorite") is True]
-    return Syncer(config).collect_all_missing_tracks_deduped(playlists=playlists)
+    syncer = Syncer(config)
+    rows = syncer.collect_all_missing_tracks_deduped(playlists=playlists)
+    for row in rows:
+        members = []
+        for playlist in playlists:
+            key = _playlist_key(playlist)
+            matches = [t for t in config.missing.get(key, []) if syncer._same_missing_identity(t, row)]
+            if matches:
+                members.append({"key":key, "name":playlist.get("plex_playlist_name", key),
+                                "count":len(matches), "last_checked":playlist.get("last_match_attempt") or playlist.get("last_synced")})
+        row['memberships'] = members
+        row['playlist_count'] = len(members)
+        row['last_checked'] = max((m['last_checked'] for m in members if m['last_checked']), default=None)
+    return rows
 
 
 @app.post("/api/missing/candidates")
@@ -649,7 +710,6 @@ def missing_candidates(request: MissingCandidateRequest):
     return rows[: request.limit]
 
 
-@app.post("/api/missing/match")
 def save_missing_match(request: MissingMatchRequest):
     with ProcessLock():
         config = _config()
@@ -689,6 +749,7 @@ def save_missing_match(request: MissingMatchRequest):
             ):
                 affected_playlists.append(target)
 
+        jobs.progress("Saving manual match")
         affected = syncer._apply_global_missing_match(source_track, selected, affected_playlists)
 
         if target is not None:
@@ -704,6 +765,7 @@ def save_missing_match(request: MissingMatchRequest):
         sync_results = []
         combined_log = []
         for playlist in affected_playlists:
+            jobs.progress("Syncing affected playlist: " + playlist.get("plex_playlist_name", ""))
             result, log = _capture(syncer.sync_playlist, playlist)
             sync_results.append({
                 "key": _playlist_key(playlist),
@@ -758,12 +820,285 @@ def test_notification():
 
 @app.get("/api/settings/logs")
 def get_logs(limit: int = Query(default=100, ge=1, le=500),
-             level: Optional[Literal["INFO", "ERROR"]] = None):
+             level: Optional[Literal["INFO", "ERROR"]] = None, action: Optional[str] = None):
     config = _config()
-    rows = config.repository.logs(limit, level)
+    rows = config.repository.logs(limit, level, action)
     for row in rows:
         row['message'] = redact(row['message'], config)
     return {"entries": rows, "retention": 1000}
+
+
+class JobRequest(BaseModel):
+    action: Literal['sync','health','analyze','add','fix_match']
+    payload: dict = Field(default_factory=dict)
+
+
+class ScheduleRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    action: Literal['sync','health'] = 'sync'
+    scope: Literal['all','favorites','automatic'] = 'automatic'
+    cron: str
+    timezone: str = 'UTC'
+    enabled: bool = True
+
+
+def job_store():
+    return jobs.Store(_config().repository)
+
+
+def validated_payload(action, payload):
+    if action in ('add','analyze','fix_match'):
+        model = {'add':PlaylistAddRequest,'analyze':PlaylistAnalyzeRequest,'fix_match':MissingMatchRequest}[action]
+        return model(**payload).model_dump()
+    scope = payload.get('scope', 'all')
+    if scope not in jobs.SCOPES:
+        raise ValueError('Choose all, favorites, automatic or selected playlists')
+    keys = payload.get('playlist_keys', [])
+    if not isinstance(keys, list) or not all(isinstance(k,str) for k in keys):
+        raise ValueError('playlist_keys must be a list of playlist ids')
+    if scope=='selected' and not keys:
+        raise ValueError('Select at least one playlist')
+    return {'scope':scope, **({'playlist_keys':keys} if scope=='selected' else {})}
+
+
+@app.post('/api/jobs', status_code=202)
+def queue_job(request: JobRequest):
+    try:
+        payload = validated_payload(request.action, request.payload)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+    store = job_store()
+    return store.get(store.enqueue(request.action,payload))
+
+
+@app.get('/api/jobs')
+def list_jobs():
+    return job_store().list()
+
+
+@app.get('/api/jobs/{job_id}')
+def get_job(job_id: str):
+    row = job_store().get(job_id)
+    if not row:
+        raise HTTPException(404,'Job not found')
+    return row
+
+
+@app.post('/api/jobs/{job_id}/cancel')
+def cancel_job(job_id: str):
+    row = job_store().cancel(job_id)
+    if not row:
+        raise HTTPException(404,'Job not found')
+    return row
+
+
+@app.get('/api/schedules')
+def list_schedules():
+    return job_store().schedules()
+
+
+@app.post('/api/schedules')
+def create_schedule(request: ScheduleRequest):
+    try:
+        return job_store().save_schedule(request.model_dump())
+    except (ValueError, KeyError) as exc:
+        raise HTTPException(422,str(exc)) from exc
+
+
+@app.put('/api/schedules/{schedule_id}')
+def update_schedule(schedule_id: str, request: ScheduleRequest):
+    if not any(s['id']==schedule_id for s in job_store().schedules()):
+        raise HTTPException(404,'Schedule not found')
+    try:
+        return job_store().save_schedule(request.model_dump(),schedule_id)
+    except (ValueError, KeyError) as exc:
+        raise HTTPException(422,str(exc)) from exc
+
+
+@app.delete('/api/schedules/{schedule_id}')
+def delete_schedule(schedule_id: str):
+    with _config().repository.connect() as db:
+        db.execute('DELETE FROM schedules WHERE id=?',(schedule_id,))
+    return {'deleted':True}
+
+
+@app.post('/api/schedules/{schedule_id}/run', status_code=202)
+def run_schedule(schedule_id: str):
+    store=job_store()
+    schedule=next((s for s in store.schedules() if s['id']==schedule_id),None)
+    if not schedule:
+        raise HTTPException(404,'Schedule not found')
+    return store.get(store.enqueue(schedule['action'],{'scope':schedule['scope']},schedule_id))
+
+
+def execute_job(action, payload):
+    if action=='analyze':
+        return analyze_playlist(PlaylistAnalyzeRequest(**payload))
+    if action=='add':
+        return add_playlist(PlaylistAddRequest(**payload))
+    if action=='fix_match':
+        return save_missing_match(MissingMatchRequest(**payload))
+    config=_config()
+    scope=payload.get('scope','all')
+    playlists=config.config.get('playlists',[])
+    if scope=='favorites':
+        playlists=[p for p in playlists if p.get('favorite') is True]
+    elif scope=='automatic':
+        playlists=[p for p in playlists if p.get('auto_sync',True) is not False]
+    elif scope=='selected':
+        playlists=[p for p in playlists if _playlist_key(p) in payload.get('playlist_keys',[])]
+    if not playlists:
+        raise ValueError('No playlists match this job scope')
+    results=[]
+    for index,playlist in enumerate(playlists):
+        jobs.progress(f"{index+1} of {len(playlists)}: {playlist.get('plex_playlist_name','')}")
+        try:
+            result=sync_one(_playlist_key(playlist)) if action=='sync' else playlist_health(_playlist_key(playlist))
+            if action=='sync' and isinstance(result.get('summary'),dict) and result['summary'].get('errors'):
+                raise ValueError('Playlist sync reported errors; see the sync log')
+            results.append({'key':_playlist_key(playlist),'name':playlist.get('plex_playlist_name'),'ok':True,'result':result})
+        except Exception as exc:
+            results.append({'key':_playlist_key(playlist),'name':playlist.get('plex_playlist_name'),'ok':False,'error':redact(getattr(exc,'detail',str(exc)),config)})
+        ctx=jobs.current()
+        if ctx:
+            ctx.store.update(ctx.id,result={'playlists':results})
+    if any(not r['ok'] for r in results):
+        raise ValueError(f"{sum(not r['ok'] for r in results)} of {len(results)} playlists failed. See job results and logs.")
+    return {'playlists':results}
+
+
+# Compatibility URLs now return 202 + a durable job; poll /api/jobs/{id}.
+@app.post('/api/playlists/analyze',status_code=202)
+def queue_analysis(request: PlaylistAnalyzeRequest):
+    return queue_job(JobRequest(action='analyze',payload=request.model_dump()))
+
+
+@app.post('/api/playlists',status_code=202)
+def queue_add(request: PlaylistAddRequest):
+    return queue_job(JobRequest(action='add',payload=request.model_dump()))
+
+
+@app.post('/api/sync/all',status_code=202)
+def queue_all():
+    return queue_job(JobRequest(action='sync'))
+
+
+@app.post('/api/sync/favorites',status_code=202)
+def queue_favorites():
+    return queue_job(JobRequest(action='sync',payload={'scope':'favorites'}))
+
+
+@app.post('/api/sync/automatic',status_code=202)
+def queue_automatic():
+    return queue_job(JobRequest(action='sync',payload={'scope':'automatic'}))
+
+
+@app.post('/api/sync/{playlist_key:path}',status_code=202)
+def queue_one(playlist_key: str):
+    return queue_job(JobRequest(action='sync',payload={'scope':'selected','playlist_keys':[playlist_key]}))
+
+
+@app.get('/api/playlists/{playlist_key:path}/health',status_code=202)
+def queue_health(playlist_key: str):
+    return queue_job(JobRequest(action='health',payload={'scope':'selected','playlist_keys':[playlist_key]}))
+
+
+@app.post('/api/missing/match',status_code=202)
+def queue_match(request: MissingMatchRequest):
+    return queue_job(JobRequest(action='fix_match',payload=request.model_dump()))
+
+
+class IgnoreRequest(BaseModel):
+    title: str
+    artist: str
+    album: str = ''
+    universal: bool = False
+    playlist_keys: List[str] = Field(default_factory=list)
+
+
+@app.post('/api/missing/ignore')
+def ignore_missing(request: IgnoreRequest):
+    if not request.universal and not request.playlist_keys:
+        raise HTTPException(422,'Select playlists or choose universal ignore')
+    with ProcessLock():
+        config=_config()
+        syncer=Syncer(config)
+        track=request.model_dump(include={'title','artist','album'})
+        affected=0
+        if request.universal:
+            syncer._ignore_track('__global__',track)
+        for playlist in config.config.get('playlists',[]):
+            key=_playlist_key(playlist)
+            if not request.universal and key not in request.playlist_keys:
+                continue
+            remaining=[]
+            for t in config.missing.get(key,[]):
+                if syncer._same_missing_identity(t,track):
+                    if not request.universal:
+                        syncer._ignore_track(key,t)
+                    else:
+                        search_key=f"{t.get('title','')}|{t.get('artist','')}"
+                        config.mapping.get(key,{}).pop(search_key,None)
+                        syncer._remove_match_provenance(key,search_key)
+                    affected+=1
+                else:
+                    remaining.append(t)
+            config.missing[key]=remaining
+        config.save()
+        _record_log('INFO','ignore',f"Ignored {request.title} in {affected} unresolved occurrences",config)
+        return {'affected':affected,'universal':request.universal}
+
+
+@app.get('/api/ignored')
+def list_ignored():
+    config=_config()
+    return [{'playlist_key':key,'ignore_key':identity,**track} for key,bucket in config.ignored_tracks.items() for identity,track in bucket.items()]
+
+
+class RestoreIgnoreRequest(BaseModel):
+    playlist_key: str
+    ignore_key: str
+
+
+@app.post('/api/ignored/restore')
+def restore_ignore(request: RestoreIgnoreRequest):
+    with ProcessLock():
+        config=_config()
+        config.ignored_tracks.get(request.playlist_key,{}).pop(request.ignore_key,None)
+        config.save()
+    return {'restored':True}
+
+
+@app.delete('/api/settings/logs')
+def clear_logs():
+    _config().repository.clear_logs()
+    return {'cleared':True}
+
+
+@app.get('/api/search')
+def search_library(q: str = Query(min_length=1,max_length=200)):
+    config=_config()
+    query=q.casefold().strip()
+    playlists=[]; tracks=[]
+    health=config.repository.load('health')
+    for p in config.config.get('playlists',[]):
+        key=_playlist_key(p); name=p.get('plex_playlist_name',key)
+        if query in name.casefold():
+            playlists.append({'key':key,'name':name})
+        snapshot=config.source_snapshots.get(key,[])
+        source=health.get(key,{}).get('source_preview') or (snapshot if isinstance(snapshot,list) else [])
+        candidates=[*source,*config.missing.get(key,[])]
+        for search_key in config.mapping.get(key,{}):
+            title,_,artist=search_key.partition('|')
+            candidates.append({'title':title,'artist':artist})
+        seen=set()
+        for track in candidates:
+            identity=(track.get('title',''),track.get('artist',''))
+            if identity in seen: continue
+            seen.add(identity)
+            if query in ' '.join(str(track.get(k,'')) for k in ('title','artist','album')).casefold():
+                tracks.append({**track,'playlist_key':key,'playlist_name':name})
+    return {'playlists':playlists[:100],'tracks':tracks[:200],'track_count':len(tracks),'cached':True}
 
 
 WEB_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"

@@ -34,7 +34,8 @@ from playlist_bridge.legacy import Config, CONFIG_DIR, CONFIG_FILE
 assert health()['status'] == 'ok'
 assert (CONFIG_DIR / 'playlist-bridge.db').exists()
 assert health()['plex_configured'] is False
-assert health()['build'] == '20260908.7'
+assert health()['version'] == '2.0.0-beta.3'
+assert 'build' not in health()
 c = Config()
 c.config['test_marker'] = 'saved'
 c.save()
