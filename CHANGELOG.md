@@ -1,3 +1,13 @@
+# v2.0.0-beta.2 — build 20260908.7
+
+- Health checks show running indicators, numbered batch progress, and completion/failure status across navigation.
+- Plex URL/connectivity, timeout, TLS, token/access, invalid-response and missing-resource failures have actionable messages and Settings links. Failed reads no longer masquerade as empty Plex playlists during health checks.
+- Last failed health attempts persist while last successful results remain intact.
+- Settings includes persistent, bounded and credential-redacted application logs with level filters.
+- Match selection uses an explicit Save Match step and always-visible Cancel/Close controls, including Escape and backdrop dismissal before save.
+- Playlist detail navigation consistently highlights Playlists and returns to the playlist list.
+- SQLite schema 2 adds application logs and upgrades beta 1 databases without changing sync state. Matching heuristics, CLI defaults and Docker port 8173 are preserved.
+
 # v2.0.0-beta.1 — build 20260908.6
 
 - SQLite runtime storage with automatic validated legacy migration and preserved backups.

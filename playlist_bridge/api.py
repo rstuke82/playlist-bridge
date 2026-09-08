@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import threading
 from collections import Counter
 from pathlib import Path
 from typing import List, Literal, Optional
@@ -26,12 +27,14 @@ from .legacy import (
     Syncer,
     repair_text,
 )
+from .diagnostics import PlexDiagnosticError, plex_error, validate_plex_config, redact
 from .notifications import WebhookNotifier, WebhookSettings
 
 
 @contextlib.asynccontextmanager
 async def lifespan(app):
-    Config()
+    config = Config()
+    config.repository.add_log("INFO", "startup", f"Playlist Bridge {__version__} build {__build__} started")
     yield
 
 
@@ -131,6 +134,7 @@ def _playlist_payload(config: Config, playlist: dict) -> dict:
         "lost": sum(1 for track in missing if track.get("status") == "lost"),
         "ignored": len(config.ignored_tracks.get(key, {})),
         "health": config.repository.load("health").get(key),
+        "health_attempt": config.repository.load("health_attempts").get(key),
     }
 
 
@@ -144,11 +148,52 @@ def _source_for_url(url: str):
     raise HTTPException(status_code=400, detail="URL must be a Spotify or Apple Music playlist")
 
 
+def _record_log(level, operation, message, config=None):
+    try:
+        config = config or _config()
+        config.repository.add_log(level, operation, redact(message, config))
+    except Exception:
+        # A diagnostic failure must not turn a successful sync into an error.
+        pass
+
+
+@app.middleware("http")
+async def log_operations(request, call_next):
+    try:
+        response = await call_next(request)
+    except Exception:
+        _record_log("ERROR", "request", f"{request.method} request failed unexpectedly. Check the server console.")
+        raise
+    route = request.scope.get("route")
+    path = getattr(route, "path", "")
+    if path.startswith("/api/") and path not in ("/api/health", "/api/settings/logs"):
+        if request.method != "GET" or response.status_code >= 400:
+            _record_log("ERROR" if response.status_code >= 400 else "INFO", path,
+                        f"{request.method} completed with HTTP {response.status_code}")
+    return response
+
+
+_capture_lock = threading.RLock()
+
+
 def _capture(callable_obj, *args, **kwargs):
     stream = io.StringIO()
-    with contextlib.redirect_stdout(stream), contextlib.redirect_stderr(stream):
-        result = callable_obj(*args, **kwargs)
-    return result, stream.getvalue()
+    try:
+        with _capture_lock, contextlib.redirect_stdout(stream), contextlib.redirect_stderr(stream):
+            result = callable_obj(*args, **kwargs)
+    except Exception:
+        _record_log("ERROR", getattr(callable_obj, "__name__", "operation"), stream.getvalue() or "Operation failed")
+        raise
+    output = redact(stream.getvalue(), _config())
+    if output.strip():
+        _record_log("INFO", getattr(callable_obj, "__name__", "operation"), output)
+    return result, output
+
+
+def _health_plex(config):
+    settings = validate_plex_config(config)
+    return PlexAPI(settings['url'], settings['token'], settings['music_library_key'],
+                   settings.get('music_library_name', ''), strict_errors=True)
 
 
 def _validated_plex_libraries(url: str, token: str) -> List[dict]:
@@ -379,7 +424,13 @@ def playlist_health(playlist_key: str):
     if playlist is None:
         raise HTTPException(status_code=404, detail="Playlist not found")
 
+    stage = "Plex connection"
+    _record_log("INFO", "health", f"Checking health: {playlist.get('plex_playlist_name', playlist_key)}", config)
     try:
+        syncer = Syncer(config)
+        plex = _health_plex(config)
+        syncer.plex = plex
+        stage = "source playlist"
         source_type, source_url, source_api = _source_for_url(playlist.get("source_url", ""))
         (source_tracks, _metadata), source_log = _capture(
             source_api.get_playlist_tracks,
@@ -387,11 +438,10 @@ def playlist_health(playlist_key: str):
             fetch_artwork=False,
         )
 
-        syncer = Syncer(config)
-        plex = syncer._get_plex()
+        stage = "Plex library"
         plex_library, library_log = _capture(plex.search_library, "")
         if not plex_library:
-            raise HTTPException(status_code=502, detail="No Plex music tracks were found")
+            raise HTTPException(status_code=502, detail="The selected Plex music library returned no tracks. Check the library selection in Settings → Plex.")
 
         mapping_key = _playlist_key(playlist)
         match_result, match_log = _capture(
@@ -404,6 +454,7 @@ def playlist_health(playlist_key: str):
         )
         matched_ids, unmatched, _mapping, _library, stats = match_result
 
+        stage = "Plex destination playlist"
         plex_playlist_id = str(playlist.get("plex_playlist_id", ""))
         plex_items, playlist_log = _capture(plex.get_playlist_items, plex_playlist_id)
         actual_ids = [
@@ -448,11 +499,20 @@ def playlist_health(playlist_key: str):
             "log": "\n".join(part for part in [source_log, library_log, match_log, playlist_log] if part).strip(),
         }
         config.repository.save_health(mapping_key, result)
+        config.repository.record_health_attempt(mapping_key)
+        _record_log("INFO", "health", f"Health check completed: {playlist.get('plex_playlist_name', playlist_key)}", config)
         return result
-    except HTTPException:
-        raise
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        if isinstance(exc, HTTPException):
+            message = str(exc.detail)
+        elif isinstance(exc, PlexDiagnosticError) or stage.startswith("Plex"):
+            message = plex_error(exc)
+        else:
+            message = 'Could not read the source playlist. Check that its URL is correct and the playlist is public, then retry.'
+        message = redact(f"Health check failed — {stage}: {message}", config)
+        config.repository.record_health_attempt(playlist_key, message)
+        _record_log("ERROR", "health", message, config)
+        raise HTTPException(status_code=502, detail=message) from exc
 
 
 @app.get("/api/playlists/{playlist_key:path}/detail")
@@ -694,6 +754,16 @@ def test_notification():
         return {"sent": sent}
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get("/api/settings/logs")
+def get_logs(limit: int = Query(default=100, ge=1, le=500),
+             level: Optional[Literal["INFO", "ERROR"]] = None):
+    config = _config()
+    rows = config.repository.logs(limit, level)
+    for row in rows:
+        row['message'] = redact(row['message'], config)
+    return {"entries": rows, "retention": 1000}
 
 
 WEB_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"

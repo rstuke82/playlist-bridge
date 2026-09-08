@@ -7,6 +7,7 @@ export type Playlist = {
   auto_sync: boolean
   last_synced?: string | null
   health?: PlaylistHealth
+  health_attempt?: {attempted_at:string; error:string|null}
   saved_matches: number
   unresolved: number
   lost: number
@@ -76,12 +77,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   })
   if (!response.ok) {
     const body = await response.json().catch(() => ({}))
-    throw new Error(body.detail || `Request failed (${response.status})`)
+    throw new Error(typeof body.detail === 'string' ? body.detail : `Request failed (${response.status}). Check Settings → Logs.`)
   }
   return response.json()
 }
 
 export const api = {
+  logs: (level:string) => request<{entries:{id:number;created_at:string;level:string;operation:string;message:string}[];retention:number}>(`/api/settings/logs?limit=200${level?`&level=${level}`:''}`),
   detail: (key: string) => request<any>(`/api/playlists/${encodeURIComponent(key)}/detail`),
   health: () => request<any>('/api/health'),
   playlists: () => request<Playlist[]>('/api/playlists'),

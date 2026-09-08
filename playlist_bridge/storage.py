@@ -35,7 +35,7 @@ class Repository:
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             version = db.execute('PRAGMA user_version').fetchone()[0]
-            if version > 1:
+            if version > 2:
                 raise RuntimeError('Database requires a newer Playlist Bridge build')
             if version == 0:
                 db.execute('CREATE TABLE state (namespace TEXT, key TEXT, value TEXT NOT NULL, PRIMARY KEY(namespace,key))')
@@ -56,6 +56,10 @@ class Repository:
                     if path.exists():
                         db.execute('INSERT INTO migration_backups VALUES (?,?)', (name, path.read_bytes()))
                 db.execute('PRAGMA user_version=1')
+                version = 1
+            if version == 1:
+                db.execute('CREATE TABLE application_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, level TEXT NOT NULL, operation TEXT NOT NULL, message TEXT NOT NULL)')
+                db.execute('PRAGMA user_version=2')
         # Durable originals in the transaction make backup completion restart-safe.
         with self.connect() as db:
             backups = db.execute('SELECT name,content FROM migration_backups').fetchall()
@@ -103,3 +107,21 @@ class Repository:
         with self.connect() as db:
             db.execute('INSERT INTO health_history(playlist_key,checked_at,result) VALUES (?,?,?)', (key, result['checked_at'], json.dumps(result)))
             db.execute('INSERT OR REPLACE INTO state VALUES (?,?,?)', ('health', key, json.dumps(result)))
+
+    def record_health_attempt(self, key, error=None):
+        attempt = {"attempted_at": datetime.now(timezone.utc).isoformat(), "error": error}
+        with self.connect() as db:
+            db.execute('INSERT OR REPLACE INTO state VALUES (?,?,?)', ('health_attempts', key, json.dumps(attempt)))
+
+    def add_log(self, level, operation, message):
+        with self.connect() as db:
+            db.execute('INSERT INTO application_logs(created_at,level,operation,message) VALUES (?,?,?,?)',
+                       (datetime.now(timezone.utc).isoformat(), level, operation, message[:16000]))
+            db.execute('DELETE FROM application_logs WHERE id NOT IN (SELECT id FROM application_logs ORDER BY id DESC LIMIT 1000)')
+
+    def logs(self, limit=100, level=None):
+        with self.connect() as db:
+            rows = db.execute('SELECT id,created_at,level,operation,message FROM application_logs '
+                              + ('WHERE level=? ' if level else '') + 'ORDER BY id DESC LIMIT ?',
+                              (level, limit) if level else (limit,)).fetchall()
+        return [dict(zip(('id','created_at','level','operation','message'), row)) for row in rows]

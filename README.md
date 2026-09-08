@@ -1,7 +1,7 @@
 # Playlist Bridge
 
-**Version:** 2.0.0-beta.1  
-**Build:** 20260908.6
+**Version:** 2.0.0-beta.2  
+**Build:** 20260908.7
 
 Playlist Bridge syncs public **Spotify** and **Apple Music** playlists to playlists in your local **Plex music library**.
 
@@ -10,6 +10,8 @@ Version 2.0 adds a self-hosted **React + TypeScript** web interface with a **Fas
 > **Beta software:** back up your Playlist Bridge JSON state files before installing a new beta build.
 
 ## Current beta features
+
+Beta 2 adds Settings logs, visible health-check progress and actionable Plex failures, consistent playlist navigation, and an explicit Save Match / Cancel workflow.
 
 - React + TypeScript web interface
 - FastAPI backend
@@ -88,20 +90,20 @@ docker compose up -d --no-build
 ```
 
 The default image is `ghcr.io/rstuke82/playlist-bridge:beta`. This archive does not publish an image.
-To pin this build, set `PLAYLIST_BRIDGE_IMAGE=ghcr.io/rstuke82/playlist-bridge:2.0.0-beta.1-build.20260908.6`
-in `.env` once that tag is published. The `beta` and `2.0.0-beta.1` tags may advance; the build tag identifies this build.
+To pin this build, set `PLAYLIST_BRIDGE_IMAGE=ghcr.io/rstuke82/playlist-bridge:2.0.0-beta.2-build.20260908.7`
+in `.env` once that tag is published. The `beta` and `2.0.0-beta.2` tags may advance; the build tag identifies this build.
 Beta images should never be tagged `latest`.
 
 Maintainers can build and tag for GHCR with:
 
 ```bash
 docker build --build-arg VCS_REF="$(git rev-parse HEAD)" \
-  -t ghcr.io/rstuke82/playlist-bridge:2.0.0-beta.1-build.20260908.6 \
-  -t ghcr.io/rstuke82/playlist-bridge:2.0.0-beta.1 \
+  -t ghcr.io/rstuke82/playlist-bridge:2.0.0-beta.2-build.20260908.7 \
+  -t ghcr.io/rstuke82/playlist-bridge:2.0.0-beta.2 \
   -t ghcr.io/rstuke82/playlist-bridge:beta .
 docker login ghcr.io
-docker push ghcr.io/rstuke82/playlist-bridge:2.0.0-beta.1-build.20260908.6
-docker push ghcr.io/rstuke82/playlist-bridge:2.0.0-beta.1
+docker push ghcr.io/rstuke82/playlist-bridge:2.0.0-beta.2-build.20260908.7
+docker push ghcr.io/rstuke82/playlist-bridge:2.0.0-beta.2
 docker push ghcr.io/rstuke82/playlist-bridge:beta
 ```
 
@@ -327,7 +329,7 @@ python -m playlist_bridge version
 
 The Dashboard health check is intentionally **read-only**. It fetches the current source playlist URL and compares it with the Plex library and destination playlist without performing a sync.
 
-Each playlist has an independently collapsible Health section with placeholders before its first check and a Last updated timestamp. Results persist across navigation and restarts. Check All Health updates each row as its check completes.
+Each playlist has an independently collapsible Health section with placeholders before its first check and a Last updated timestamp. Results persist across navigation and restarts. Check All Health updates each row as its check completes and shows “Checking playlist X of Y”. Progress continues across page navigation. Connection failures appear beside the playlist with a Settings link and are preserved across refresh/restarts; the last successful metrics remain visible and are labeled as such.
 
 A health result includes:
 
@@ -344,7 +346,7 @@ Running a health check does **not** modify Plex playlists, mappings, source snap
 
 ## Playlist details and match fixes
 
-Click a registered playlist name to view its full live source track list, saved Plex matches and Automatic / Manual / Legacy / LOST / Unresolved status. Sync Now and Check Health are available there. Fix Match can replace an existing match using scored candidates or text search. Choose all unresolved occurrences or selected playlists; only affected playlists sync after saving.
+Click a registered playlist name to view its full live source track list, saved Plex matches and Automatic / Manual / Legacy / LOST / Unresolved status. Sync Now and Check Health are available there. Fix Match can replace an existing match using scored candidates or text search. Choose all unresolved occurrences or selected playlists; only affected playlists sync after saving. Selecting a candidate does not save immediately. Review the selection and click Save Match, or use Cancel, Close, Escape, or click outside the picker to leave without changes. Cancellation is available while candidates load; once saving starts, wait for the save/sync result.
 
 ## Missing-track fixes
 
@@ -353,3 +355,10 @@ When a deduplicated missing track is matched from the web UI, Playlist Bridge sa
 ## Beta notes
 
 The 2.0 beta series is an architectural transition. The existing matching engine currently remains available behind the new API while components are progressively separated into reusable backend modules. Legacy JSON is imported automatically; CLI support remains available.
+
+
+## Settings logs
+
+Settings includes a read-only Logs viewer with Refresh and level filtering. It shows recent web operations, health failures, and captured sync output, newest first. The latest 1,000 entries are stored in SQLite; the viewer shows up to 200. Plex tokens and recognized credentials are redacted. This is an application activity log, not a live Docker console or historical CLI log importer. Docker process/startup failures before the application opens its database remain available through `docker compose logs`.
+
+Beta 1 SQLite databases upgrade automatically to schema 2, adding the log table while preserving existing runtime state and health results. Back up your data directory with the app stopped before upgrading. Beta 1 cannot open the newer schema; use your backup to roll back.

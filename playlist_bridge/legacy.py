@@ -437,8 +437,8 @@ except ImportError:
     Image = None
 
 APP_NAME = "Playlist Bridge"
-VERSION = "2.0.0-beta.1"
-BUILD = "20260908.6"
+VERSION = "2.0.0-beta.2"
+BUILD = "20260908.7"
 
 # Color codes for terminal output
 class Colors:
@@ -2484,7 +2484,9 @@ class PlexAPI:
         plex_token: str,
         music_library_key: str,
         music_library_name: str = "",
+        strict_errors: bool = False,
     ):
+        self.strict_errors = strict_errors
         self.base_url = plex_url.rstrip("/")
         self.token = plex_token
         self.music_library_key = str(
@@ -2503,7 +2505,13 @@ class PlexAPI:
                 "Plex music library is not configured"
             )
 
-        self.machine_identifier = self._get_machine_identifier()
+        try:
+            self.machine_identifier = self._get_machine_identifier()
+        except Exception as exc:
+            if self.strict_errors:
+                from .diagnostics import PlexDiagnosticError, plex_error
+                raise PlexDiagnosticError(plex_error(exc)) from exc
+            raise
 
     def _get_machine_identifier(self) -> str:
         """Get Plex server machine identifier."""
@@ -2514,6 +2522,8 @@ class PlexAPI:
                 timeout=10,
             )
 
+            if self.strict_errors:
+                resp.raise_for_status()
             if resp.status_code != 200:
                 raise Exception(
                     f"Plex /identity returned HTTP {resp.status_code}: "
@@ -2525,6 +2535,8 @@ class PlexAPI:
                 "machineIdentifier"
             )
 
+            if not identifier and self.strict_errors:
+                raise ValueError("Not a Plex identity response")
             if not identifier:
                 raise Exception(
                     "Plex did not return a machineIdentifier"
@@ -2533,10 +2545,14 @@ class PlexAPI:
             return identifier
 
         except requests.RequestException as e:
+            if self.strict_errors:
+                raise
             raise Exception(
                 f"Could not connect to Plex /identity: {e}"
             )
         except ValueError as e:
+            if self.strict_errors:
+                raise
             raise Exception(
                 f"Plex returned invalid JSON from /identity: {e}"
             )
@@ -2565,6 +2581,8 @@ class PlexAPI:
                 timeout=30,
             )
 
+            if self.strict_errors:
+                resp.raise_for_status()
             if resp.status_code != 200:
                 library_label = (
                     f" '{self.music_library_name}'"
@@ -2576,6 +2594,13 @@ class PlexAPI:
                     f"{library_label}: {resp.status_code}"
                 )
                 return []
+
+            if self.strict_errors:
+                payload = resp.json()
+                if not isinstance(payload, dict) or not isinstance(payload.get("MediaContainer"), dict):
+                    raise ValueError("Not a Plex response")
+                if not isinstance(payload["MediaContainer"].get("Metadata", []), list):
+                    raise ValueError("Invalid Plex track list")
 
             tracks = (
                 resp.json()
@@ -2610,6 +2635,9 @@ class PlexAPI:
             ]
 
         except Exception as e:
+            if self.strict_errors:
+                from .diagnostics import PlexDiagnosticError, plex_error
+                raise PlexDiagnosticError(plex_error(e)) from e
             print(f"Error searching library: {e}")
             return []
 
@@ -2844,12 +2872,21 @@ class PlexAPI:
                 timeout=15,
             )
 
+            if self.strict_errors:
+                resp.raise_for_status()
             if resp.status_code != 200:
                 print(
                     f"Failed to get playlist items: "
                     f"{resp.status_code}"
                 )
                 return []
+
+            if self.strict_errors:
+                payload = resp.json()
+                if not isinstance(payload, dict) or not isinstance(payload.get("MediaContainer"), dict):
+                    raise ValueError("Not a Plex response")
+                if not isinstance(payload["MediaContainer"].get("Metadata", []), list):
+                    raise ValueError("Invalid Plex track list")
 
             items = (
                 resp.json()
@@ -2869,6 +2906,9 @@ class PlexAPI:
             ]
 
         except Exception as e:
+            if self.strict_errors:
+                from .diagnostics import PlexDiagnosticError, plex_error
+                raise PlexDiagnosticError(plex_error(e)) from e
             print(f"Error getting playlist items: {e}")
             return []
 

@@ -63,7 +63,7 @@ class SQLiteTests(unittest.TestCase):
         plex.get_playlist_items.return_value = [track]
         source = Mock()
         source.get_playlist_tracks.return_value = ([track], {})
-        with patch.object(api,'_source_for_url', return_value=('spotify','url',source)), patch.object(legacy.Syncer,'_get_plex', return_value=plex):
+        with patch.object(api, '_health_plex', return_value=plex), patch.object(api,'_source_for_url', return_value=('spotify','url',source)), patch.object(legacy.Syncer,'_get_plex', return_value=plex):
             result = api.playlist_health('spotify:one')
             detail = api.playlist_detail('spotify:one')
         self.assertEqual(detail['tracks'][0]['status'], 'Legacy')
