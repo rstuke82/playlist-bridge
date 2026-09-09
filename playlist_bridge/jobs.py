@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from croniter import croniter
 
-ACTIONS = {'sync', 'health', 'analyze', 'add', 'fix_match'}
+ACTIONS = {'sync', 'health', 'analyze', 'add', 'fix_match', 'track_match', 'remove'}
 SCOPES = {'all', 'favorites', 'automatic', 'selected'}
 TERMINAL = {'completed', 'failed', 'cancelled', 'interrupted'}
 _local = threading.local()
@@ -187,6 +187,8 @@ class Manager:
             return  # Another web process owns the shared queue.
         with self.store.repository.connect() as db:
             db.execute("UPDATE jobs SET status='interrupted',error='Server restarted during execution. Review the playlist before running again.',finished_at=? WHERE status IN ('running','cancelling')", (now(),))
+        from .updates import start as start_updates
+        self.update_thread = start_updates(self.stop)
         self.thread = threading.Thread(target=self.loop, daemon=True, name='playlist-job-scheduler')
         self.thread.start()
 
@@ -226,7 +228,7 @@ class Manager:
             api._record_log('INFO',job['action'],f"Job started: {job['id']}")
             result = api.execute_job(job['action'], job['payload'])
             ctx.checkpoint()
-            self.store.update(job['id'],status='completed',progress='Completed — output and results retained',result=result,finished_at=now())
+            self.store.update(job['id'],status='completed',progress=completion_message(result),result=result,finished_at=now())
             api._record_log('INFO',job['action'],f"Job completed: {job['id']}")
         except Cancelled:
             self.store.update(job['id'],status='cancelled',progress='Cancelled at a safe checkpoint; completed changes are retained',finished_at=now(),**({'result':result} if result is not None else {}))
@@ -294,3 +296,12 @@ def waiting(service):
     finally:
         activity(mode='working', service=None, since=now(),
                  stage=previous.get('stage', 'Processing response'))
+
+
+def completion_message(result):
+    rows = result.get('playlists', []) if isinstance(result, dict) else []
+    values = [row.get('result', {}).get('health') or row.get('result', {}).get('summary') or row.get('result') or row.get('summary') or {} for row in rows]
+    if not values:
+        values = [result.get('health') or result] if isinstance(result, dict) else []
+    missing = sum(value.get('unresolved', 0) for value in values if isinstance(value, dict))
+    return f'Completed with missing tracks · {missing} unresolved' if missing else 'Completed — output and results retained'

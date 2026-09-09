@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import Appearance from './Appearance'
 import { api, PlexLibrary } from './api'
 export default function General({setMessage,refresh}:{setMessage:(m:string)=>void,refresh:()=>Promise<void>}) {
   const [url,setUrl]=useState('')
@@ -45,7 +46,7 @@ export default function General({setMessage,refresh}:{setMessage:(m:string)=>voi
     finally{setBusy(false)}
   }
 
-  return <><section className="panel settings-panel">
+  return <><Appearance/><Updates/><section className="panel settings-panel">
     <div className="panel-head"><div><h2>Plex configuration</h2><p className="muted">Configure the Plex server used by Playlist Bridge.</p></div>{libraryName&&<span className="pill on">{libraryName}</span>}</div>
     <div className="form-grid">
       <label>Plex server URL<input value={url} onChange={e=>setUrl(e.target.value)} placeholder="http://plex-server:32400"/></label>
@@ -57,3 +58,5 @@ export default function General({setMessage,refresh}:{setMessage:(m:string)=>voi
   </section></>
 }
 
+
+export function Updates(){const [status,setStatus]=useState<any>(null),[busy,setBusy]=useState(false),[error,setError]=useState('');useEffect(()=>{api.updates().then(setStatus).catch(e=>setError(e.message))},[]);return <section className="panel settings-panel"><div className="panel-head"><h2>Updates</h2><button disabled={busy} onClick={async()=>{setBusy(true);try{setStatus(await api.checkUpdates());window.dispatchEvent(new Event('health-refresh'))}catch(e:any){setError(e.message)}finally{setBusy(false)}}}>{busy?'Checking…':'Check Now'}</button></div><p>Checks the published beta image every six hours. Updates are never installed automatically.</p>{status&&<p>{status.available?`Update available: ${status.latest_version}`:status.error|| (status.checked_at?'You’re up to date.':'First check pending.')}</p>}{status?.checked_at&&<small>Last checked: {new Date(status.checked_at).toLocaleString()}</small>}{status?.available&&<p>On your server, pull and recreate the container using Docker Compose. Keep the data directory.</p>}{error&&<p className="error">{error}</p>}</section>}

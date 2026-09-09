@@ -111,6 +111,7 @@ class MissingMatchRequest(BaseModel):
     plex_id: str
     playlist_keys: Optional[List[str]] = None
     replace_playlist_key: Optional[str] = None
+    provenance: Literal["manual", "automatic"] = "manual"
 
 
 class NotificationSettingsRequest(BaseModel):
@@ -135,7 +136,10 @@ def _playlist_key(playlist: dict) -> str:
 def _playlist_payload(config: Config, playlist: dict) -> dict:
     key = _playlist_key(playlist)
     missing = config.missing.get(key, [])
+    counts = Counter(Syncer(config)._get_match_provenance(key, search_key) for search_key in config.mapping.get(key, {}))
     return {
+        "match_counts": {name: counts.get(name, 0) for name in ('automatic','manual','legacy')},
+        "fully_matched": bool(config.health.get(key) and config.health[key].get('source_tracks', 0)>0 and config.health[key].get('unresolved')==0 and config.health[key].get('ignored',0)==0 and config.health[key].get('matched_in_library')==config.health[key].get('source_tracks')),
         "key": key,
         "name": playlist.get("plex_playlist_name", ""),
         "source": playlist.get("source", ""),
@@ -274,7 +278,8 @@ def health():
     return {
         "status": "ok",
         "version": __version__,
-        "release_name": "Playlist Bridge 2.0 Beta 6",
+        "release_name": "Playlist Bridge 2.0 Beta 7",
+        "update": config.repository.load("updates").get("latest"),
         "build": __build__,
         "playlists": len(playlists),
         "favorites": sum(1 for p in playlists if p.get("favorite") is True),
@@ -451,8 +456,12 @@ def add_playlist(request: PlaylistAddRequest):
             verification_error = None
             try:
                 actual = plex.get_playlist_items(str(plex_playlist_id))
-                if Counter(str(t.get("plex_id")) for t in actual) != Counter(str(t) for t in matched):
-                    verification_error = "Plex did not retain all expected tracks."
+                from .verification import compare, describe
+                verification = compare(matched, actual)
+                if not verification['ok']:
+                    verification_error = describe(verification)
+                elif verification['duplicates_collapsed']:
+                    jobs.output(f"⚠ Plex collapsed {verification['duplicates_collapsed']} repeated occurrences; completed with a server limitation.")
             except Exception as exc:
                 verification_error = f"Could not verify the new Plex playlist: {exc}"
             if not verification_error:
@@ -564,6 +573,10 @@ def playlist_health(playlist_key: str):
 
         expected = Counter(str(value) for value in matched_ids)
         actual = Counter(actual_ids)
+        from .verification import compare
+        verification = compare(matched_ids, plex_items)
+        if verification['duplicates_collapsed']:
+            expected = actual.copy()
         missing_from_plex = sum((expected - actual).values())
         extra_in_plex = sum((actual - expected).values())
 
@@ -599,7 +612,9 @@ def playlist_health(playlist_key: str):
                 and extra_in_plex == 0
                 and source_added == 0
                 and source_removed == 0
+                and verification['ok']
             ),
+            "duplicates_collapsed": verification['duplicates_collapsed'],
             "read_only": True,
             "drift_details": {
                 "missing_from_plex": differences(expected - actual),
@@ -875,14 +890,26 @@ def save_missing_match(request: MissingMatchRequest):
             ):
                 affected_playlists.append(target)
 
-        jobs.progress("Saving manual match")
+        if request.provenance == 'automatic':
+            automatic_id = Matcher.match_track(source_track, plex.search_library(''), {})
+            if str(automatic_id) != request.plex_id:
+                raise HTTPException(409, 'The automatic candidate has changed. Retry automatic matching before applying it.')
+        jobs.progress("Saving " + request.provenance + " match")
         affected = syncer._apply_global_missing_match(source_track, selected, affected_playlists)
 
+        if request.provenance == 'automatic':
+            for affected_playlist in affected_playlists:
+                affected_key = _playlist_key(affected_playlist)
+                for search_key, value in config.mapping.get(affected_key, {}).items():
+                    title, _, artist = search_key.partition('|')
+                    if str(value) == request.plex_id and syncer._same_missing_identity({'title':title,'artist':artist}, source_track):
+                        syncer._set_match_provenance(affected_key, search_key, 'automatic', matched_track=selected, plex_id=request.plex_id)
+            config.save()
         if target is not None:
             key = request.replace_playlist_key
             search_key = f"{request.title}|{request.artist}"
             config.mapping.setdefault(key, {})[search_key] = request.plex_id
-            syncer._set_match_provenance(key, search_key, "manual", matched_track=selected, plex_id=request.plex_id)
+            syncer._set_match_provenance(key, search_key, request.provenance, matched_track=selected, plex_id=request.plex_id)
             config.save()
             if target not in affected_playlists:
                 affected_playlists.append(target)
@@ -967,8 +994,13 @@ def get_logs(limit: int = Query(default=100, ge=1, le=500),
     return {"entries": rows, "retention": 1000}
 
 
+class RemoveRequest(BaseModel):
+    playlist_keys: List[str] = Field(min_length=1)
+    delete_plex: bool = False
+
+
 class JobRequest(BaseModel):
-    action: Literal['sync','health','analyze','add','fix_match']
+    action: Literal['sync','health','analyze','add','fix_match','track_match','remove']
     payload: dict = Field(default_factory=dict)
 
 
@@ -988,6 +1020,11 @@ def job_store():
 
 
 def validated_payload(action, payload):
+    if action == 'remove':
+        return RemoveRequest(**payload).model_dump()
+    if action == 'track_match':
+        from .track_routes import ApplyRequest
+        return ApplyRequest(**payload).model_dump()
     if action in ('add','analyze','fix_match'):
         model = {'add':PlaylistAddRequest,'analyze':PlaylistAnalyzeRequest,'fix_match':MissingMatchRequest}[action]
         return model(**payload).model_dump()
@@ -1167,6 +1204,11 @@ def _health_batch(playlists, config):
 
 
 def execute_job(action, payload):
+    if action == 'remove':
+        return remove_selected(RemoveRequest(**payload))
+    if action == 'track_match':
+        from .track_routes import apply_preview
+        return apply_preview(payload['preview_id'])
     if action in ('analyze', 'add', 'fix_match'):
         jobs.target('job', payload.get('url') or payload.get('title') or 'Playlist')
     if action=='analyze':
@@ -1349,6 +1391,44 @@ def search_library(q: str = Query(min_length=1,max_length=200)):
     return {'playlists':playlists[:100],'tracks':tracks[:200],'track_count':len(tracks),'cached':True}
 
 
+def remove_selected(request):
+    results=[]
+    with ProcessLock():
+        config=_config()
+        selected=set(request.playlist_keys)
+        targets=[p for p in config.config['playlists'] if _playlist_key(p) in selected]
+        if selected != set(_playlist_key(p) for p in targets):
+            raise HTTPException(409,'One or more playlists are no longer registered. Refresh the list.')
+        plex=_health_plex(config) if request.delete_plex else None
+        for index,playlist in enumerate(targets,1):
+            key=_playlist_key(playlist)
+            jobs.target(key,playlist.get('plex_playlist_name',key),index,len(targets))
+            jobs.progress('Deleting Plex playlist and registration' if plex else 'Removing registration; leaving Plex untouched')
+            try:
+                if plex:
+                    plex_id=str(playlist.get('plex_playlist_id',''))
+                    if not plex_id:raise ValueError('This registration has no Plex playlist ID')
+                    if any(str(p.get('plex_playlist_id',''))==plex_id and _playlist_key(p) not in selected for p in config.config['playlists']):
+                        raise ValueError('Another unselected registration uses this Plex playlist. Remove from Bridge only or select every registration.')
+                    response=requests.delete(f'{plex.base_url}/playlists/{plex_id}',headers=plex.headers,timeout=15)
+                    if response.status_code not in (200,204,404):
+                        raise ValueError(f'Plex deletion failed (HTTP {response.status_code}); registration retained.')
+                remaining=[p for p in config.config['playlists'] if _playlist_key(p)!=key]
+                with config.repository.connect() as db:
+                    db.execute('BEGIN IMMEDIATE')
+                    db.execute("UPDATE state SET value=? WHERE namespace='runtime' AND key='playlists'",(json.dumps(remaining),))
+                    for namespace in ('mapping','missing','match_metadata','source_snapshots','ignored_tracks','health','health_attempts'):
+                        db.execute('DELETE FROM state WHERE namespace=? AND key=?',(namespace,key))
+                config.config['playlists']=remaining
+                results.append({'key':key,'name':playlist.get('plex_playlist_name'),'ok':True,'removed':True,'plex_deleted':bool(plex)})
+                jobs.output('✓ Removed playlist' + (' from Bridge and Plex' if plex else ' from Bridge; Plex untouched'))
+            except Exception as exc:
+                results.append({'key':key,'name':playlist.get('plex_playlist_name'),'ok':False,'error':redact(str(exc),config)})
+            if jobs.current():jobs.current().store.update(jobs.current().id,result={'playlists':results,'total':len(targets)})
+        if any(not row['ok'] for row in results):raise ValueError('Some removals failed. Review the per-playlist results; failed registrations were retained where possible.')
+    return {'playlists':results,'total':len(targets)}
+
+
 @app.delete('/api/playlists/{playlist_key:path}')
 def remove_playlist(playlist_key: str):
     with ProcessLock():
@@ -1380,6 +1460,11 @@ def retry_automatic(request: MissingCandidateRequest):
         candidate = {**candidate, 'plex_id': str(candidate_id), 'score': round(score['adjusted_score'],1)}
     return {'candidate': candidate}
 
+
+from .track_routes import register as register_tracks
+register_tracks(app)
+from .updates import register as register_updates
+register_updates(app)
 
 WEB_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"
 if WEB_DIST.exists():

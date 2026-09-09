@@ -1,24 +1,34 @@
-# Playlist Bridge 2.0 Beta 6
+# Playlist Bridge 2.0 Beta 7
 
-Based on the delivered Beta 5 source. Human-facing release label: **Playlist Bridge 2.0 Beta 6**. Browser title: **Playlist Bridge**. Build numbers are omitted from the UI and release filename. Internal package/image version: `2.0.0-beta.6`.
+Based on the current Beta 6 source, including the playlist-loading terminal correction. Human-facing release name: **Playlist Bridge 2.0 Beta 7**. Browser title: **Playlist Bridge**. No build number appears in the UI or ZIP filename. Package/image tag: `2.0.0-beta.7`.
 
-## Changes
+## Included changes
 
-- One persistent activity view across pages, automatically opened by queued actions. It can collapse to a sticky activity bar; finished results stay until dismissed. Jobs and Recent Activity reopen this same view instead of starting duplicate detail pollers.
-- Terminal-style timestamped output, automatic following that pauses on scroll-up, Copy Log with an HTTP-compatible selectable-text fallback, and full log downloads. The visible terminal limits rendering to the latest 1,000 lines; copying/downloading includes full saved output.
-- Structured per-playlist activity snapshots with actual matching/Plex-update totals, current stage, elapsed time, and waiting states around HTTP requests. HTTP instrumentation preserves request parameters and timeouts without globally patching requests. Concurrent health output identifies its playlist.
-- Completed, failed and not-started summaries, available matched/missing/LOST totals, retained errors and explicit cancellation checkpoint wording. Failed match-replacement syncs report failure while explaining that the mapping was saved.
-- Three quick filters: All, Favorites, Needs Attention. More Filters contains Auto Sync, Missing, LOST and Never Synced. Active extra filters become removable chips and use AND semantics. Opposite Auto Sync choices are mutually exclusive. Sync / Refresh submits only visible keys.
-- A single layout icon toggles Compact/Expanded and retains the existing browser preference. Compact rows use accessible health icons/tooltips, including amber attention, red check failure and muted not-checked states.
-- One visible sync action per playlist; three-dot menus contain Auto Sync and Remove. Playlist names open details. Relative sync times offer exact timestamps on hover. Added dates and Last added sorting are gone.
-- Dedicated global Search navigation; page-local text fields are labeled as filters. Empty list/filter states have Add Playlist or Clear Filter actions. Routine success banners are removed in favor of the activity view.
-- Responsive navigation and controls, consistent Auto Sync labels, and a simpler detail-status selector.
+Playlist Bridge 2.0 Beta 7 brings a consistent glass-style interface and clearer matching workflows.
 
-## Compatibility and packaging
+- Desktop sidebar and floating mobile navigation, with accent colors and Light, Dark or Follow System appearance in General settings. Preferences are saved in your browser.
+- One job terminal with timestamped progress. Playlist page loading uses a temporary status line that disappears when ready. Copy uses the native clipboard; Raw opens selectable text in the same panel, and Download saves the full log. Clipboard access requires browser support and a secure context; Raw remains available on plain HTTP.
+- Unresolved source tracks produce completed-with-missing results. Actual Plex write/verification failures remain errors. Duplicate source occurrences are submitted in order using Plex's play queue support; if Plex collapses duplicate occurrences, the job warns and completes when the remaining distinct tracks and order are correct.
+- Playlist filter, sort, refresh and Compact/Expanded icon controls sit together. Filters include Favorites, Needs Attention, 100% Matched, Has Manual Matches, Auto Sync, Missing, LOST and Never Synced. Multiple filters use AND; removable chips and Clear Filters reset them.
+- Select multiple playlists for Sync / Refresh or removal. Sync acts on selected playlists, or the filtered set when none are selected. Removal asks whether to leave Plex playlists untouched (the default) or delete them too. Historical job output stays available, and unrelated registrations and mappings are preserved.
+- Saved-match counts distinguish Auto, Manual and Legacy. Track names open Track Details with known playlist memberships, occurrence counts and current matches. Select playlists, preview a fresh automatic match or manual replacement, then apply and sync those playlists. Ignored occurrences are skipped; an unsuccessful automatic retry leaves existing matches unchanged.
+- Accepting an automatic suggestion records Auto provenance; choosing a manual candidate records Manual. Existing matching rules and thresholds remain unchanged.
+- A version-adjacent update indicator checks the public GHCR beta image every six hours. General settings includes Check Now. Updates are never installed automatically.
+- Global search remains on its own page; page-local search fields filter the current page. The browser title is Playlist Bridge and the sidebar release label has no build number.
 
-SQLite schema remains 4; activity snapshots use the existing state table. Existing jobs/events, schedules, mappings, CLI support and matching thresholds are preserved. Default Docker port remains 8173. The ZIP excludes runtime data, credentials, backups and dependencies; retain the existing data directory and .env.
+Earlier behavior remains: SQLite job-event history, sync-derived health, cached list rows, short-lived Analyze → Add reuse, and one generated schedule per action/scope. Standalone health checks remain read-only with respect to Plex and sync/matching state.
 
-The React production build and Python source syntax compilation succeeded. Automated regression tests, live-service exercises and Docker builds were not run, following the user's earlier preference. Prior regression-test sources are included but have not been comprehensively updated for Beta 6. No image was published from this task.
+## Compatibility and limitations
+
+SQLite schema remains 4; no new schema is required. Update-check state uses the existing state table. Existing Beta 4–6 databases retain their migration path, job history, schedules and scoped mappings. Keep your data mount and existing environment file. The archive excludes runtime data, credentials, dependencies and caches; it includes frontend source and production assets.
+
+Track membership uses saved source snapshots/health results. Playlists with incomplete cached data are identified; refresh those playlists for current membership. Track-match previews expire after ten minutes and on backend restart, and are rejected if relevant saved state changes. Applying a preview saves the selected mappings and then syncs affected playlists; a later sync failure is reported without hiding that the mappings were saved.
+
+Duplicate support depends on Plex. The writer prepares an ordered audio play queue for repeated entries and falls back to standard playlist insertion if needed. Verification accepts only missing repeat occurrences when every expected distinct track remains and relative order is preserved. Other mismatches remain errors. See the [official Plex API documentation](https://developer.plex.tv/pms/) for play queues and playlist item updates.
+
+Update checking reads the public GHCR `beta` image version label and compares release versions. It does not detect rebuilds with the same version, install updates, or require registry credentials. A failed check retains the last known result. Native clipboard copying has no fallback injection; use Raw for keyboard copying when unavailable.
+
+Python source syntax compilation and the React production build succeeded. Automated tests, live Plex/service exercises and Docker builds were not run, as requested. Prior test sources are included but have not been comprehensively updated for Beta 7. No image was published from this task.
 
 ## Publish on the build machine
 
@@ -28,11 +38,11 @@ From the extracted source folder:
 docker buildx use playlist-bridge-builder
 docker buildx inspect --bootstrap
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -t ghcr.io/rstuke82/playlist-bridge:2.0.0-beta.6 \
+  -t ghcr.io/rstuke82/playlist-bridge:2.0.0-beta.7 \
   -t ghcr.io/rstuke82/playlist-bridge:beta --push .
 ```
 
-If the builder is missing, replace the first command with `docker buildx create --name playlist-bridge-builder --use`.
+If the builder does not exist, use `docker buildx create --name playlist-bridge-builder --use` instead of the first command.
 
 ## Update the server
 
@@ -43,4 +53,4 @@ docker compose pull
 docker compose up -d --no-build
 ```
 
-Keep the data mount and existing environment file. If your environment pins a versioned image, change it to `ghcr.io/rstuke82/playlist-bridge:2.0.0-beta.6` before pulling; otherwise the default `beta` tag selects this release after publication.
+If your environment pins a version, set `PLAYLIST_BRIDGE_IMAGE=ghcr.io/rstuke82/playlist-bridge:2.0.0-beta.7`; otherwise the default `beta` tag selects this release after publication. Default port remains 8173; CLI support and the existing Docker architecture are retained.

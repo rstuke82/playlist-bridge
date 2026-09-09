@@ -1,3 +1,21 @@
+# Playlist Bridge 2.0 Beta 7
+
+Playlist Bridge 2.0 Beta 7 brings a consistent glass-style interface and clearer matching workflows.
+
+- Desktop sidebar and floating mobile navigation, with accent colors and Light, Dark or Follow System appearance in General settings. Preferences are saved in your browser.
+- One job terminal with timestamped progress. Playlist page loading uses a temporary status line that disappears when ready. Copy uses the native clipboard; Raw opens selectable text in the same panel, and Download saves the full log. Clipboard access requires browser support and a secure context; Raw remains available on plain HTTP.
+- Unresolved source tracks produce completed-with-missing results. Actual Plex write/verification failures remain errors. Duplicate source occurrences are submitted in order using Plex's play queue support; if Plex collapses duplicate occurrences, the job warns and completes when the remaining distinct tracks and order are correct.
+- Playlist filter, sort, refresh and Compact/Expanded icon controls sit together. Filters include Favorites, Needs Attention, 100% Matched, Has Manual Matches, Auto Sync, Missing, LOST and Never Synced. Multiple filters use AND; removable chips and Clear Filters reset them.
+- Select multiple playlists for Sync / Refresh or removal. Sync acts on selected playlists, or the filtered set when none are selected. Removal asks whether to leave Plex playlists untouched (the default) or delete them too. Historical job output stays available, and unrelated registrations and mappings are preserved.
+- Saved-match counts distinguish Auto, Manual and Legacy. Track names open Track Details with known playlist memberships, occurrence counts and current matches. Select playlists, preview a fresh automatic match or manual replacement, then apply and sync those playlists. Ignored occurrences are skipped; an unsuccessful automatic retry leaves existing matches unchanged.
+- Accepting an automatic suggestion records Auto provenance; choosing a manual candidate records Manual. Existing matching rules and thresholds remain unchanged.
+- A version-adjacent update indicator checks the public GHCR beta image every six hours. General settings includes Check Now. Updates are never installed automatically.
+- Global search remains on its own page; page-local search fields filter the current page. The browser title is Playlist Bridge and the sidebar release label has no build number.
+
+Earlier behavior remains: SQLite job-event history, sync-derived health, cached list rows, short-lived Analyze → Add reuse, and one generated schedule per action/scope. Standalone health checks remain read-only with respect to Plex and sync/matching state.
+
+See BUILD-NOTES.md for packaging, limitations and publish commands.
+
 # Playlist Bridge 2.0 Beta 6
 
 Live terminal-style activity with service waiting states, follow/copy/download controls, retained summaries, quieter notifications, three quick filters, a layout icon, compact health indicators, overflow menus, relative sync dates, dedicated Search, and no added dates or visible build numbers. SQLite schema 4 and Docker port 8173 remain unchanged. See BUILD-NOTES.md for details and delivery limitations.

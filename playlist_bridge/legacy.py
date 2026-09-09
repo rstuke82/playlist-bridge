@@ -437,7 +437,7 @@ except ImportError:
     Image = None
 
 APP_NAME = "Playlist Bridge"
-VERSION = "2.0 Beta 6"
+VERSION = "2.0 Beta 7"
 
 # Color codes for terminal output
 class Colors:
@@ -3081,6 +3081,47 @@ class PlexAPI:
         except Exception as e:
             print(f"Error adding to playlist: {e}")
             return False
+
+    def replace_playlist_tracks(self, playlist_id, track_ids):
+        """Use an ordered play queue for repeats, retaining the playlist identity."""
+        from . import jobs
+        ids = [str(value) for value in track_ids]
+        queue_id = None
+        if len(set(ids)) < len(ids):
+            jobs.progress('Preparing source duplicates in an ordered Plex play queue', check=False)
+            try:
+                response = requests.post(f'{self.base_url}/playQueues', headers=self.headers,
+                    params={'type':'audio', 'uri':self._library_uri(ids[0]), 'shuffle':0, 'repeat':0, 'continuous':0}, timeout=15)
+                response.raise_for_status()
+                queue_id = response.json().get('MediaContainer', {}).get('playQueueID')
+                if not queue_id:
+                    raise ValueError('Plex did not return a play queue ID')
+                for position, track_id in enumerate(ids[1:], 2):
+                    jobs.progress(f'Preparing playlist occurrence {position} of {len(ids)}', check=False, completed=position, total=len(ids))
+                    response = requests.put(f'{self.base_url}/playQueues/{queue_id}', headers=self.headers,
+                        params={'uri':self._library_uri(track_id), 'next':0}, timeout=15)
+                    response.raise_for_status()
+            except Exception as exc:
+                print('⚠ Plex play queue unavailable; using standard playlist additions:', exc)
+                queue_id = None
+        jobs.progress('Clearing destination Plex playlist', check=False)
+        if not self.clear_playlist(playlist_id):
+            print('✗ Could not clear the destination playlist; stopping this update.')
+            return False
+        if queue_id:
+            response = requests.put(f'{self.base_url}/playlists/{playlist_id}/items', headers=self.headers,
+                params={'playQueueID':queue_id}, timeout=15)
+            if response.status_code in (200, 201):
+                print(f'✓ Submitted {len(ids)} ordered occurrences from the play queue')
+                return True
+            print('⚠ Plex did not accept the play queue; retrying standard additions')
+            if not self.clear_playlist(playlist_id):
+                return False
+        success = True
+        for position, track_id in enumerate(ids, 1):
+            jobs.progress(f'Updating Plex playlist · occurrence {position} of {len(ids)}', check=False, completed=position, total=len(ids))
+            success = self.add_to_playlist(playlist_id, track_id) and success
+        return success
 
     def remove_from_playlist(
         self, playlist_id: str, playlist_item_id: str
@@ -6075,12 +6116,8 @@ class Syncer:
             f"'{playlist_name}' (ID: {playlist_id})"
         )
 
-        # The first track was already inserted by create_playlist.
-        added = 1
-
-        for plex_id in matched_tracks[1:]:
-            if plex.add_to_playlist(playlist_id, plex_id):
-                added += 1
+        # Rebuild through the same occurrence-aware path used by sync.
+        added = len(matched_tracks) if plex.replace_playlist_tracks(playlist_id, matched_tracks) else 0
 
         print(
             f"✓ Added {added}/{len(matched_tracks)} "
@@ -6586,45 +6623,9 @@ class Syncer:
         operation_error = False
 
         if matched_tracks:
-            jobs.progress("Clearing destination Plex playlist", check=False)
-            print(
-                "  Clearing existing Plex playlist..."
-            )
-
-            if not plex.clear_playlist(
-                plex_playlist_id
-            ):
-                operation_error = True
-                print(
-                    "⚠ Some existing playlist items could not "
-                    "be removed."
-                )
+            operation_error = not plex.replace_playlist_tracks(plex_playlist_id, matched_tracks)
         else:
-            print(
-                "⚠ No matched tracks - "
-                "Plex playlist left unchanged"
-            )
-
-        if matched_tracks:
-            added = 0
-
-            jobs.progress("Updating Plex playlist", check=False, completed=0, total=len(matched_tracks))
-            for position, plex_id in enumerate(matched_tracks, 1):
-                if position == 1 or position % 10 == 0 or position == len(matched_tracks):
-                    jobs.progress(f"Updating Plex playlist · track {position} of {len(matched_tracks)}", check=False, completed=position, total=len(matched_tracks))
-                if plex.add_to_playlist(
-                    plex_playlist_id,
-                    plex_id,
-                ):
-                    added += 1
-
-            print(
-                f"✓ Added {added}/{len(matched_tracks)} "
-                "matched tracks"
-            )
-
-            if added != len(matched_tracks):
-                operation_error = True
+            print('⚠ No matched tracks; Plex playlist left unchanged.')
 
         jobs.progress("Updating playlist metadata and artwork", check=False)
         plex.update_playlist_metadata(
@@ -6656,8 +6657,13 @@ class Syncer:
                 actual = plex.get_playlist_items(str(plex_playlist_id))
                 persist_sync_health(self.config, playlist_entry, source_tracks, matched_tracks,
                                     unmatched, match_stats, actual)
-                from collections import Counter
-                operation_error = Counter(str(t.get('plex_id')) for t in actual) != Counter(str(t) for t in matched_tracks)
+                from .verification import compare, describe
+                verification = compare(matched_tracks, actual)
+                operation_error = not verification['ok'] if matched_tracks else False
+                if verification['duplicates_collapsed']:
+                    print(f"⚠ Plex retained fewer repeated occurrences ({verification['duplicates_collapsed']}); sync completed with this server limitation.")
+                elif operation_error:
+                    print('✗ ' + describe(verification))
             except Exception as exc:
                 operation_error = True
                 self.config.repository.record_health_attempt(mapping_key, "Sync verification failed: " + str(exc))
@@ -6671,8 +6677,10 @@ class Syncer:
 
         self.config.save()
 
-        if matched_tracks:
-            print("✓ Sync complete!")
+        if operation_error:
+            print('✗ Sync update or verification failed. Review the differences above.')
+        elif matched_tracks:
+            print('✓ Sync completed with missing tracks.' if unmatched else '✓ Sync complete!')
         else:
             print(
                 "✓ Sync complete "

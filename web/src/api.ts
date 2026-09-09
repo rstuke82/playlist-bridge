@@ -11,6 +11,8 @@ export type Playlist = {
   last_synced?: string | null
   health?: PlaylistHealth
   health_attempt?: {attempted_at:string; error:string|null}
+  match_counts?: {automatic:number;manual:number;legacy:number}
+  fully_matched?: boolean
   saved_matches: number
   unresolved: number
   lost: number
@@ -107,6 +109,10 @@ function request<T>(path:string, init?:RequestInit):Promise<T> {
 }
 
 export const api = {
+  trackDetails: (track:any)=>request<any>('/api/tracks/details',{method:'POST',body:JSON.stringify(track)}),
+  trackPreview: (data:any)=>request<any>('/api/tracks/preview',{method:'POST',body:JSON.stringify(data)}),
+  updates: ()=>request<any>('/api/updates'),
+  checkUpdates: ()=>request<any>('/api/updates/check',{method:'POST'}),
   live: (id:string,after=0) => request<{job:Job;events:any[]}>(`/api/jobs/${id}/live?after=${after}`),
   jobLog: async (id:string) => {const response=await fetch(`/api/jobs/${id}/log`);if(!response.ok)throw new Error('Could not load log');return response.text()},
   job: (id:string) => request<Job>(`/api/jobs/${id}`),

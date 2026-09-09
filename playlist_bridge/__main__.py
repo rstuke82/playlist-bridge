@@ -17,7 +17,7 @@ def main() -> int:
         print(f"{__version__}")
         return 0
 
-    print("Playlist Bridge 2.0 Beta 6")
+    print("Playlist Bridge 2.0 Beta 7")
     print("Usage:")
     print("  python sync.py                 # existing CLI")
     print("  python sync.py --sync-all      # automated CLI sync")
