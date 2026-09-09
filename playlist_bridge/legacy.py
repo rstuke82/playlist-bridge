@@ -426,7 +426,7 @@ def _ensure_requirements():
 _ensure_requirements()
 
 
-import requests
+from . import network as requests
 from bs4 import BeautifulSoup # type: ignore
 from fuzzywuzzy import fuzz # type: ignore
 from fuzzywuzzy import process # type: ignore
@@ -437,7 +437,7 @@ except ImportError:
     Image = None
 
 APP_NAME = "Playlist Bridge"
-VERSION = "2.0.0-beta.4"
+VERSION = "2.0 Beta 6"
 
 # Color codes for terminal output
 class Colors:
@@ -862,6 +862,14 @@ STATE_SCHEMA_VERSION = 2
 
 # Requested square Apple Music playlist artwork size for Plex.
 APPLE_ARTWORK_SIZE = 3000
+
+
+def print(*args, **kwargs):
+    """Keep CLI output and mirror this thread's terminal messages into its job."""
+    import builtins
+    from . import jobs
+    builtins.print(*args, **kwargs)
+    jobs.output(kwargs.get('sep', ' ').join(str(a) for a in args))
 
 
 class Config:
@@ -5499,6 +5507,8 @@ class Syncer:
         exists. If a cached Plex ID disappeared, Playlist Bridge attempts a
         fresh automatic match; if that also fails, the track is marked LOST.
         """
+        from . import jobs
+        jobs.progress("Loading Plex library")
         plex = self._get_plex()
         source_added_indices = (
             source_added_indices or set()
@@ -5558,6 +5568,8 @@ class Syncer:
             source_tracks,
             1,
         ):
+            if i == 1 or i % 10 == 0 or i == len(source_tracks):
+                jobs.progress(f"Comparing track {i} of {len(source_tracks)} · resolving saved matches", completed=i, total=len(source_tracks))
             search_key = (
                 f"{track['title']}|{track['artist']}"
             )
@@ -6421,6 +6433,8 @@ class Syncer:
                 f"{source_display_label(source_type)}..."
             )
 
+        from . import jobs
+        jobs.progress("Loading source playlist: " + playlist_name)
         try:
             source_tracks, metadata = api.get_playlist_tracks(
                 source_url,
@@ -6572,6 +6586,7 @@ class Syncer:
         operation_error = False
 
         if matched_tracks:
+            jobs.progress("Clearing destination Plex playlist", check=False)
             print(
                 "  Clearing existing Plex playlist..."
             )
@@ -6593,7 +6608,10 @@ class Syncer:
         if matched_tracks:
             added = 0
 
-            for plex_id in matched_tracks:
+            jobs.progress("Updating Plex playlist", check=False, completed=0, total=len(matched_tracks))
+            for position, plex_id in enumerate(matched_tracks, 1):
+                if position == 1 or position % 10 == 0 or position == len(matched_tracks):
+                    jobs.progress(f"Updating Plex playlist · track {position} of {len(matched_tracks)}", check=False, completed=position, total=len(matched_tracks))
                 if plex.add_to_playlist(
                     plex_playlist_id,
                     plex_id,
@@ -6608,6 +6626,7 @@ class Syncer:
             if added != len(matched_tracks):
                 operation_error = True
 
+        jobs.progress("Updating playlist metadata and artwork", check=False)
         plex.update_playlist_metadata(
             plex_playlist_id,
             metadata.get("name", ""),
@@ -6629,9 +6648,22 @@ class Syncer:
                 "  ⚠ No artwork URL found in source"
             )
 
-        playlist_entry["last_synced"] = (
-            datetime.now().isoformat()
-        )
+        # Reuse source/matching work; verify only the destination after writes.
+        from .sync_health import persist_sync_health
+        if not operation_error:
+            jobs.progress("Verifying Plex playlist and updating health", check=False)
+            try:
+                actual = plex.get_playlist_items(str(plex_playlist_id))
+                persist_sync_health(self.config, playlist_entry, source_tracks, matched_tracks,
+                                    unmatched, match_stats, actual)
+                from collections import Counter
+                operation_error = Counter(str(t.get('plex_id')) for t in actual) != Counter(str(t) for t in matched_tracks)
+            except Exception as exc:
+                operation_error = True
+                self.config.repository.record_health_attempt(mapping_key, "Sync verification failed: " + str(exc))
+                print("Could not verify synced playlist:", exc)
+        if not operation_error:
+            playlist_entry["last_synced"] = datetime.now().isoformat()
         self._save_source_snapshot(
             mapping_key,
             source_tracks,

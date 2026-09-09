@@ -49,7 +49,7 @@ class Repository:
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             version = db.execute('PRAGMA user_version').fetchone()[0]
-            if version > 3:
+            if version > 4:
                 raise RuntimeError('Database requires a newer Playlist Bridge build')
             if version == 0:
                 db.execute('CREATE TABLE state (namespace TEXT, key TEXT, value TEXT NOT NULL, PRIMARY KEY(namespace,key))')
@@ -80,6 +80,19 @@ class Repository:
                 db.execute("CREATE INDEX jobs_status ON jobs(status,created_at)")
                 db.execute("CREATE TABLE schedules(id TEXT PRIMARY KEY,name TEXT NOT NULL,action TEXT NOT NULL,scope TEXT NOT NULL,cron TEXT NOT NULL,timezone TEXT NOT NULL,enabled INTEGER NOT NULL,next_run TEXT NOT NULL)")
                 db.execute('PRAGMA user_version=3')
+                version = 3
+            if version == 3:
+                db.execute("CREATE TABLE job_events(id INTEGER PRIMARY KEY AUTOINCREMENT,job_id TEXT NOT NULL,created_at TEXT NOT NULL,stage TEXT NOT NULL,message TEXT NOT NULL)")
+                db.execute("CREATE INDEX job_events_job_id ON job_events(job_id,id)")
+                # Retain historical jobs while merging duplicate schedule definitions.
+                for action, scope in db.execute("SELECT action,scope FROM schedules GROUP BY action,scope HAVING COUNT(*)>1").fetchall():
+                    ids = [r[0] for r in db.execute("SELECT id FROM schedules WHERE action=? AND scope=? ORDER BY rowid DESC", (action,scope))]
+                    for old in ids[1:]:
+                        db.execute("UPDATE jobs SET schedule_id=? WHERE schedule_id=?", (ids[0],old))
+                        db.execute("DELETE FROM schedules WHERE id=?", (old,))
+                db.execute("CREATE UNIQUE INDEX schedules_type ON schedules(action,scope)")
+                db.execute("UPDATE schedules SET name=CASE WHEN action='health' THEN 'Health Check' ELSE 'Sync' END || CASE scope WHEN 'all' THEN CASE WHEN action='health' THEN '' ELSE ' All' END WHEN 'favorites' THEN ' Favorites' ELSE ' Automatics' END")
+                db.execute('PRAGMA user_version=4')
             for statement in (
                 'CREATE INDEX IF NOT EXISTS logs_level_id ON application_logs(level,id DESC)',
                 'CREATE INDEX IF NOT EXISTS logs_operation_id ON application_logs(operation,id DESC)',

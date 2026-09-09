@@ -6,6 +6,7 @@ export default function MatchPicker({track,playlistKey,onClose,onSave}:{
   onClose:()=>void; onSave:(candidate:Candidate,keys?:string[])=>Promise<void>
 }) {
   const [candidates,setCandidates]=useState<Candidate[]>([])
+  const [automatic,setAutomatic]=useState<Candidate|null>(null),[automaticDone,setAutomaticDone]=useState(false)
   const [choice,setChoice]=useState<Candidate|null>(null)
   const [query,setQuery]=useState('')
   const [loading,setLoading]=useState(true)
@@ -34,9 +35,20 @@ export default function MatchPicker({track,playlistKey,onClose,onSave}:{
     document.addEventListener('keydown',keyboard)
     let active=true
     api.playlists().then(p=>{if(active)setPlaylists(p)}).catch(()=>{})
-    search('')
+    retryAutomatic()
     return ()=>{active=false;generation.current++;document.removeEventListener('keydown',keyboard);previous?.focus()}
   },[])
+  async function retryAutomatic(){
+    const id=++generation.current
+    setLoading(true)
+    try{
+      const result=await api.automatic(track)
+      if(id!==generation.current)return
+      setAutomatic(result.candidate);setAutomaticDone(true)
+      if(result.candidate){setChoice(result.candidate);setCandidates([])}else{await search('')}
+    }catch(e:any){if(id===generation.current){setError(e.message);setAutomaticDone(true)}}
+    finally{if(id===generation.current)setLoading(false)}
+  }
   async function search(text:string){
     const id=++generation.current
     setLoading(true);setError('');setChoice(null)
@@ -60,10 +72,11 @@ export default function MatchPicker({track,playlistKey,onClose,onSave}:{
         <label><input type="checkbox" checked={all} disabled={saving} onChange={e=>setAll(e.target.checked)}/> Apply to all matching unresolved occurrences</label>
         {!all&&playlists.map(p=><label className="playlist-choice" key={p.key}><input type="checkbox" disabled={saving||p.key===playlistKey} checked={keys.includes(p.key)} onChange={e=>setKeys(e.target.checked?[...keys,p.key]:keys.filter(k=>k!==p.key))}/>{p.name}{p.key===playlistKey?' (current playlist)':''}</label>)}
         {playlistKey&&<p className="muted">The current playlist's match will also be replaced. Only affected playlists sync.</p>}
+        {automaticDone&&<section className="automatic-candidate"><h3>Automatic matcher retry</h3>{automatic?<><p><strong>{automatic.title}</strong> — {automatic.artist} · {automatic.album}</p><p>The current automatic matcher selected this candidate. Confirming a replacement records Manual provenance.</p><button disabled={saving} onClick={()=>setChoice(automatic)}>Use Match</button></>:<p>No strong automatic candidate was found.</p>}<button disabled={loading||saving} onClick={()=>search('')}>Show More Candidates</button><button disabled={saving} onClick={()=>dialog.current?.querySelector<HTMLInputElement>('input[aria-label="Search Plex"]')?.focus()}>Manual Search</button></section>}
         <form className="add" onSubmit={e=>{e.preventDefault();search(query)}}><input aria-label="Search Plex" placeholder="Search Plex title, artist or album" value={query} disabled={saving} onChange={e=>setQuery(e.target.value)}/><button disabled={saving||loading}>Search</button></form>
         {error&&<p role="alert" className="error">{error}</p>}
-        {loading?<p role="status"><span className="spinner"/> Finding candidates… You can cancel while this runs.</p>:<>
-          {!candidates.length&&<p>No candidates found. Try another search.</p>}
+        {loading?<p role="status"><span className="spinner"/> Retrying automatic matching / finding candidates… You can cancel while this runs.</p>:<>
+          {!candidates.length&&!automatic&&<p>No candidates found. Try another search.</p>}
           {candidates.map(c=><button type="button" className={`candidate ${choice?.plex_id===c.plex_id?'chosen':''}`} aria-pressed={choice?.plex_id===c.plex_id} disabled={saving} key={c.plex_id} onClick={()=>setChoice(c)}><span><strong>{c.title}</strong><small>{c.artist} · {c.album||'N/A'}</small></span><b>{c.score}%</b></button>)}
         </>}
       </div>

@@ -1,6 +1,6 @@
 # Playlist Bridge
 
-**Version:** 2.0.0-beta.4 · **Build:** 20260908.8
+**Release:** Playlist Bridge 2.0 Beta 6
 
 Playlist Bridge syncs public **Spotify** and **Apple Music** playlists to playlists in your local **Plex music library**.
 
@@ -10,11 +10,20 @@ Version 2.0 adds a self-hosted **React + TypeScript** web interface with a **Fas
 
 ## Current beta features
 
-Beta 4 focuses on performance and stability. It retains the dashboard, persisted health details, background jobs, schedules, matching engine, and CLI from beta 3. The version remains `2.0.0-beta.4`; separate build metadata is `20260908.8`.
+Playlist Bridge 2.0 Beta 6 focuses on clear live activity and a simpler interface.
 
-Playlist and missing-track lists load on page entry and state changes. Jobs refresh every 3 seconds while active and every 45 seconds while idle; server health refreshes every 45 seconds. Settings data loads when its section opens. Health batches check up to three playlists concurrently and show completed results incrementally. Playlist details return a timeout error after 60 seconds; retry if the source or Plex is slow. Two detail requests can run at once; additional requests receive a busy message. Existing Spotify, Apple Music, and Plex network timeouts remain in place.
+- A live terminal-style activity panel opens when you start a job. It identifies the playlist, stage, actual track totals, pending external requests and elapsed time. Collapse it to a small activity bar while navigating. Completed output stays until dismissed and is available later in job history.
+- Follow Output pauses when you scroll up. Copy Log and full log downloads help with troubleshooting; plain HTTP installations have a selectable-text copy fallback.
+- Finished jobs show completed/failed/not-started counts and available matched, missing and LOST totals. Concurrent health checks have separately labeled activity. Cancellation messages explain the safe checkpoint and keep completed work.
+- All, Favorites and Needs Attention are the three quick playlist filters. Extra filters stay under More Filters and appear as removable chips when selected. Sync / Refresh applies to displayed results only.
+- One small icon switches Compact/Expanded views and remembers the choice. Compact rows show an amber warning for unhealthy playlists, red for a health-check failure, green for healthy and a muted unknown state. Icons have accessible descriptions and issue tooltips.
+- Playlist names open details. Sync / Refresh stays visible; Auto Sync and Remove are in the three-dot menu. Added dates and Last added sorting are removed. Sync times are relative, with exact timestamps on hover.
+- Global search lives on its own Search page. Fields on Playlists, Missing and playlist details filter only that page.
+- The browser title is simply Playlist Bridge. The sidebar identifies Playlist Bridge 2.0 Beta 6 without a build number.
 
-Beta 4 adds SQLite indexes without changing schema version 3 or stored data formats. Log cleanup runs every 100 inserts; the visible log window remains the newest 1,000 entries. HTML revalidates after upgrades, while hashed assets use long-lived immutable caching.
+Beta 5 behavior remains: SQLite job-event history, automatic health updates from sync results, app-only playlist removal, cached list rows, status/provenance filters, automatic-first Fix Match, short-lived Analyze → Add reuse, and one generated schedule per action/scope.
+
+Storage remains SQLite schema 4. New activity snapshots use the existing generic state table; Beta 5 databases require no schema migration. Jobs and output survive restarts. The API keeps idle polling slow; live activity uses one completion-scheduled request at a time while expanded, then stops after final output. Lists and settings load on demand. Two bounded detail workers, request timeouts, read-only health concurrency, matching thresholds, Docker port 8173 and CLI support are preserved.
 
 - React + TypeScript web interface
 - FastAPI backend
@@ -93,20 +102,21 @@ docker compose up -d --no-build
 ```
 
 The default image is `ghcr.io/rstuke82/playlist-bridge:beta`. This archive does not publish an image.
-To pin this build, set `PLAYLIST_BRIDGE_IMAGE=ghcr.io/rstuke82/playlist-bridge:2.0.0-beta.4`
-in `.env` once that tag is published. The `beta` tag advances between releases; use the version tag to select beta 4.
+To pin this build, set `PLAYLIST_BRIDGE_IMAGE=ghcr.io/rstuke82/playlist-bridge:2.0.0-beta.6`
+in `.env` once that tag is published. The `beta` tag advances between releases; use the version tag to select Beta 6.
 Beta images should never be tagged `latest`.
 
-Maintainers can build and tag for GHCR with:
+Maintainers can publish both server architectures with the existing buildx builder:
 
 ```bash
-docker build --build-arg VCS_REF="$(git rev-parse HEAD)" \
-  -t ghcr.io/rstuke82/playlist-bridge:2.0.0-beta.4 \
-  -t ghcr.io/rstuke82/playlist-bridge:beta .
-docker login ghcr.io
-docker push ghcr.io/rstuke82/playlist-bridge:2.0.0-beta.4
-docker push ghcr.io/rstuke82/playlist-bridge:beta
+docker buildx use playlist-bridge-builder
+docker buildx inspect --bootstrap
+docker buildx build --platform linux/amd64,linux/arm64 \
+  -t ghcr.io/rstuke82/playlist-bridge:2.0.0-beta.6 \
+  -t ghcr.io/rstuke82/playlist-bridge:beta --push .
 ```
+
+If the named builder does not exist, replace the first command with `docker buildx create --name playlist-bridge-builder --use`. The multi-platform build includes both AMD64 servers and ARM64 machines.
 
 The image includes OCI title, description, source, version, and revision labels.
 See the [Dockerfile reference](https://docs.docker.com/reference/dockerfile/) and
@@ -366,7 +376,7 @@ Beta 1 and beta 2 SQLite databases upgrade automatically to schema 3, retaining 
 
 ## Background jobs and schedules
 
-Settings is organized into General, Logs, and Jobs. Web sync, health, analyze, add, and match-save operations enter a persistent SQLite queue. One worker executes jobs in the background; progress and results remain available after navigation or refresh. Sync All, Favorites, and Automatics are available on both Dashboard and Playlists. The Automatic flag selects playlists for automatic scopes; configure a schedule to run them periodically.
+Settings is organized into General, Logs, and Jobs. Web sync, health, analyze, add, and match-save operations enter a persistent SQLite queue. One worker executes jobs in the background; progress and results remain available after navigation or refresh. Dashboard offers Sync All, Favorites and Auto Sync scopes. The Playlists action uses the filtered results. The Auto Sync setting controls membership in scheduled Auto Sync scopes.
 
 Create sync or health schedules using a five-field cron expression and an IANA timezone (for example, `0 3 * * *` with `America/Chicago`). Schedules can be edited, paused, deleted, or run manually. The web backend must be running. Missed triggers are coalesced into one run, and a schedule does not overlap itself. Queued jobs survive restart; jobs interrupted during execution are marked interrupted and are not replayed automatically.
 

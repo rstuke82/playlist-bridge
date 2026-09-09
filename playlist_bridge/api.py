@@ -9,6 +9,11 @@ import contextlib
 import io
 import os
 import threading
+import time
+import uuid
+import json
+import hashlib
+import copy
 from collections import Counter
 from pathlib import Path
 from typing import List, Literal, Optional
@@ -17,7 +22,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-import requests
+from . import network as requests
 
 from . import __version__, __build__
 from . import jobs
@@ -69,6 +74,7 @@ class PlaylistAnalyzeRequest(BaseModel):
 
 class PlaylistAddRequest(BaseModel):
     url: str
+    analysis_id: Optional[str] = None
     auto_sync: bool = True
     favorite: bool = False
 
@@ -165,6 +171,8 @@ def _record_log(level, operation, message, config=None):
         config = config or _config(read_only=True, namespaces=[])
         context = jobs.current()
         config.repository.add_log(level, context.action if context else operation, redact(message, config))
+        if context:
+            context.store.event(context.id, message, operation)
     except Exception:
         # A diagnostic failure must not turn a successful sync into an error.
         pass
@@ -190,21 +198,28 @@ async def log_operations(request, call_next):
     return response
 
 
-_capture_lock = threading.RLock()
-
-
 def _capture(callable_obj, *args, **kwargs):
-    stream = io.StringIO()
+    # Thread-local capture avoids redirecting unrelated requests' stdout.
+    previous = getattr(jobs._local, 'output', None)
+    buffer = []
+    jobs._local.output = buffer
     try:
-        with _capture_lock, contextlib.redirect_stdout(stream), contextlib.redirect_stderr(stream):
-            result = callable_obj(*args, **kwargs)
-    except Exception:
-        _record_log("ERROR", getattr(callable_obj, "__name__", "operation"), stream.getvalue() or "Operation failed")
-        raise
-    output = redact(stream.getvalue(), _config(read_only=True, namespaces=[]))
-    if output.strip():
-        _record_log("INFO", getattr(callable_obj, "__name__", "operation"), output)
-    return result, output
+        result = callable_obj(*args, **kwargs)
+        output = redact("\n".join(buffer), _config(read_only=True, namespaces=[]))
+        return result, output
+    finally:
+        jobs._local.output = previous
+
+
+_analysis_cache = {}
+_analysis_lock = threading.Lock()
+ANALYSIS_TTL = 600
+
+
+def _analysis_fingerprint(config):
+    data = [config.config.get('plex'), config.ignored_tracks, config.artist_aliases,
+            config.mapping, config.match_metadata]
+    return hashlib.sha256(json.dumps(data, sort_keys=True, default=str).encode()).hexdigest()
 
 
 def _health_plex(config):
@@ -259,6 +274,7 @@ def health():
     return {
         "status": "ok",
         "version": __version__,
+        "release_name": "Playlist Bridge 2.0 Beta 6",
         "build": __build__,
         "playlists": len(playlists),
         "favorites": sum(1 for p in playlists if p.get("favorite") is True),
@@ -300,7 +316,7 @@ def update_playlist(playlist_key: str, request: PlaylistUpdateRequest):
 
 
 def analyze_playlist(request: PlaylistAnalyzeRequest):
-    config = _config()
+    config = _config(read_only=True)
     source_type, url, source_api = _source_for_url(request.url)
     playlist_id = Config._extract_id(url, source_type)
     if not playlist_id:
@@ -316,6 +332,7 @@ def analyze_playlist(request: PlaylistAnalyzeRequest):
             url,
             fetch_artwork=False,
         )
+        jobs.target('job', repair_text(metadata.get('name', 'Source playlist')))
         jobs.progress("Matching source tracks against Plex")
         syncer = Syncer(config)
         syncer.plex = _health_plex(config)
@@ -330,7 +347,21 @@ def analyze_playlist(request: PlaylistAnalyzeRequest):
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
+    analysis_id = str(uuid.uuid4())
+    with _analysis_lock:
+        for key in list(_analysis_cache):
+            if _analysis_cache[key]['expires'] < time.monotonic():
+                del _analysis_cache[key]
+        while len(_analysis_cache) >= 10:
+            del _analysis_cache[next(iter(_analysis_cache))]
+        _analysis_cache[analysis_id] = {
+            'expires': time.monotonic() + ANALYSIS_TTL, 'url': url,
+            'fingerprint': _analysis_fingerprint(config),
+            'tracks': tracks, 'metadata': metadata, 'result': match_result,
+        }
     return {
+        "analysis_id": analysis_id,
+        "expires_in": ANALYSIS_TTL,
         "source": source_type,
         "source_id": playlist_id,
         "url": url,
@@ -357,19 +388,34 @@ def add_playlist(request: PlaylistAddRequest):
         try:
             jobs.progress("Connecting to Plex")
             plex = _health_plex(config)
-            jobs.progress("Reading source playlist and artwork")
-            tracks, metadata = source_api.get_playlist_tracks(url, fetch_artwork=True)
-            if not tracks:
-                raise HTTPException(status_code=422, detail="Source returned no tracks. Check that the playlist is public and its URL is correct.")
+            cached = None
+            if request.analysis_id:
+                with _analysis_lock:
+                    cached = copy.deepcopy(_analysis_cache.get(request.analysis_id))
+                if (not cached or cached['expires'] < time.monotonic() or cached['url'] != url
+                        or cached['fingerprint'] != _analysis_fingerprint(config)):
+                    raise HTTPException(409, "Analysis expired or matching settings changed. Analyze again or choose Add Now.")
             syncer = Syncer(config)
             syncer.plex = plex
-            jobs.progress("Matching tracks against the Plex library")
             mapping_key = f"{source_type}:{playlist_id}"
-            matched, unmatched, mapping, _library, _stats = syncer._match_source_tracks(
-                tracks,
-                mapping_key,
-                mark_new_matches=False,
-            )
+            if cached:
+                jobs.progress("Reusing analyzed source tracks and matches")
+                tracks, metadata = cached['tracks'], cached['metadata']
+                jobs.target('job', repair_text(metadata.get('name', 'Source playlist')))
+                matched, unmatched, mapping, _library, _stats = cached['result']
+                lookup = {str(t.get('plex_id')): t for t in _library or []}
+                for search_key, plex_id in mapping.items():
+                    syncer._set_match_provenance(mapping_key, search_key, 'automatic',
+                        matched_track=lookup.get(str(plex_id)), plex_id=plex_id)
+            else:
+                jobs.progress("Reading source playlist and artwork")
+                tracks, metadata = source_api.get_playlist_tracks(url, fetch_artwork=True)
+                jobs.target('job', repair_text(metadata.get('name', 'Source playlist')))
+                jobs.progress("Matching tracks against the Plex library")
+                matched, unmatched, mapping, _library, _stats = syncer._match_source_tracks(
+                    tracks, mapping_key, mark_new_matches=False)
+            if not tracks:
+                raise HTTPException(422, "Source returned no tracks. Check that the playlist is public and its URL is correct.")
             syncer._store_unmatched(mapping_key, unmatched)
             config.mapping[mapping_key] = mapping
 
@@ -413,6 +459,12 @@ def add_playlist(request: PlaylistAddRequest):
                 playlist["last_synced"] = datetime.now(timezone.utc).isoformat()
             syncer._save_source_snapshot(mapping_key, tracks)
             config.save()
+            if not verification_error:
+                from .sync_health import persist_sync_health
+                persist_sync_health(config, playlist, tracks, matched, unmatched, _stats, actual)
+            if request.analysis_id:
+                with _analysis_lock:
+                    _analysis_cache.pop(request.analysis_id, None)
             result = _playlist_payload(config, playlist)
             if verification_error:
                 ctx = jobs.current()
@@ -450,7 +502,7 @@ def sync_one(playlist_key: str):
         if playlist is None:
             raise HTTPException(status_code=404, detail="Playlist not found")
         result, log = _capture(Syncer(config).sync_playlist, playlist)
-        return {"summary": result, "log": log}
+        return {"summary": result, "log": log, "health": config.repository.load('health').get(playlist_key)}
 
 
 def _health_call(fn, *args, **kwargs):
@@ -535,6 +587,7 @@ def playlist_health(playlist_key: str):
             "plex_playlist_tracks": plex_count,
             "matched_in_library": len(matched_ids),
             "unresolved": unresolved,
+            "lost": sum(1 for track in unmatched if track.get("status") == "lost"),
             "ignored": ignored,
             "missing_from_plex_playlist": missing_from_plex,
             "extra_in_plex_playlist": extra_in_plex,
@@ -575,18 +628,23 @@ def playlist_health(playlist_key: str):
         raise HTTPException(status_code=502, detail=message) from exc
 
 
-def playlist_detail(playlist_key: str):
+def playlist_detail(playlist_key: str, report=lambda message, percent: None):
     config = _config(read_only=True)
     playlist = next((p for p in config.config.get("playlists", []) if _playlist_key(p) == playlist_key), None)
     if playlist is None:
         raise HTTPException(status_code=404, detail="Playlist not found")
     try:
         _, url, source = _source_for_url(playlist.get("source_url", ""))
+        report("Loading source playlist", 5)
         tracks, metadata = source.get_playlist_tracks(url, fetch_artwork=False)
+        report(f"{len(tracks)} source tracks found; loading Plex library", 25)
         syncer = Syncer(config)
         library = {str(t.get("plex_id")): t for t in _health_plex(config).search_library("")}
+        report("Resolving saved matches", 50)
         rows = []
         for index, track in enumerate(tracks):
+            if index % 10 == 0:
+                report(f"Comparing tracks {index + 1} / {len(tracks)}", 50 + int(45 * (index + 1) / max(1, len(tracks))))
             search_key = f"{track.get('title', '')}|{track.get('artist', '')}"
             plex_id = config.mapping.get(playlist_key, {}).get(search_key)
             match = library.get(str(plex_id)) if plex_id is not None else None
@@ -596,6 +654,7 @@ def playlist_detail(playlist_key: str):
             if syncer._find_ignored_track_key(playlist_key, track):
                 status = 'Ignored'
             rows.append({**track, "index": index, "status": status, "match": match, "plex_id": plex_id})
+        report("Playlist details ready", 100)
         return {"playlist": _playlist_payload(config, playlist), "metadata": metadata, "tracks": rows}
     except HTTPException:
         raise
@@ -608,12 +667,39 @@ DETAIL_TIMEOUT = 60
 _detail_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="playlist-detail")
 _detail_slots = threading.BoundedSemaphore(2)
 
+_detail_progress = {}
+_detail_progress_lock = threading.Lock()
+
+
+@app.get('/api/detail-progress/{progress_id}')
+def detail_progress(progress_id: str):
+    with _detail_progress_lock:
+        return _detail_progress.get(progress_id, {'events': [], 'percent': 0})
+
+
 @app.get("/api/playlists/{playlist_key:path}/detail")
-async def playlist_detail_route(playlist_key: str):
+async def playlist_detail_route(playlist_key: str, progress_id: str = Query(default='', max_length=100)):
+    def report(message, percent):
+        if not progress_id:
+            return
+        with _detail_progress_lock:
+            item = _detail_progress.get(progress_id)
+            if item and not item.get('done'):
+                item['events'].append({'message': message, 'created_at': jobs.now()})
+                item['percent'] = percent
+    with _detail_progress_lock:
+        for key in list(_detail_progress):
+            if time.monotonic() - _detail_progress[key]['created'] > 180:
+                del _detail_progress[key]
+        if progress_id:
+            if len(_detail_progress) >= 100:
+                del _detail_progress[next(iter(_detail_progress))]
+            _detail_progress[progress_id] = {'events': [], 'percent': 0, 'created': time.monotonic()}
+    report('Loading playlist', 0)
     if not _detail_slots.acquire(blocking=False):
         raise HTTPException(503, "Playlist details are busy. Please retry shortly.")
     try:
-        future = _detail_pool.submit(playlist_detail, playlist_key)
+        future = _detail_pool.submit(playlist_detail, playlist_key, report)
     except BaseException:
         _detail_slots.release()
         raise
@@ -624,7 +710,12 @@ async def playlist_detail_route(playlist_key: str):
     try:
         return await asyncio.wait_for(asyncio.shield(wrapped), DETAIL_TIMEOUT)
     except asyncio.TimeoutError:
+        report("Timed out after 60 seconds. Check source/Plex connectivity and retry.", 0)
         raise HTTPException(504, "Playlist details timed out after 60 seconds. Check source/Plex connectivity and retry.") from None
+    finally:
+        with _detail_progress_lock:
+            if progress_id in _detail_progress:
+                _detail_progress[progress_id]['done'] = True
 
 
 @app.get("/api/settings/plex")
@@ -799,17 +890,30 @@ def save_missing_match(request: MissingMatchRequest):
 
         sync_results = []
         combined_log = []
-        for playlist in affected_playlists:
+        for index, playlist in enumerate(affected_playlists):
+            jobs.target(_playlist_key(playlist), playlist.get('plex_playlist_name',''), index+1, len(affected_playlists))
             jobs.progress("Syncing affected playlist: " + playlist.get("plex_playlist_name", ""))
             result, log = _capture(syncer.sync_playlist, playlist)
+            jobs.activity(mode='failed' if result.get('errors') else 'completed', stage='Playlist update finished')
             sync_results.append({
                 "key": _playlist_key(playlist),
                 "name": playlist.get("plex_playlist_name", ""),
                 "summary": result,
+                "ok": not result.get('errors'),
             })
+            ctx = jobs.current()
+            if ctx:
+                ctx.store.update(ctx.id, result={'affected': affected, 'total': len(affected_playlists),
+                    'synced_playlists': len(sync_results), 'playlists': sync_results})
             if log:
                 combined_log.append(log)
 
+        if any(p.get('summary', {}).get('errors') for p in sync_results):
+            ctx = jobs.current()
+            if ctx:
+                ctx.store.update(ctx.id, result={'affected': affected, 'synced_playlists': len(affected_playlists),
+                    'playlists': [{**p, 'ok': not p.get('summary', {}).get('errors')} for p in sync_results]})
+            raise HTTPException(502, 'Manual match was saved, but a playlist update failed. Review the output and sync that playlist again.')
         return {
             "affected": affected,
             "synced_playlists": len(affected_playlists),
@@ -869,7 +973,7 @@ class JobRequest(BaseModel):
 
 
 class ScheduleRequest(BaseModel):
-    name: str = Field(min_length=1, max_length=120)
+    name: str = ""
     action: Literal['sync','health'] = 'sync'
     scope: Literal['all','favorites','automatic'] = 'automatic'
     cron: str
@@ -919,6 +1023,45 @@ def get_job(job_id: str):
     if not row:
         raise HTTPException(404,'Job not found')
     return row
+
+
+@app.get('/api/jobs/{job_id}/events')
+def job_events(job_id: str, after: int = Query(default=0, ge=0)):
+    if not job_store().get(job_id):
+        raise HTTPException(404, 'Job not found')
+    return job_store().events(job_id, after)
+
+
+@app.get('/api/jobs/{job_id}/live')
+def live_job(job_id: str, after: int = Query(default=0, ge=0)):
+    store = job_store()
+    job = store.get(job_id)
+    if not job:
+        raise HTTPException(404, 'Job not found')
+    return {'job': job, 'events': store.events(job_id, after)}
+
+
+@app.get('/api/jobs/{job_id}/log')
+def download_job_log(job_id: str):
+    from starlette.responses import StreamingResponse
+    store = job_store()
+    job = store.get(job_id)
+    if not job:
+        raise HTTPException(404, 'Job not found')
+    def lines():
+        yield f"{job['action']} · {job['status']}\nStarted: {job['started_at']}\n"
+        after = 0
+        while True:
+            rows = store.events(job_id, after)
+            if not rows:
+                break
+            for row in rows:
+                yield f"{row['created_at']}  {row['message']}\n"
+            after = rows[-1]['id']
+        if job.get('error'):
+            yield f"Error: {job['error']}\n"
+    return StreamingResponse(lines(), media_type='text/plain', headers={
+        'Content-Disposition': f'attachment; filename="playlist-bridge-{job["id"]}.log"'})
 
 
 @app.post('/api/jobs/{job_id}/cancel')
@@ -977,16 +1120,20 @@ def _health_batch(playlists, config):
 
     def perform(playlist):
         jobs._local.context = ctx
+        jobs.target(_playlist_key(playlist), playlist.get('plex_playlist_name',''), playlists.index(playlist)+1, len(playlists))
         try:
             if ctx:
                 ctx.checkpoint()
             result = playlist_health(_playlist_key(playlist))
+            jobs.activity(mode='completed', stage='Health check complete')
             return {"key": _playlist_key(playlist), "name": playlist.get("plex_playlist_name"), "ok": True, "result": result}
         except Exception as exc:
+            jobs.activity(mode='failed', stage=redact(getattr(exc, 'detail', str(exc)), config))
             return {"key": _playlist_key(playlist), "name": playlist.get("plex_playlist_name"), "ok": False,
                     "error": redact(getattr(exc, "detail", str(exc)), config)}
         finally:
             jobs._local.context = None
+            jobs._local.target = None
 
     with ThreadPoolExecutor(max_workers=3, thread_name_prefix="playlist-health") as pool:
         pending = set()
@@ -1010,16 +1157,18 @@ def _health_batch(playlists, config):
                 except jobs.Cancelled:
                     cancelled = True
             if ctx:
-                ctx.store.update(ctx.id, result={"playlists": results},
+                ctx.store.update(ctx.id, result={"playlists": results, "total": len(playlists)},
                                  progress=f"Health: {len(results)} of {len(playlists)} finished")
     if cancelled:
         raise jobs.Cancelled()
     if any(not r['ok'] for r in results):
         raise ValueError(f"{sum(not r['ok'] for r in results)} of {len(results)} playlists failed. See job results and logs.")
-    return {"playlists": results}
+    return {"playlists": results, "total": len(playlists)}
 
 
 def execute_job(action, payload):
+    if action in ('analyze', 'add', 'fix_match'):
+        jobs.target('job', payload.get('url') or payload.get('title') or 'Playlist')
     if action=='analyze':
         return analyze_playlist(PlaylistAnalyzeRequest(**payload))
     if action=='add':
@@ -1037,24 +1186,33 @@ def execute_job(action, payload):
         playlists=[p for p in playlists if _playlist_key(p) in payload.get('playlist_keys',[])]
     if not playlists:
         raise ValueError('No playlists match this job scope')
+    ctx = jobs.current()
+    if ctx:
+        ctx.store.update(ctx.id, result={'playlists': [], 'total': len(playlists)})
     if action == 'health':
         return _health_batch(playlists, config)
     results=[]
     for index,playlist in enumerate(playlists):
+        jobs.target(_playlist_key(playlist), playlist.get('plex_playlist_name',''), index+1, len(playlists))
         jobs.progress(f"{index+1} of {len(playlists)}: {playlist.get('plex_playlist_name','')}")
         try:
             result=sync_one(_playlist_key(playlist)) if action=='sync' else playlist_health(_playlist_key(playlist))
             if action=='sync' and isinstance(result.get('summary'),dict) and result['summary'].get('errors'):
                 raise ValueError('Playlist sync reported errors; see the sync log')
             results.append({'key':_playlist_key(playlist),'name':playlist.get('plex_playlist_name'),'ok':True,'result':result})
+            jobs.activity(mode='completed', stage='Playlist completed')
+            jobs.output('✓ Playlist completed: ' + playlist.get('plex_playlist_name',''))
         except Exception as exc:
-            results.append({'key':_playlist_key(playlist),'name':playlist.get('plex_playlist_name'),'ok':False,'error':redact(getattr(exc,'detail',str(exc)),config)})
+            message = redact(getattr(exc,'detail',str(exc)),config)
+            results.append({'key':_playlist_key(playlist),'name':playlist.get('plex_playlist_name'),'ok':False,'error':message})
+            jobs.activity(mode='failed', stage=message)
+            jobs.output('✗ ' + playlist.get('plex_playlist_name','') + ': ' + message)
         ctx=jobs.current()
         if ctx:
-            ctx.store.update(ctx.id,result={'playlists':results})
+            ctx.store.update(ctx.id,result={'playlists':results, 'total':len(playlists)})
     if any(not r['ok'] for r in results):
         raise ValueError(f"{sum(not r['ok'] for r in results)} of {len(results)} playlists failed. See job results and logs.")
-    return {'playlists':results}
+    return {'playlists':results, 'total':len(playlists)}
 
 
 # Compatibility URLs now return 202 + a durable job; poll /api/jobs/{id}.
@@ -1189,6 +1347,38 @@ def search_library(q: str = Query(min_length=1,max_length=200)):
             if query in ' '.join(str(track.get(k,'')) for k in ('title','artist','album')).casefold():
                 tracks.append({**track,'playlist_key':key,'playlist_name':name})
     return {'playlists':playlists[:100],'tracks':tracks[:200],'track_count':len(tracks),'cached':True}
+
+
+@app.delete('/api/playlists/{playlist_key:path}')
+def remove_playlist(playlist_key: str):
+    with ProcessLock():
+        config = _config()
+        playlists = config.config.get('playlists', [])
+        if not any(_playlist_key(p) == playlist_key for p in playlists):
+            raise HTTPException(404, 'Playlist not found')
+        # One transaction removes only this registration and its scoped state.
+        with config.repository.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            db.execute("UPDATE state SET value=? WHERE namespace='runtime' AND key='playlists'",
+                (json.dumps([p for p in playlists if _playlist_key(p) != playlist_key]),))
+            for namespace in ('mapping','missing','match_metadata','source_snapshots','ignored_tracks','health','health_attempts'):
+                db.execute('DELETE FROM state WHERE namespace=? AND key=?', (namespace,playlist_key))
+        return {'deleted': True, 'plex_playlist_untouched': True}
+
+
+@app.post('/api/missing/automatic')
+def retry_automatic(request: MissingCandidateRequest):
+    config = _config(read_only=True)
+    plex = _health_plex(config)
+    library = plex.search_library('')
+    source = request.model_dump(include={'title','artist','album'})
+    # Deliberately omit saved mappings so the unchanged matcher gets a fresh try.
+    candidate_id = Matcher.match_track(source, library, {})
+    candidate = next((t for t in library if str(t.get('plex_id')) == str(candidate_id)), None) if candidate_id is not None else None
+    if candidate:
+        score = Matcher.score_candidate(source, candidate)
+        candidate = {**candidate, 'plex_id': str(candidate_id), 'score': round(score['adjusted_score'],1)}
+    return {'candidate': candidate}
 
 
 WEB_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"

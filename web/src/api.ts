@@ -1,4 +1,4 @@
-export type Job = {id:string;action:string;status:string;progress:string;error?:string;payload:any;result:any;created_at:string;started_at?:string;finished_at?:string}
+export type Job = {activity?:any;id:string;action:string;status:string;progress:string;error?:string;payload:any;result:any;created_at:string;started_at?:string;finished_at?:string}
 export const activeJob = (job:Job) => ['queued','running','cancelling'].includes(job.status)
 export type Playlist = {
   key: string
@@ -79,7 +79,7 @@ export type Candidate = {
 const pending = new Map<string, Promise<any>>()
 async function send<T>(path:string, init?:RequestInit):Promise<T> {
   const controller = new AbortController()
-  const timer = setTimeout(()=>controller.abort(), path.endsWith('/detail') ? 65000 : 30000)
+  const timer = setTimeout(()=>controller.abort(), path.includes('/detail?') ? 65000 : 30000)
   try {
     const response = await fetch(path, {...init, signal:controller.signal,
       headers:{'Content-Type':'application/json', ...init?.headers}})
@@ -88,6 +88,7 @@ async function send<T>(path:string, init?:RequestInit):Promise<T> {
       throw new Error(typeof body.detail === 'string' ? body.detail : `Request failed (${response.status}). Check Settings → Logs.`)
     }
     const result = await response.json()
+    if(init?.method==='POST'&&result?.id&&result?.action&&result?.status)window.dispatchEvent(new CustomEvent('show-activity',{detail:result.id}))
     if (init?.method && init.method !== 'GET') window.dispatchEvent(new Event('jobs-refresh'))
     return result
   } catch (error:any) {
@@ -106,6 +107,12 @@ function request<T>(path:string, init?:RequestInit):Promise<T> {
 }
 
 export const api = {
+  live: (id:string,after=0) => request<{job:Job;events:any[]}>(`/api/jobs/${id}/live?after=${after}`),
+  jobLog: async (id:string) => {const response=await fetch(`/api/jobs/${id}/log`);if(!response.ok)throw new Error('Could not load log');return response.text()},
+  job: (id:string) => request<Job>(`/api/jobs/${id}`),
+  events: (id:string,after=0) => request<any[]>(`/api/jobs/${id}/events?after=${after}`),
+  removePlaylist: (key:string) => request<any>(`/api/playlists/${encodeURIComponent(key)}`,{method:'DELETE'}),
+  automatic: (track:any) => request<any>('/api/missing/automatic',{method:'POST',body:JSON.stringify(track)}),
   jobs: () => request<Job[]>('/api/jobs'),
   enqueue: (action:string,payload:any={}) => request<Job>('/api/jobs',{method:'POST',body:JSON.stringify({action,payload})}),
   cancel: (id:string) => request<Job>(`/api/jobs/${id}/cancel`,{method:'POST'}),
@@ -119,7 +126,18 @@ export const api = {
   search: (q:string) => request<any>(`/api/search?q=${encodeURIComponent(q)}`),
   clearLogs: () => request<any>('/api/settings/logs',{method:'DELETE'}),
   logs: (level:string,action='') => request<{entries:{id:number;created_at:string;level:string;operation:string;message:string}[];retention:number}>(`/api/settings/logs?limit=200${level?`&level=${level}`:''}${action?`&action=${encodeURIComponent(action)}`:''}`),
-  detail: (key: string) => request<any>(`/api/playlists/${encodeURIComponent(key)}/detail`),
+  detail: async (key: string, onProgress?:(progress:any)=>void) => {
+    const id=globalThis.crypto?.randomUUID?.()||`${Date.now()}-${Math.random().toString(36).slice(2)}`
+    let done=false
+    let timer:ReturnType<typeof setTimeout>|undefined
+    const poll=async()=>{
+      try{const state=await request<any>(`/api/detail-progress/${id}`);if(!done)onProgress?.(state)}catch{}
+      if(!done)timer=setTimeout(poll,750)
+    }
+    timer=setTimeout(poll,250)
+    try{return await request<any>(`/api/playlists/${encodeURIComponent(key)}/detail?progress_id=${id}`)}
+    finally{done=true;if(timer)clearTimeout(timer)}
+  },
   health: () => request<any>('/api/health'),
   playlists: () => request<Playlist[]>('/api/playlists'),
   playlistHealth: (key: string) => request<PlaylistHealth>(`/api/playlists/${encodeURIComponent(key)}/health`),

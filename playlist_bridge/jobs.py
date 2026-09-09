@@ -32,12 +32,14 @@ def current():
     return getattr(_local, 'context', None)
 
 
-def progress(message, check=True):
+def progress(message, check=True, completed=None, total=None):
     ctx = current()
     if ctx:
         if check:
             ctx.checkpoint()
         ctx.store.update(ctx.id, progress=message)
+        activity(mode='working', stage=message, completed=completed, total=total,
+                 since=now(), service=None)
 
 
 class Store:
@@ -49,17 +51,17 @@ class Store:
             cursor = db.execute(sql, params)
             rows = [dict(zip([d[0] for d in cursor.description], row)) for row in cursor.fetchall()]
         for row in rows:
-            for key in ('payload', 'result'):
+            for key in ('payload', 'result', 'activity'):
                 if key in row:
                     row[key] = json.loads(row[key]) if row[key] else None
         return rows
 
     def get(self, job_id):
-        rows = self._rows('SELECT * FROM jobs WHERE id=?', (job_id,))
+        rows = self._rows("SELECT jobs.*, state.value AS activity FROM jobs LEFT JOIN state ON state.namespace='job_activity' AND state.key=jobs.id WHERE jobs.id=?", (job_id,))
         return rows[0] if rows else None
 
     def list(self):
-        return self._rows("SELECT * FROM jobs ORDER BY CASE WHEN status IN ('queued','running','cancelling') THEN 0 ELSE 1 END, created_at DESC LIMIT 200")
+        return self._rows("SELECT jobs.*, state.value AS activity FROM jobs LEFT JOIN state ON state.namespace='job_activity' AND state.key=jobs.id ORDER BY CASE WHEN status IN ('queued','running','cancelling') THEN 0 ELSE 1 END, created_at DESC LIMIT 200")
 
     def enqueue(self, action, payload, schedule_id=None, db=None):
         if action not in ACTIONS:
@@ -86,8 +88,29 @@ class Store:
             raise ValueError('Invalid job update')
         if 'result' in values:
             values['result'] = json.dumps(values['result'], default=str)
+        if 'progress' in values:
+            self.event(job_id, values['progress'], 'stage')
         with self.repository.connect() as db:
             db.execute('UPDATE jobs SET '+','.join(k+'=?' for k in values)+' WHERE id=?', (*values.values(),job_id))
+
+    def event(self, job_id, message, stage='output'):
+        from .diagnostics import redact
+        from .legacy import Config
+        import re
+        message = re.sub(r'\x1b\[[0-9;]*m', '', str(message)).strip()
+        if not message:
+            return
+        ctx = current()
+        config = ctx.redaction_config if ctx else Config(read_only=True, namespaces=[])
+        message = redact(message, config)
+        lane = getattr(_local, 'target', None)
+        if ctx and ctx.action == 'health' and lane and stage != 'playlist':
+            message = '[' + lane['name'] + '] ' + message
+        with self.repository.connect() as db:
+            db.execute('INSERT INTO job_events(job_id,created_at,stage,message) VALUES(?,?,?,?)', (job_id,now(),stage,message))
+
+    def events(self, job_id, after=0):
+        return self._rows('SELECT * FROM job_events WHERE job_id=? AND id>? ORDER BY id LIMIT 1000', (job_id,after))
 
     def cancel(self, job_id):
         with self.repository.connect() as db:
@@ -110,8 +133,15 @@ class Store:
         if data['action'] not in {'sync','health'} or data['scope'] not in {'all','favorites','automatic'}:
             raise ValueError('Schedules support sync or health for all, favorites, or automatic playlists.')
         upcoming = next_run(data['cron'], data['timezone'])
-        schedule_id = schedule_id or str(uuid.uuid4())
+        data = dict(data)
+        data['name'] = ('Health Check' if data['action']=='health' else 'Sync') + ({'all': '' if data['action']=='health' else ' All', 'favorites':' Favorites', 'automatic':' Auto Sync'}[data['scope']])
         with self.repository.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            existing = db.execute('SELECT id FROM schedules WHERE action=? AND scope=?', (data['action'],data['scope'])).fetchone()
+            if existing and schedule_id and existing[0] != schedule_id:
+                db.execute('UPDATE jobs SET schedule_id=? WHERE schedule_id=?', (existing[0],schedule_id))
+                db.execute('DELETE FROM schedules WHERE id=?', (schedule_id,))
+            schedule_id = existing[0] if existing else (schedule_id or str(uuid.uuid4()))
             db.execute('INSERT INTO schedules(id,name,action,scope,cron,timezone,enabled,next_run) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,action=excluded.action,scope=excluded.scope,cron=excluded.cron,timezone=excluded.timezone,enabled=excluded.enabled,next_run=excluded.next_run',
                        (schedule_id,data['name'],data['action'],data['scope'],data['cron'],data['timezone'],int(data['enabled']),upcoming))
         return next(s for s in self.schedules() if s['id']==schedule_id)
@@ -131,6 +161,8 @@ class Store:
 class Context:
     def __init__(self, store, job, stop):
         self.store, self.id, self.action, self.stop = store, job['id'], job['action'], stop
+        from .legacy import Config
+        self.redaction_config = Config(read_only=True, namespaces=[])
 
     def checkpoint(self):
         if self.stop.is_set() or self.store.get(self.id)['cancel_requested']:
@@ -187,20 +219,78 @@ class Manager:
         from .diagnostics import redact
         ctx = Context(self.store, job, self.stop)
         _local.context = ctx
+        _local.target = None
         result = None
         try:
             ctx.checkpoint()
             api._record_log('INFO',job['action'],f"Job started: {job['id']}")
             result = api.execute_job(job['action'], job['payload'])
             ctx.checkpoint()
-            self.store.update(job['id'],status='completed',progress='Completed',result=result,finished_at=now())
+            self.store.update(job['id'],status='completed',progress='Completed — output and results retained',result=result,finished_at=now())
             api._record_log('INFO',job['action'],f"Job completed: {job['id']}")
         except Cancelled:
             self.store.update(job['id'],status='cancelled',progress='Cancelled at a safe checkpoint; completed changes are retained',finished_at=now(),**({'result':result} if result is not None else {}))
             api._record_log('INFO',job['action'],f"Job cancelled: {job['id']}")
         except Exception as exc:
             message = redact(getattr(exc,'detail',str(exc)),api._config())
-            self.store.update(job['id'],status='failed',error=message,progress='Failed — see error and logs',finished_at=now())
+            self.store.update(job['id'],status='failed',error=message,progress='Failed — ' + message,finished_at=now())
             api._record_log('ERROR',job['action'],message)
         finally:
             _local.context = None
+            _local.target = None
+
+
+def output(message):
+    buffer = getattr(_local, 'output', None)
+    if buffer is not None:
+        buffer.append(message)
+    ctx = current()
+    if ctx:
+        ctx.store.event(ctx.id, message)
+
+
+_activity_lock = threading.RLock()
+
+
+def activity(**changes):
+    """Persist independently labeled lanes for concurrent read-only health jobs."""
+    ctx = current()
+    if not ctx:
+        return
+    lane = getattr(_local, 'target', None) or {'key': 'job', 'name': 'Playlist operation'}
+    with _activity_lock, ctx.store.repository.connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        row = db.execute("SELECT value FROM state WHERE namespace='job_activity' AND key=?", (ctx.id,)).fetchone()
+        state = json.loads(row[0]) if row else {'lanes': {}}
+        lanes = state.setdefault('lanes', {})
+        entry = lanes.setdefault(lane['key'], dict(lane))
+        entry.update(changes)
+        state['updated_at'] = now()
+        if 'playlist_total' in lane:
+            state['playlist_total'] = lane['playlist_total']
+        db.execute("INSERT OR REPLACE INTO state(namespace,key,value) VALUES('job_activity',?,?)", (ctx.id,json.dumps(state)))
+
+
+def target(key, name, index=None, total=None):
+    _local.target = {'key': key, 'name': name, 'playlist_index': index, 'playlist_total': total}
+    activity(mode='working', stage='Starting playlist', since=now())
+    ctx = current()
+    if ctx:
+        ctx.store.event(ctx.id, f"{name}" + (f" · playlist {index} of {total}" if index and total else ''), 'playlist')
+
+
+@contextlib.contextmanager
+def waiting(service):
+    ctx = current()
+    if not ctx:
+        yield
+        return
+    key = (getattr(_local, 'target', None) or {}).get('key', 'job')
+    state = ctx.store.get(ctx.id).get('activity') or {}
+    previous = state.get('lanes', {}).get(key, {}).copy()
+    activity(mode='waiting', service=service, since=now())
+    try:
+        yield
+    finally:
+        activity(mode='working', service=None, since=now(),
+                 stage=previous.get('stage', 'Processing response'))

@@ -1,4 +1,12 @@
-# v2.0.0-beta.4 — build 20260908.8
+# Playlist Bridge 2.0 Beta 6
+
+Live terminal-style activity with service waiting states, follow/copy/download controls, retained summaries, quieter notifications, three quick filters, a layout icon, compact health indicators, overflow menus, relative sync dates, dedicated Search, and no added dates or visible build numbers. SQLite schema 4 and Docker port 8173 remain unchanged. See BUILD-NOTES.md for details and delivery limitations.
+
+# Playlist Bridge 2.0 Beta 5 — build 20260908.9
+
+Staged detail progress; durable job event details; sync health persistence; compact view; AND filters and scoped Sync / Refresh; app-only removal; cached page rows; detail status filters; automatic-first Fix Match; reusable analysis; unique generated schedules; SQLite schema 4. See BUILD-NOTES.md for behavior and delivery limitations.
+
+# Playlist Bridge 2.0 Beta 4 — build 20260908.8
 
 - Replace global 2.5-second refresh with non-overlapping, completion-scheduled job/health polling; coalesce concurrent GETs including React StrictMode mounts.
 - Fetch page lists on entry and state changes; fetch settings data only in its mounted section. Remove schedules interval polling.
