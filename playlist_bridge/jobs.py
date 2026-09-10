@@ -1,4 +1,4 @@
-"""Durable, single-worker jobs with timezone-aware cron scheduling."""
+"""Durable, single-worker jobs with midnight-aligned interval scheduling."""
 import contextlib
 import json
 import threading
@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from croniter import croniter
 
-ACTIONS = {'sync', 'health', 'analyze', 'add', 'fix_match', 'track_match', 'remove'}
+ACTIONS = {'sync', 'health', 'analyze', 'add', 'fix_match', 'track_match', 'remove', 'backup', 'check_updates', 'restore_backup'}
 SCOPES = {'all', 'favorites', 'automatic', 'selected'}
 TERMINAL = {'completed', 'failed', 'cancelled', 'interrupted'}
 _local = threading.local()
@@ -130,31 +130,39 @@ class Store:
         return self._rows('SELECT * FROM schedules ORDER BY name,id')
 
     def save_schedule(self, data, schedule_id=None):
-        if data['action'] not in {'sync','health'} or data['scope'] not in {'all','favorites','automatic'}:
-            raise ValueError('Schedules support sync or health for all, favorites, or automatic playlists.')
-        upcoming = next_run(data['cron'], data['timezone'])
-        data = dict(data)
-        data['name'] = ('Health Check' if data['action']=='health' else 'Sync') + ({'all': '' if data['action']=='health' else ' All', 'favorites':' Favorites', 'automatic':' Auto Sync'}[data['scope']])
+        from .tasks import expression, DEFINITIONS
+        if data['action'] not in {'sync','health','backup','check_updates'}:
+            raise ValueError('Unsupported recurring task')
+        hours = data['hours']
+        if data['action']=='check_updates' and hours!=6:
+            raise ValueError('Update checks run every six hours')
+        cron=expression(hours)
         with self.repository.connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            existing = db.execute('SELECT id FROM schedules WHERE action=? AND scope=?', (data['action'],data['scope'])).fetchone()
-            if existing and schedule_id and existing[0] != schedule_id:
-                db.execute('UPDATE jobs SET schedule_id=? WHERE schedule_id=?', (existing[0],schedule_id))
-                db.execute('DELETE FROM schedules WHERE id=?', (schedule_id,))
-            schedule_id = existing[0] if existing else (schedule_id or str(uuid.uuid4()))
-            db.execute('INSERT INTO schedules(id,name,action,scope,cron,timezone,enabled,next_run) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,action=excluded.action,scope=excluded.scope,cron=excluded.cron,timezone=excluded.timezone,enabled=excluded.enabled,next_run=excluded.next_run',
-                       (schedule_id,data['name'],data['action'],data['scope'],data['cron'],data['timezone'],int(data['enabled']),upcoming))
-        return next(s for s in self.schedules() if s['id']==schedule_id)
+            existing=db.execute('SELECT id,timezone FROM schedules WHERE action=? AND scope=?',(data['action'],data['scope'])).fetchone()
+            if not existing:raise ValueError('Unknown task')
+            sid,zone=existing
+            db.execute('UPDATE schedules SET cron=?,enabled=?,next_run=? WHERE id=?',(cron,int(hours>0),next_run(cron,zone),sid))
+        return next(s for s in self.schedules() if s['id']==sid)
 
     def due(self, timestamp=None):
+        from .tasks import payload
         timestamp = timestamp or now()
         with self.repository.connect() as db:
             db.execute('BEGIN IMMEDIATE')
+            if db.execute("SELECT 1 FROM jobs WHERE action='restore_backup' AND status IN ('running','cancelling')").fetchone():return
             for sid,action,scope,cron,zone in db.execute('SELECT id,action,scope,cron,timezone FROM schedules WHERE enabled=1 AND next_run<=?', (timestamp,)).fetchall():
-                active = db.execute("SELECT 1 FROM jobs WHERE schedule_id=? AND status IN ('queued','running','cancelling')", (sid,)).fetchone()
+                active = db.execute("SELECT 1 FROM jobs WHERE action=? AND COALESCE(json_extract(payload,'$.scope'),'all')=? AND status IN ('queued','running','cancelling')", (action,scope)).fetchone()
+                data=payload({'action':action,'scope':scope})
                 if not active:
-                    self.enqueue(action, {'scope':scope}, sid, db)
-                # Coalesce missed runs. Never replay a backlog after downtime.
+                    self.enqueue(action, data, sid, db)
+                else:
+                    jid=str(uuid.uuid4())
+                    message='Skipped — this task is already queued or running'
+                    db.execute('INSERT INTO jobs(id,action,payload,status,progress,created_at,finished_at,schedule_id) VALUES(?,?,?,?,?,?,?,?)',
+                        (jid,action,json.dumps(data,sort_keys=True),'skipped',message,timestamp,timestamp,sid))
+                    db.execute('INSERT INTO job_events(job_id,created_at,stage,message) VALUES(?,?,?,?)',(jid,timestamp,'schedule',message))
+                # Missed runs coalesce to one; manual runs never change these boundaries.
                 db.execute('UPDATE schedules SET next_run=? WHERE id=?', (next_run(cron,zone,datetime.fromisoformat(timestamp)),sid))
 
 
@@ -187,8 +195,8 @@ class Manager:
             return  # Another web process owns the shared queue.
         with self.store.repository.connect() as db:
             db.execute("UPDATE jobs SET status='interrupted',error='Server restarted during execution. Review the playlist before running again.',finished_at=? WHERE status IN ('running','cancelling')", (now(),))
-        from .updates import start as start_updates
-        self.update_thread = start_updates(self.stop)
+        from .tasks import setup
+        setup(self.store)
         self.thread = threading.Thread(target=self.loop, daemon=True, name='playlist-job-scheduler')
         self.thread.start()
 
@@ -304,4 +312,4 @@ def completion_message(result):
     if not values:
         values = [result.get('health') or result] if isinstance(result, dict) else []
     missing = sum(value.get('unresolved', 0) for value in values if isinstance(value, dict))
-    return f'Completed with missing tracks · {missing} unresolved' if missing else 'Completed — output and results retained'
+    return f'Completed with missing tracks · {missing} missing' if missing else 'Completed — output and results retained'

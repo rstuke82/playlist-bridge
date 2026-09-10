@@ -8,3 +8,6 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
 )
 
 import './beta7.css'
+import './beta8.css'
+
+import './release.css'

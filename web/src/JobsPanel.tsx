@@ -1,31 +1,26 @@
 import { useEffect, useState } from 'react'
 import { api, Job, activeJob } from './api'
+import { displayText } from './labels'
 import { stamp } from './HealthCard'
+import { Icon } from './Controls'
 import { actionName, showActivity } from './Activity'
 export { actionName } from './Activity'
+const intervals:Record<number,string>={0:'Disabled',1:'Every hour',3:'Every 3 hours',6:'Every 6 hours',12:'Every 12 hours',24:'Daily'}
+function When({value}:{value?:string}){if(!value)return <span>—</span>;const diff=Date.parse(value)-Date.now(),minutes=Math.max(1,Math.round(Math.abs(diff)/60000));const text=minutes<60?`${minutes}m`:`${Math.round(minutes/60)}h`;return <time title={stamp(value)}>{diff>0?`In ${text}`:`${text} ago`}</time>}
 export default function JobsPanel({jobs,refresh}:{jobs:Job[];refresh:()=>Promise<void>}){
-  const [schedules,setSchedules]=useState<any[]>([])
-  const [error,setError]=useState('')
-  const [action,setAction]=useState('sync'),[scope,setScope]=useState('automatic')
-  const [editing,setEditing]=useState<string|undefined>()
-  const blank=()=>({name:'',action:'sync',scope:'automatic',cron:'0 3 * * *',timezone:Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC',enabled:true})
-  const [form,setForm]=useState(blank)
-  async function load(){setSchedules(await api.schedules())}
-  useEffect(()=>{load().catch(e=>setError(e.message))},[])
-  async function run(fn:()=>Promise<any>){setError('');try{await fn();await load();await refresh()}catch(e:any){setError(e.message)}}
-  return <>
-    <section className="panel"><h2>Jobs & schedules</h2><button onClick={()=>run(async()=>{})}>Refresh jobs & schedules</button><p className="muted">Jobs run in the background, one at a time. You can leave this page. Cancellation stops at a safe checkpoint; an active playlist update may finish first. Completed changes are retained.</p>{error&&<p role="alert" className="error">{error}</p>}
-      <div className="toolbar"><label>Action<select value={action} onChange={e=>setAction(e.target.value)}><option value="sync">Sync</option><option value="health">Check health</option></select></label><label>Scope<Scope value={scope} change={setScope}/></label><button onClick={()=>run(()=>api.enqueue(action,{scope}))}>Run now</button></div>
-      <h3>{editing?'Edit schedule':'New schedule'}</h3><form onSubmit={e=>{e.preventDefault();run(async()=>{await api.saveSchedule(form,editing);setEditing(undefined);setForm(blank())})}}>
-        <div className="form-grid"><label>Action<select value={form.action} onChange={e=>setForm({...form,action:e.target.value})}><option value="sync">Sync</option><option value="health">Check health</option></select></label><label>Scope<Scope value={form.scope} change={scope=>setForm({...form,scope})}/></label><label>Cron expression<input required value={form.cron} onChange={e=>setForm({...form,cron:e.target.value})}/></label><label>Timezone<input required value={form.timezone} onChange={e=>setForm({...form,timezone:e.target.value})}/></label></div>
-        <p className="muted">One schedule per action and scope; saving the same type updates it. Names are generated automatically. Five fields: minute hour day month weekday. “0 3 * * *” runs daily at 03:00 in the timezone above. Missed runs are coalesced; a schedule does not overlap itself.</p><label><input type="checkbox" checked={form.enabled} onChange={e=>setForm({...form,enabled:e.target.checked})}/> Enabled</label> <button className="primary">Save schedule</button>{editing&&<button type="button" onClick={()=>{setEditing(undefined);setForm(blank())}}>Cancel edit</button>}
-      </form>
-      {schedules.map(s=><div className="manage-row" key={s.id}><h3>{s.name}</h3><p>{actionName(s.action)} · {s.scope} · {s.cron} · {s.timezone}<br/>{s.enabled?`Next run: ${stamp(s.next_run)}`:'Paused'}</p><div className="actions"><button onClick={()=>run(()=>api.runSchedule(s.id))}>Run now</button><button onClick={()=>{setEditing(s.id);setForm({...s,enabled:!!s.enabled})}}>Edit</button><button onClick={()=>run(()=>api.saveSchedule({...s,enabled:!s.enabled},s.id))}>{s.enabled?'Pause':'Enable'}</button><button onClick={()=>run(()=>api.deleteSchedule(s.id))}>Delete schedule</button></div></div>)}
-    </section>
-    <section className="panel"><h2>Job history</h2><p className="muted">Latest 200 jobs. Interrupted jobs are not replayed automatically after a server restart.</p>{jobs.map(job=><JobRow key={job.id} job={job} refresh={refresh}/>)}{!jobs.length&&<p>No jobs yet.</p>}</section>
-  </>
+ const [data,setData]=useState<any>(null),[error,setError]=useState(''),[busy,setBusy]=useState(''),[tab,setTab]=useState('scheduled')
+ const revision=jobs.map(j=>`${j.id}:${j.status}`).join('|')
+ async function load(){try{setData(await api.tasks());setError('')}catch(e:any){setError(e.message)}}
+ useEffect(()=>{void load()},[revision])
+ async function run(id:string,fn:()=>Promise<any>){setBusy(id);try{await fn();await load();await refresh()}catch(e:any){setError(e.message)}finally{setBusy('')}}
+ return <><div className="section-tabs"><button aria-pressed={tab==='scheduled'} onClick={()=>setTab('scheduled')}>Scheduled tasks</button><button aria-pressed={tab==='history'} onClick={()=>setTab('history')}>History</button></div>{tab==='history'?<JobHistory jobs={jobs} refresh={refresh}/>:<section className="panel"><div className="panel-head"><div><h2>Tasks</h2><p className="muted">Timezone: {data?.timezone||'…'} · Intervals start at midnight</p></div><button className="icon-button" title="Refresh tasks" aria-label="Refresh tasks" onClick={load}><Icon name="refresh"/></button></div><p className="muted">Run Now leaves the schedule unchanged. A scheduled occurrence is skipped if that same task is queued or running.</p>{error&&<p className="error">{error}</p>}{data?.migrated&&<p className="muted">Your previous schedules were aligned to midnight for this version. Review their frequencies below.</p>}<div className="task-list">{data?.tasks.map((t:any)=><article className="task-row" key={t.id}><div className="task-name"><strong>{t.name}</strong>{t.active_job&&<a href={`#activity/${t.active_job.id}`}><span className="activity-dot"/> {t.active_job.status}</a>}{t.latest_event?.status==='skipped'&&<small>Skipped — already running</small>}</div><label className="task-frequency"><span>Frequency</span>{t.fixed?<span>{intervals[t.hours]}</span>:<select aria-label={`${t.name} frequency`} disabled={busy===t.id} value={t.hours} onChange={e=>run(t.id,()=>api.saveSchedule({action:t.action,scope:t.scope,hours:Number(e.target.value)},t.id))}>{Object.entries(intervals).map(([n,label])=><option key={n} value={n}>{label}</option>)}</select>}</label><div><small>Last run</small><When value={t.last_job?.started_at}/>{t.last_job&&<a className="task-result" href={`#activity/${t.last_job.id}`}>{t.last_job.status}</a>}</div><div><small>Duration</small><span>{t.duration==null?'—':`${t.duration}s`}</span></div><div><small>Next run</small>{t.enabled?<When value={t.next_run}/>:<span>Disabled</span>}</div><button className="icon-button" title={`Run ${t.name} now`} aria-label={`Run ${t.name} now`} disabled={!!t.active_job||busy===t.id} onClick={()=>run(t.id,()=>api.runSchedule(t.id))}>▶</button></article>)}</div>{!data&&!error&&<p>Loading tasks…</p>}</section>}</>
 }
-export function Scope({value,change}:{value:string;change:(s:string)=>void}){return <select value={value} onChange={e=>change(e.target.value)}><option value="all">All playlists</option><option value="favorites">Favorites</option><option value="automatic">Auto Sync playlists</option></select>}
-export function JobRow({job,refresh}:{job:Job;refresh:()=>Promise<void>}){
- return <article className="job-row"><div className="panel-head"><div><strong>{actionName(job.action)} · {job.status}</strong><p>{job.progress}</p><small>{stamp(job.started_at||job.created_at)} · {job.payload.url||job.payload.title||({all:'All playlists',favorites:'Favorites',automatic:'Auto Sync playlists'}[job.payload.scope as string])||'Selected playlists'}</small></div><button onClick={()=>showActivity(job.id)}>{activeJob(job)?'Open live output':'View output & results'}</button></div>{job.error&&<p className="error">{job.error}</p>}</article>
+export function JobHistory({jobs,refresh}:{jobs:Job[];refresh:()=>Promise<void>}){
+ const [data,setData]=useState<any>(null),[offset,setOffset]=useState(0),[error,setError]=useState('')
+ const revision=jobs.map(j=>`${j.id}:${j.status}`).join('|')
+ useEffect(()=>{let alive=true;api.history(offset).then(v=>{if(alive){setData(v);setError('')}}).catch(e=>{if(alive)setError(e.message)});return()=>{alive=false}},[offset,revision])
+ return <section className="panel"><h2>Job history</h2>{error&&<p className="error">{error}</p>}{data?.rows.map((j:Job)=><JobRow key={j.id} job={j} refresh={refresh}/>)}{!data&&!error&&<p>Loading history…</p>}{data&&!data.total&&<p>No jobs yet.</p>}{data?.total>0&&<div className="actions"><button disabled={!offset} onClick={()=>setOffset(Math.max(0,offset-50))}>Previous</button><span>{offset+1}–{Math.min(offset+50,data.total)} of {data.total}</span><button disabled={offset+50>=data.total} onClick={()=>setOffset(offset+50)}>Next</button></div>}</section>
+}
+export function JobRow({job}:{job:Job;refresh?:()=>Promise<void>}){
+ return <article className="job-row"><div className="panel-head"><div><strong>{actionName(job.action)} · {job.status}</strong><p>{displayText(job.progress)}</p><small>{stamp(job.started_at||job.created_at)} · {job.payload.url||job.payload.title||({all:'All playlists',favorites:'Favorites',automatic:'Auto Sync playlists'}[job.payload.scope as string])||(['backup','check_updates','restore_backup'].includes(job.action)?'Maintenance':'Selected playlists')}</small></div><button onClick={()=>showActivity(job.id)}>{activeJob(job)?'View live activity':'View details'}</button></div>{job.error&&<p className="error">{displayText(job.error)}</p>}</article>
 }

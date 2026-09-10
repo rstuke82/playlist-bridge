@@ -1,3 +1,34 @@
+# Playlist Bridge 2.0
+
+Playlist Bridge 2.0 is the final release of the web application, with SQLite persistence, Docker deployment and the existing CLI and matching engine.
+
+- Dashboard cards open their corresponding pages. Playlist cards apply the exact matching filter, clear previous search/filter state and remember the resulting view. Health Drift and Health Errors use the same predicates as their dashboard counts.
+- Quick Actions has a pencil editor for up to five actions, including sync scopes, Health Check, Back Up Now and Check for Updates. Selection and display order are remembered in the browser.
+- Add Playlist is one action: paste a public Spotify or Apple Music URL, choose Favorite and Auto Sync, and add it. Invalid or already registered URLs are rejected inline before queuing. Fetching, matching and Plex creation run as a background job with Activity details. The analysis API remains compatible for existing clients.
+- All dialogs render above the application panels, centered in the visible viewport even after scrolling. Dialog content scrolls internally, controls remain reachable on mobile, keyboard focus stays within the dialog and returns to the trigger when closed. This includes Ignore, Fix Match, removal, backup restore, log clearing and Quick Actions.
+- Match labels are consistently Auto, Manual, Saved, Missing, LOST and Ignored. Saved means an older match whose origin is unknown; it is not relabeled as Auto or Manual. Existing mappings and internal field names are preserved. Sorting uses Last synced.
+- Activity has permanent desktop and mobile navigation, full job history and retained logs. Playlist filters, bulk Auto Sync, consistent Settings pages, daily backups, restore and midnight-aligned recurring tasks from Beta 8 are included.
+- Git branches main and beta and Docker image tags main, beta and 2.0.0 receive the same final release. The default Compose image and update channel are main. Set PLAYLIST_BRIDGE_UPDATE_CHANNEL=beta to follow beta update notifications instead.
+
+See BUILD-NOTES.md for compatibility and publishing details.
+
+# Playlist Bridge 2.0 Beta 8
+
+Playlist Bridge 2.0 Beta 8 focuses on remembered views, quiet activity and clearer settings.
+
+- Playlist filters, name search, sorting and Compact/Expanded preference survive page navigation and browser refresh. Checkbox selections clear when leaving the page. Sync / Refresh acts on selected playlists, or the filtered set when nothing is selected.
+- A permanent Activity button sits above Settings on desktop and in the mobile bottom navigation. It shows No active jobs, current progress or an attention indicator. Starting a job keeps you on your current page. Live output, results, Stop, Copy, Raw and Download are on the dedicated Activity page; job history is paginated across all saved jobs.
+- Multi-select Auto Sync On/Off changes only the selected registrations without starting a sync. A static circular-arrows icon shows Auto Sync status in both playlist views.
+- Settings has separate General, Plex, Matching, Ignored Tracks, Tasks, Backups, Logs and About pages. Panels share one content width; long ignored-track names wrap within it. Mobile Settings uses a section list and back navigation. Ignored Tracks supports filtering and bulk restore; Matching includes artist alias editing.
+- Tasks lists all recurring jobs, including built-in Backup and Check for Updates, with last run, last result, duration, next run and Run Now. Options are Disabled, Every hour, Every 3 hours, Every 6 hours, Every 12 hours and Daily. There are no cron fields, time pickers or weekly schedules.
+- Intervals align to midnight in the displayed app timezone. Manual runs never shift schedule boundaries. A scheduled occurrence is skipped and recorded when the same action/scope is queued or running. Different tasks may queue normally. Missed runs during downtime coalesce to one rather than replaying a backlog.
+- Backups run daily at midnight by default. Back Up Now, Download and Restore are available. Scheduled backups retain 14 copies by default (7/14/30 configurable), with five manual and five pre-restore copies retained separately. Restoring creates a safety backup, restores app state and history, cancels queued work against the previous state, and leaves Plex untouched.
+- About shows the release version, update status, last check and Check for Updates. The fixed six-hour update check is now a visible task with persisted job history. The browser title remains Playlist Bridge; no build number appears in the UI.
+
+Beta 7 matching, duplicate handling, track membership previews, manual/automatic provenance, and optional Plex playlist removal are preserved. Standalone health checks remain read-only with respect to Plex and sync state.
+
+See BUILD-NOTES.md for upgrade and publishing details.
+
 # Playlist Bridge 2.0 Beta 7
 
 Playlist Bridge 2.0 Beta 7 brings a consistent glass-style interface and clearer matching workflows.

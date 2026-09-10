@@ -1,0 +1,12 @@
+/* Dialogs are portaled to body so translucent panels cannot contain their viewport. */
+body>.modal-backdrop{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;box-sizing:border-box;padding:max(16px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) max(16px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left));height:100dvh;overflow:hidden;background:#0007;overscroll-behavior:contain}
+body>.modal-backdrop>.modal{position:relative;inset:auto;margin:0;box-sizing:border-box;width:min(100%,680px);min-width:0;max-width:100%;max-height:100%;overflow:auto;overscroll-behavior:contain;border:1px solid var(--border);border-radius:16px;background:var(--surface-solid);box-shadow:0 24px 90px #0005;padding:24px;outline:none}
+body>.modal-backdrop>.match-dialog{width:min(100%,900px);padding:0;display:flex;flex-direction:column;overflow:hidden}
+body>.modal-backdrop .modal-body{min-height:0;overflow:auto;overscroll-behavior:contain}
+body>.modal-backdrop .modal-header,body>.modal-backdrop .modal-footer{flex:none;background:var(--surface-solid);gap:12px}
+body>.modal-backdrop .modal>.actions{position:sticky;bottom:-24px;background:var(--surface-solid);padding:14px 0;margin-bottom:0;display:flex;justify-content:flex-end;flex-wrap:wrap;border-top:1px solid var(--border);z-index:2}
+body>.modal-backdrop .playlist-choice{overflow-wrap:anywhere;display:flex;align-items:flex-start;gap:10px}
+body>.modal-backdrop .modal input:not([type=checkbox]):not([type=radio]),body>.modal-backdrop .modal select{max-width:100%;box-sizing:border-box}
+.quick-order{display:flex;align-items:center;gap:8px;padding:8px 0}.quick-order span{flex:1}.quick-order button{padding:6px 10px}
+.stat-link{text-align:left;cursor:pointer;width:100%;color:var(--text);transition:background .15s,border-color .15s}.stat-link:hover{background:var(--hover);border-color:var(--accent)}.stat-link:focus-visible{outline:2px solid var(--accent);outline-offset:3px}.stat-link span,.stat-link strong{display:block}
+@media(max-width:600px){body>.modal-backdrop{padding:10px}body>.modal-backdrop>.modal{padding:18px;border-radius:14px}body>.modal-backdrop>.match-dialog{padding:0}body>.modal-backdrop .modal>.actions{bottom:-18px}body>.modal-backdrop .modal-footer{flex-wrap:wrap}body>.modal-backdrop .modal-footer>span{order:3;width:100%;overflow-wrap:anywhere}body>.modal-backdrop .modal-header h2{font-size:20px}body>.modal-backdrop .modal .add{flex-wrap:wrap}body>.modal-backdrop .modal .add input{min-width:0;flex:1}}

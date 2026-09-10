@@ -90,7 +90,6 @@ async function send<T>(path:string, init?:RequestInit):Promise<T> {
       throw new Error(typeof body.detail === 'string' ? body.detail : `Request failed (${response.status}). Check Settings → Logs.`)
     }
     const result = await response.json()
-    if(init?.method==='POST'&&result?.id&&result?.action&&result?.status)window.dispatchEvent(new CustomEvent('show-activity',{detail:result.id}))
     if (init?.method && init.method !== 'GET') window.dispatchEvent(new Event('jobs-refresh'))
     return result
   } catch (error:any) {
@@ -109,6 +108,14 @@ function request<T>(path:string, init?:RequestInit):Promise<T> {
 }
 
 export const api = {
+  tasks:()=>request<any>('/api/tasks'),
+  history:(offset=0)=>request<any>(`/api/job-history?offset=${offset}`),
+  autoSync:(playlist_keys:string[],auto_sync:boolean)=>request<any>('/api/playlists/auto-sync',{method:'POST',body:JSON.stringify({playlist_keys,auto_sync})}),
+  backups:()=>request<any>('/api/backups'),
+  backupSettings:(retention:number)=>request<any>('/api/backups/settings',{method:'PUT',body:JSON.stringify({retention})}),
+  restoreBackup:(name:string)=>request<Job>('/api/backups/restore',{method:'POST',body:JSON.stringify({name})}),
+  matching:()=>request<any>('/api/settings/matching'),
+  saveAlias:(canonical:string,aliases:string[])=>request<any>('/api/settings/matching/alias',{method:'PUT',body:JSON.stringify({canonical,aliases})}),
   trackDetails: (track:any)=>request<any>('/api/tracks/details',{method:'POST',body:JSON.stringify(track)}),
   trackPreview: (data:any)=>request<any>('/api/tracks/preview',{method:'POST',body:JSON.stringify(data)}),
   updates: ()=>request<any>('/api/updates'),

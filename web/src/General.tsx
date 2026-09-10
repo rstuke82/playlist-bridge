@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react'
-import Appearance from './Appearance'
 import { api, PlexLibrary } from './api'
 export default function General({setMessage,refresh}:{setMessage:(m:string)=>void,refresh:()=>Promise<void>}) {
   const [url,setUrl]=useState('')
@@ -10,9 +9,12 @@ export default function General({setMessage,refresh}:{setMessage:(m:string)=>voi
   const [libraryName,setLibraryName]=useState('')
   const [busy,setBusy]=useState(false)
   const [status,setStatus]=useState('')
+  const [baseline,setBaseline]=useState<any>(null)
+  const dirty=!!baseline&&(url!==baseline.url||libraryKey!==baseline.music_library_key||!!token)
 
   useEffect(()=>{
     api.plexSettings().then(settings=>{
+      setBaseline(settings)
       setUrl(settings.url||'')
       setTokenHint(settings.token_hint||'')
       setLibraryKey(settings.music_library_key||'')
@@ -40,23 +42,21 @@ export default function General({setMessage,refresh}:{setMessage:(m:string)=>voi
       setTokenHint(result.token_hint||'')
       setLibraryName(result.music_library_name||'')
       setStatus(`Connected to Plex · ${result.music_library_name}`)
-      setMessage('Plex configuration saved')
+      setBaseline(result)
       await refresh()
     }catch(e:any){setStatus(e.message)}
     finally{setBusy(false)}
   }
 
-  return <><Appearance/><Updates/><section className="panel settings-panel">
+  return <><section className="panel settings-panel">
     <div className="panel-head"><div><h2>Plex configuration</h2><p className="muted">Configure the Plex server used by Playlist Bridge.</p></div>{libraryName&&<span className="pill on">{libraryName}</span>}</div>
     <div className="form-grid">
       <label>Plex server URL<input value={url} onChange={e=>setUrl(e.target.value)} placeholder="http://plex-server:32400"/></label>
       <label>Plex token<input type="password" value={token} onChange={e=>setToken(e.target.value)} placeholder={tokenHint?`Leave blank to keep ${tokenHint}`:'Enter Plex token'}/></label>
       <label>Music library<select value={libraryKey} onChange={e=>setLibraryKey(e.target.value)}><option value="">{libraryName?`${libraryName} (current)`:'Discover libraries first'}</option>{libraries.map(l=><option key={l.key} value={l.key}>{l.name}</option>)}</select></label>
     </div>
-    <div className="settings-actions"><button disabled={busy||!url} onClick={discover}>Test & Discover Libraries</button><button className="primary" disabled={busy||!url||!libraryKey} onClick={save}>Save Plex Settings</button></div>
+    <div className="settings-actions"><button disabled={busy||!url} onClick={discover}>Test & Discover Libraries</button></div>
+    {dirty&&<div className="settings-save"><button className="primary" disabled={busy||!url||!libraryKey} onClick={save}>Save Changes</button><button disabled={busy} onClick={()=>{setUrl(baseline.url||'');setLibraryKey(baseline.music_library_key||'');setToken('');setStatus('')}}>Cancel</button></div>}
     {status&&<p className={status.startsWith('Connected')?'success':'muted'}>{status}</p>}
   </section></>
 }
-
-
-export function Updates(){const [status,setStatus]=useState<any>(null),[busy,setBusy]=useState(false),[error,setError]=useState('');useEffect(()=>{api.updates().then(setStatus).catch(e=>setError(e.message))},[]);return <section className="panel settings-panel"><div className="panel-head"><h2>Updates</h2><button disabled={busy} onClick={async()=>{setBusy(true);try{setStatus(await api.checkUpdates());window.dispatchEvent(new Event('health-refresh'))}catch(e:any){setError(e.message)}finally{setBusy(false)}}}>{busy?'Checking…':'Check Now'}</button></div><p>Checks the published beta image every six hours. Updates are never installed automatically.</p>{status&&<p>{status.available?`Update available: ${status.latest_version}`:status.error|| (status.checked_at?'You’re up to date.':'First check pending.')}</p>}{status?.checked_at&&<small>Last checked: {new Date(status.checked_at).toLocaleString()}</small>}{status?.available&&<p>On your server, pull and recreate the container using Docker Compose. Keep the data directory.</p>}{error&&<p className="error">{error}</p>}</section>}

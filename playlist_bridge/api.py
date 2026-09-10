@@ -267,6 +267,7 @@ def _validated_plex_libraries(url: str, token: str) -> List[dict]:
 @app.get("/api/health")
 def health():
     config = _config(read_only=True, namespaces=[])
+    from .updates import stored_status
     playlists = config.config.get("playlists", [])
     unresolved = 0
     lost = 0
@@ -278,8 +279,8 @@ def health():
     return {
         "status": "ok",
         "version": __version__,
-        "release_name": "Playlist Bridge 2.0 Beta 7",
-        "update": config.repository.load("updates").get("latest"),
+        "release_name": "Playlist Bridge 2.0",
+        "update": stored_status(config.repository),
         "build": __build__,
         "playlists": len(playlists),
         "favorites": sum(1 for p in playlists if p.get("favorite") is True),
@@ -1000,17 +1001,14 @@ class RemoveRequest(BaseModel):
 
 
 class JobRequest(BaseModel):
-    action: Literal['sync','health','analyze','add','fix_match','track_match','remove']
+    action: Literal['sync','health','analyze','add','fix_match','track_match','remove','backup','check_updates']
     payload: dict = Field(default_factory=dict)
 
 
 class ScheduleRequest(BaseModel):
-    name: str = ""
-    action: Literal['sync','health'] = 'sync'
-    scope: Literal['all','favorites','automatic'] = 'automatic'
-    cron: str
-    timezone: str = 'UTC'
-    enabled: bool = True
+    action: Literal['sync','health','backup','check_updates']
+    scope: Literal['all','favorites','automatic'] = 'all'
+    hours: Literal[0,1,3,6,12,24]
 
 
 def job_store():
@@ -1020,6 +1018,7 @@ def job_store():
 
 
 def validated_payload(action, payload):
+    if action in ('backup','check_updates'):return {}
     if action == 'remove':
         return RemoveRequest(**payload).model_dump()
     if action == 'track_match':
@@ -1027,7 +1026,12 @@ def validated_payload(action, payload):
         return ApplyRequest(**payload).model_dump()
     if action in ('add','analyze','fix_match'):
         model = {'add':PlaylistAddRequest,'analyze':PlaylistAnalyzeRequest,'fix_match':MissingMatchRequest}[action]
-        return model(**payload).model_dump()
+        data=model(**payload).model_dump()
+        if action=='add':
+            source,url,_source_api=_source_for_url(data['url'])
+            if not Config._extract_id(url,source):raise ValueError('Enter a valid Spotify or Apple Music playlist URL')
+            if _config(read_only=True,namespaces=[]).find_playlist(url):raise HTTPException(409,'Playlist is already registered')
+        return data
     scope = payload.get('scope', 'all')
     if scope not in jobs.SCOPES:
         raise ValueError('Choose all, favorites, automatic or selected playlists')
@@ -1134,9 +1138,13 @@ def update_schedule(schedule_id: str, request: ScheduleRequest):
 
 @app.delete('/api/schedules/{schedule_id}')
 def delete_schedule(schedule_id: str):
-    with job_store().repository.connect() as db:
-        db.execute('DELETE FROM schedules WHERE id=?',(schedule_id,))
-    return {'deleted':True}
+    store=job_store()
+    task=next((t for t in store.schedules() if t['id']==schedule_id),None)
+    if not task:raise HTTPException(404,'Task not found')
+    if task['action']=='check_updates':raise HTTPException(422,'The update check is a built-in task')
+    store.save_schedule({**task,'hours':0},schedule_id)
+    return {'disabled':True}
+
 
 
 @app.post('/api/schedules/{schedule_id}/run', status_code=202)
@@ -1145,7 +1153,8 @@ def run_schedule(schedule_id: str):
     schedule=next((s for s in store.schedules() if s['id']==schedule_id),None)
     if not schedule:
         raise HTTPException(404,'Schedule not found')
-    return store.get(store.enqueue(schedule['action'],{'scope':schedule['scope']},schedule_id))
+    from .tasks import payload
+    return store.get(store.enqueue(schedule['action'],payload(schedule)))
 
 
 def _health_batch(playlists, config):
@@ -1204,6 +1213,21 @@ def _health_batch(playlists, config):
 
 
 def execute_job(action, payload):
+    if action=='check_updates':
+        from .updates import check
+        jobs.progress('Checking the published release image')
+        result=check(True)
+        if result.get('error'):raise ValueError(result['error'])
+        return result
+    if action in ('backup','restore_backup'):
+        from . import backups
+        with ProcessLock():
+            repo=job_store().repository
+            if action=='restore_backup':return backups.restore(repo,payload['name'])
+            ctx=jobs.current()
+            kind='daily' if ctx and ctx.store.get(ctx.id).get('schedule_id') else 'manual'
+            return backups.create(repo,kind)
+
     if action == 'remove':
         return remove_selected(RemoveRequest(**payload))
     if action == 'track_match':
@@ -1463,6 +1487,8 @@ def retry_automatic(request: MissingCandidateRequest):
 
 from .track_routes import register as register_tracks
 register_tracks(app)
+from .settings_routes import register as register_settings
+register_settings(app)
 from .updates import register as register_updates
 register_updates(app)
 

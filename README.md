@@ -1,28 +1,24 @@
 # Playlist Bridge
 
-**Release:** Playlist Bridge 2.0 Beta 7
+**Release:** Playlist Bridge 2.0
 
 Playlist Bridge syncs public **Spotify** and **Apple Music** playlists to playlists in your local **Plex music library**.
 
 Version 2.0 adds a self-hosted **React + TypeScript** web interface with a **FastAPI** backend while retaining the existing matching engine, CLI, with SQLite runtime storage.
 
-> **Beta software:** back up the complete data directory with the app stopped before upgrading.
+> Back up the existing data directory before upgrading; keep its mount and connection settings.
 
-## Current beta features
+## Features
 
-Playlist Bridge 2.0 Beta 7 brings a consistent glass-style interface and clearer matching workflows.
+Playlist Bridge 2.0 is the final release of the web application, with SQLite persistence, Docker deployment and the existing CLI and matching engine.
 
-- Desktop sidebar and floating mobile navigation, with accent colors and Light, Dark or Follow System appearance in General settings. Preferences are saved in your browser.
-- One job terminal with timestamped progress. Playlist page loading uses a temporary status line that disappears when ready. Copy uses the native clipboard; Raw opens selectable text in the same panel, and Download saves the full log. Clipboard access requires browser support and a secure context; Raw remains available on plain HTTP.
-- Unresolved source tracks produce completed-with-missing results. Actual Plex write/verification failures remain errors. Duplicate source occurrences are submitted in order using Plex's play queue support; if Plex collapses duplicate occurrences, the job warns and completes when the remaining distinct tracks and order are correct.
-- Playlist filter, sort, refresh and Compact/Expanded icon controls sit together. Filters include Favorites, Needs Attention, 100% Matched, Has Manual Matches, Auto Sync, Missing, LOST and Never Synced. Multiple filters use AND; removable chips and Clear Filters reset them.
-- Select multiple playlists for Sync / Refresh or removal. Sync acts on selected playlists, or the filtered set when none are selected. Removal asks whether to leave Plex playlists untouched (the default) or delete them too. Historical job output stays available, and unrelated registrations and mappings are preserved.
-- Saved-match counts distinguish Auto, Manual and Legacy. Track names open Track Details with known playlist memberships, occurrence counts and current matches. Select playlists, preview a fresh automatic match or manual replacement, then apply and sync those playlists. Ignored occurrences are skipped; an unsuccessful automatic retry leaves existing matches unchanged.
-- Accepting an automatic suggestion records Auto provenance; choosing a manual candidate records Manual. Existing matching rules and thresholds remain unchanged.
-- A version-adjacent update indicator checks the public GHCR beta image every six hours. General settings includes Check Now. Updates are never installed automatically.
-- Global search remains on its own page; page-local search fields filter the current page. The browser title is Playlist Bridge and the sidebar release label has no build number.
-
-Earlier behavior remains: SQLite job-event history, sync-derived health, cached list rows, short-lived Analyze → Add reuse, and one generated schedule per action/scope. Standalone health checks remain read-only with respect to Plex and sync/matching state.
+- Dashboard cards open their corresponding pages. Playlist cards apply the exact matching filter, clear previous search/filter state and remember the resulting view. Health Drift and Health Errors use the same predicates as their dashboard counts.
+- Quick Actions has a pencil editor for up to five actions, including sync scopes, Health Check, Back Up Now and Check for Updates. Selection and display order are remembered in the browser.
+- Add Playlist is one action: paste a public Spotify or Apple Music URL, choose Favorite and Auto Sync, and add it. Invalid or already registered URLs are rejected inline before queuing. Fetching, matching and Plex creation run as a background job with Activity details. The analysis API remains compatible for existing clients.
+- All dialogs render above the application panels, centered in the visible viewport even after scrolling. Dialog content scrolls internally, controls remain reachable on mobile, keyboard focus stays within the dialog and returns to the trigger when closed. This includes Ignore, Fix Match, removal, backup restore, log clearing and Quick Actions.
+- Match labels are consistently Auto, Manual, Saved, Missing, LOST and Ignored. Saved means an older match whose origin is unknown; it is not relabeled as Auto or Manual. Existing mappings and internal field names are preserved. Sorting uses Last synced.
+- Activity has permanent desktop and mobile navigation, full job history and retained logs. Playlist filters, bulk Auto Sync, consistent Settings pages, daily backups, restore and midnight-aligned recurring tasks from Beta 8 are included.
+- Git branches main and beta and Docker image tags main, beta and 2.0.0 receive the same final release. The default Compose image and update channel are main. Set PLAYLIST_BRIDGE_UPDATE_CHANNEL=beta to follow beta update notifications instead.
 
 Storage remains SQLite schema 4. New activity snapshots use the existing generic state table; Beta 5 databases require no schema migration. Jobs and output survive restarts. The API keeps idle polling slow; live activity uses one completion-scheduled request at a time while expanded, then stops after final output. Lists and settings load on demand. Two bounded detail workers, request timeouts, read-only health concurrency, matching thresholds, Docker port 8173 and CLI support are preserved.
 
@@ -102,9 +98,9 @@ docker compose pull
 docker compose up -d --no-build
 ```
 
-The default image is `ghcr.io/rstuke82/playlist-bridge:beta`. This archive does not publish an image.
-To pin this build, set `PLAYLIST_BRIDGE_IMAGE=ghcr.io/rstuke82/playlist-bridge:2.0.0-beta.7`
-in `.env` once that tag is published. The `beta` tag advances between releases; use the version tag to select Beta 7.
+The default image is `ghcr.io/rstuke82/playlist-bridge:main`. This archive does not publish an image.
+To pin this build, set `PLAYLIST_BRIDGE_IMAGE=ghcr.io/rstuke82/playlist-bridge:2.0.0`
+in `.env` once that tag is published. The `main` tag follows stable releases; use the version tag to select 2.0.
 Beta images should never be tagged `latest`.
 
 Maintainers can publish both server architectures with the existing buildx builder:
@@ -113,8 +109,8 @@ Maintainers can publish both server architectures with the existing buildx build
 docker buildx use playlist-bridge-builder
 docker buildx inspect --bootstrap
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -t ghcr.io/rstuke82/playlist-bridge:2.0.0-beta.7 \
-  -t ghcr.io/rstuke82/playlist-bridge:beta --push .
+  -t ghcr.io/rstuke82/playlist-bridge:2.0.0 \
+  -t ghcr.io/rstuke82/playlist-bridge:main --push .
 ```
 
 If the named builder does not exist, replace the first command with `docker buildx create --name playlist-bridge-builder --use`. The multi-platform build includes both AMD64 servers and ARM64 machines.
@@ -358,7 +354,7 @@ Running a health check does **not** modify Plex playlists, mappings, source snap
 
 ## Playlist details and match fixes
 
-Click a registered playlist name to view its full live source track list, saved Plex matches and Automatic / Manual / Legacy / LOST / Unresolved status. Sync Now and Check Health are available there. Fix Match can replace an existing match using scored candidates or text search. Choose all unresolved occurrences or selected playlists; only affected playlists sync after saving. Selecting a candidate does not save immediately. Review the selection and click Save Match, or use Cancel, Close, Escape, or click outside the picker to leave without changes. Cancellation is available while candidates load; once saving starts, wait for the save/sync result.
+Click a registered playlist name to view its full live source track list, saved Plex matches and Auto / Manual / Saved / LOST / Missing status. Sync / Refresh and Health Check are available there. Fix Match can replace an existing match using scored candidates or text search. Choose all missing occurrences or selected playlists; only affected playlists sync after saving. Selecting a candidate does not save immediately. Review the selection and click Save Match, or use Cancel, Close, Escape, or click outside the picker to leave without changes. Cancellation is available while candidates load; once saving starts, wait for the save/sync result.
 
 ## Missing-track fixes
 
@@ -366,7 +362,7 @@ When a deduplicated missing track is matched from the web UI, Playlist Bridge sa
 
 ## Beta notes
 
-The 2.0 beta series is an architectural transition. The existing matching engine currently remains available behind the new API while components are progressively separated into reusable backend modules. Legacy JSON is imported automatically; CLI support remains available.
+The 2.0 web API uses the existing matching engine and SQLite repository. Earlier JSON state is imported automatically; CLI support remains available.
 
 
 ## Settings logs
@@ -377,16 +373,22 @@ Beta 1 and beta 2 SQLite databases upgrade automatically to schema 3, retaining 
 
 ## Background jobs and schedules
 
-Settings is organized into General, Logs, and Jobs. Web sync, health, analyze, add, and match-save operations enter a persistent SQLite queue. One worker executes jobs in the background; progress and results remain available after navigation or refresh. Dashboard offers Sync All, Favorites and Auto Sync scopes. The Playlists action uses the filtered results. The Auto Sync setting controls membership in scheduled Auto Sync scopes.
+Settings is organized into General, Plex, Matching, Ignored Tracks, Tasks, Backups, Logs and About. Web sync, health, analyze, add, and match-save operations enter a persistent SQLite queue. One worker executes jobs in the background; progress and results remain available after navigation or refresh. Dashboard offers Sync All, Favorites and Auto Sync scopes. The Playlists action uses the filtered results. The Auto Sync setting controls membership in scheduled Auto Sync scopes.
 
-Create sync or health schedules using a five-field cron expression and an IANA timezone (for example, `0 3 * * *` with `America/Chicago`). Schedules can be edited, paused, deleted, or run manually. The web backend must be running. Missed triggers are coalesced into one run, and a schedule does not overlap itself. Queued jobs survive restart; jobs interrupted during execution are marked interrupted and are not replayed automatically.
+Configure recurring tasks with interval dropdowns in Settings → Tasks. Hourly intervals align to midnight: every three hours means 00:00, 03:00, 06:00 and so on; Daily means midnight. Run Now never changes the next scheduled time. A queued or running task causes its next occurrence to be recorded as skipped, without a delayed replay. Other tasks remain eligible. The web backend must be running. Interrupted jobs are not replayed automatically after a restart.
+
+On upgrade, existing schedules retain their enabled state and are aligned to midnight. Supported hourly frequencies are retained; other old custom schedules become daily. The original definitions are retained in SQLite for diagnostics. Review the Tasks page after upgrading. Check for Updates always runs every six hours; Backup defaults to Daily; other new schedules default to Disabled.
+
+The Tasks page displays the scheduling timezone. Set `TZ=America/Chicago` (or your preferred IANA timezone) in the Compose environment to use that timezone. The included Compose file passes `TZ` through from `.env`. If unset, the first existing schedule's timezone is retained, otherwise UTC is used. Changing an explicit `TZ` and restarting realigns future task boundaries.
+
+Backups are stored under the persistent data directory's `backups` folder. SQLite's online backup API creates a consistent database snapshot alongside startup configuration. Browser-local appearance and filter preferences, host environment files, Plex playlists and media files are not part of the backup. The Restore action uses a listed backup; to recover a downloaded archive on another installation, place the intact `bridge-*.zip` archive in its data/backups directory. Restore validates compatibility and creates a safety backup first. Connection credentials are included, so store downloaded archives privately.
 
 Cancellation is cooperative: queued jobs stop immediately; running jobs stop at safe checkpoints. An in-flight network call or playlist update can finish first. Completed Plex changes and saved manual matches are retained. Restarting the app is not an undo operation. Existing CLI commands remain synchronous and retain their matching behavior.
 
 ## Finding and organizing music
 
-Dashboard shows statistics and Add Playlist, including analysis, queue status, stages, errors, and a link to the registered playlist. Playlists supports combined Favorites and Automatic filters, name search, and ascending/descending sorting by name, last synced, or last added. Historical playlists without an added timestamp show an unknown date. Each playlist shows last synced and last successful health check; expand Health to see named missing/extra destination tracks, unresolved tracks, and source additions/removals. Run a fresh check to populate detailed drift for old results.
+Dashboard shows statistics and Add Playlist, including analysis, queue status, stages, errors, and a link to the registered playlist. Playlists supports combined filters, local name search, and sorting by name or most recently synced. View preferences persist in the browser; added dates are not displayed. Each playlist shows last synced and last successful health check; expand Health to see named missing/extra destination tracks, unresolved tracks, and source additions/removals. Run a fresh check to populate detailed drift for old results.
 
 Global search finds playlist names and tracks from saved source snapshots, health previews, missing records, and mappings; it does not search external music services. Open a playlist for its live source list and track filtering.
 
-Missing sorts by name, last checked, occurrences, or playlist count. Occurrences counts repeated track entries; playlist count counts distinct registered playlists. Expand memberships to navigate to each playlist. Ignore can apply to selected playlists or universally to current and future matching occurrences. Ignore changes local matching rules; the next sync updates Plex. Restore ignored rules from General settings.
+Missing sorts by name, last checked, occurrences, or playlist count. Occurrences counts repeated track entries; playlist count counts distinct registered playlists. Expand memberships to navigate to each playlist. Ignore can apply to selected playlists or universally to current and future matching occurrences. Ignore changes local matching rules; the next sync updates Plex. Restore ignored rules from Settings → Ignored Tracks.

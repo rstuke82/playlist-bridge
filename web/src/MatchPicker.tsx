@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, Candidate, MissingTrack, Playlist } from './api'
+import Modal from './Modal'
 
 export default function MatchPicker({track,playlistKey,onClose,onSave}:{
   track: Pick<MissingTrack,'title'|'artist'|'album'>; playlistKey?:string;
@@ -22,22 +23,10 @@ export default function MatchPicker({track,playlistKey,onClose,onSave}:{
   const closeRef=useRef(onClose)
   closeRef.current=onClose
   useEffect(()=>{
-    const previous=document.activeElement as HTMLElement|null
-    dialog.current?.querySelector<HTMLButtonElement>('button')?.focus()
-    const keyboard=(e:KeyboardEvent)=>{
-      if(e.key==='Escape'&&!savingRef.current){e.preventDefault();closeRef.current()}
-      if(e.key==='Tab'){
-        const items=Array.from(dialog.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex="0"]')||[])
-        const first=items[0],last=items[items.length-1]
-        if(e.shiftKey&&document.activeElement===first){e.preventDefault();last?.focus()}
-        else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first?.focus()}
-      }
-    }
-    document.addEventListener('keydown',keyboard)
     let active=true
     api.playlists().then(p=>{if(active)setPlaylists(p)}).catch(()=>{})
     retryAutomatic()
-    return ()=>{active=false;generation.current++;document.removeEventListener('keydown',keyboard);previous?.focus()}
+    return ()=>{active=false;generation.current++}
   },[])
   async function retryAutomatic(){
     const id=++generation.current
@@ -64,16 +53,16 @@ export default function MatchPicker({track,playlistKey,onClose,onSave}:{
     catch(e:any){setError(e.message)}
     finally{savingRef.current=false;setSaving(false)}
   }
-  return <div className="modal-backdrop" onClick={()=>!saving&&onClose()}>
+  return <Modal onClose={onClose} busy={saving}>
     <div className="modal match-dialog" role="dialog" aria-modal="true" aria-labelledby="match-title" ref={dialog} onClick={e=>e.stopPropagation()}>
       <div className="modal-header"><h2 id="match-title">Choose a match</h2><button disabled={saving} onClick={onClose} aria-label="Close match picker">✕ Close</button></div>
       <div className="modal-body">
         <h3>{track.title}</h3><p>{track.artist} · {track.album||'N/A'}</p>
         <p className="muted">Select a candidate, then Save Match to queue the update. Cancel leaves the current match unchanged.</p>
-        <label><input type="checkbox" checked={all} disabled={saving} onChange={e=>setAll(e.target.checked)}/> Apply to all matching unresolved occurrences</label>
+        <label><input type="checkbox" checked={all} disabled={saving} onChange={e=>setAll(e.target.checked)}/> Apply to all matching missing occurrences</label>
         {!all&&playlists.map(p=><label className="playlist-choice" key={p.key}><input type="checkbox" disabled={saving||p.key===playlistKey} checked={keys.includes(p.key)} onChange={e=>setKeys(e.target.checked?[...keys,p.key]:keys.filter(k=>k!==p.key))}/>{p.name}{p.key===playlistKey?' (current playlist)':''}</label>)}
         {playlistKey&&<p className="muted">The current playlist's match will also be replaced. Only affected playlists sync.</p>}
-        {automaticDone&&<section className="automatic-candidate"><h3>Automatic matcher retry</h3>{automatic?<><p><strong>{automatic.title}</strong> — {automatic.artist} · {automatic.album}</p><p>The current automatic matcher selected this candidate. Accepting this suggestion records Auto provenance.</p><button disabled={saving} onClick={()=>{setChoice(automatic);setProvenance('automatic')}}>Use Match</button></>:<p>No strong automatic candidate was found.</p>}<button disabled={loading||saving} onClick={()=>search('')}>Show More Candidates</button><button disabled={saving} onClick={()=>dialog.current?.querySelector<HTMLInputElement>('input[aria-label="Search Plex"]')?.focus()}>Manual Search</button></section>}
+        {automaticDone&&<section className="automatic-candidate"><h3>Auto match retry</h3>{automatic?<><p><strong>{automatic.title}</strong> — {automatic.artist} · {automatic.album}</p><p>The current automatic matcher selected this candidate. Accepting this suggestion records Auto provenance.</p><button disabled={saving} onClick={()=>{setChoice(automatic);setProvenance('automatic')}}>Use Match</button></>:<p>No strong automatic candidate was found.</p>}<button disabled={loading||saving} onClick={()=>search('')}>Show More Candidates</button><button disabled={saving} onClick={()=>dialog.current?.querySelector<HTMLInputElement>('input[aria-label="Search Plex"]')?.focus()}>Manual Search</button></section>}
         <form className="add" onSubmit={e=>{e.preventDefault();search(query)}}><input aria-label="Search Plex" placeholder="Search Plex title, artist or album" value={query} disabled={saving} onChange={e=>setQuery(e.target.value)}/><button disabled={saving||loading}>Search</button></form>
         {error&&<p role="alert" className="error">{error}</p>}
         {loading?<p role="status"><span className="spinner"/> Retrying automatic matching / finding candidates… You can cancel while this runs.</p>:<>
@@ -83,5 +72,5 @@ export default function MatchPicker({track,playlistKey,onClose,onSave}:{
       </div>
       <div className="modal-footer"><button disabled={saving} onClick={onClose}>Cancel</button><span role="status">{saving?'Queuing match update…':choice?`Selected: ${choice.title}`:'No changes saved'}</span><button className="primary" disabled={saving||loading||!choice||(!all&&!keys.length)} onClick={save}>{saving?'Queuing…':`Save ${provenance==='automatic'?'Auto':'Manual'} Match`}</button></div>
     </div>
-  </div>
+  </Modal>
 }
