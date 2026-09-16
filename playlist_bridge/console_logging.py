@@ -22,6 +22,7 @@ def configure(repo):
     global enabled, web_mode
     enabled = bool(repo.load('console_settings').get('debug', False))
     web_mode = True
+    logging.getLogger('uvicorn.error').setLevel(logging.DEBUG if enabled else logging.INFO)
     logger = logging.getLogger('uvicorn.access')
     if not any(isinstance(f, AccessFilter) for f in logger.filters):
         logger.addFilter(AccessFilter())

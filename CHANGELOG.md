@@ -1,3 +1,11 @@
+# Playlist Bridge 2.1 Beta 2
+
+- Keep API failure reasons, timing and request IDs in application logs; retain job IDs and debug stack traces.
+- Distinguish upstream timeouts, connection/TLS failures, HTTP errors and invalid JSON. Only HTTP 429 is described as rate limiting.
+- Add debug timing for source/Plex and Lidarr requests; retain quiet normal polling and redact API keys and authorization values.
+- Replace the artist-tag list with inline Create & Add and removable tag chips, in settings and album options.
+- Keep Lidarr fields at a consistent compact height.
+
 # Playlist Bridge 2.0
 
 Playlist Bridge 2.0 is the final release of the web application, with SQLite persistence, Docker deployment and the existing CLI and matching engine.

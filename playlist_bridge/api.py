@@ -173,33 +173,54 @@ def _source_for_url(url: str):
 
 
 def _record_log(level, operation, message, config=None):
+    import logging
+    from .console_logging import enabled
+    if level == 'DEBUG' and not enabled:
+        return
+    context = jobs.current()
     try:
         config = config or _config(read_only=True, namespaces=[])
-        context = jobs.current()
-        if context or level == 'ERROR':
-            import logging
-            logging.getLogger('uvicorn.error').log(logging.ERROR if level == 'ERROR' else logging.INFO, '%s: %s', operation, redact(message, config))
-        config.repository.add_log(level, context.action if context else operation, redact(message, config))
+        message = redact(message, config)
+        if context:
+            message = f"[job {context.id}] {message}"
+        logging.getLogger('uvicorn.error').log(getattr(logging, level, logging.INFO), '%s: %s', operation, message)
+        config.repository.add_log(level, operation, message)
         if context:
             context.store.event(context.id, message, operation)
     except Exception:
-        # A diagnostic failure must not turn a successful sync into an error.
-        pass
+        logging.getLogger('uvicorn.error').error('Could not persist diagnostic event (%s)', operation)
+
+
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from fastapi.exception_handlers import http_exception_handler
+
+@app.exception_handler(StarletteHTTPException)
+async def diagnostic_http_error(request, exc):
+    request.state.failure_detail = str(exc.detail)
+    return await http_exception_handler(request, exc)
 
 
 @app.middleware("http")
 async def log_operations(request, call_next):
+    started = time.monotonic()
+    request_id = uuid.uuid4().hex[:12]
     try:
         response = await call_next(request)
-    except Exception:
-        await run_in_threadpool(_record_log, "ERROR", "request", f"{request.method} request failed unexpectedly. Check the server console.")
+    except Exception as exc:
+        import traceback
+        route = getattr(request.scope.get('route'), 'path', 'unmatched route')
+        await run_in_threadpool(_record_log, "ERROR", route,
+            f"[{request_id}] {request.method} failed after {time.monotonic()-started:.2f}s: {type(exc).__name__}: {exc}")
+        await run_in_threadpool(_record_log, "DEBUG", route, traceback.format_exc())
         raise
     route = request.scope.get("route")
     path = getattr(route, "path", "")
     if path.startswith("/api/") and path not in ("/api/health", "/api/settings/logs"):
-        if request.method != "GET" or response.status_code >= 400:
-            await run_in_threadpool(_record_log, "ERROR" if response.status_code >= 400 else "INFO", path,
-                        f"{request.method} completed with HTTP {response.status_code}")
+        level = 'ERROR' if response.status_code >= 500 else 'WARNING' if response.status_code >= 400 else 'INFO' if request.method != 'GET' else 'DEBUG'
+        detail = getattr(request.state, 'failure_detail', '')
+        await run_in_threadpool(_record_log, level, path,
+            f"[{request_id}] {request.method} HTTP {response.status_code} in {time.monotonic()-started:.2f}s" + (f" — {detail}" if detail else ''))
+    response.headers['X-Request-ID'] = request_id
     if request.url.path.startswith('/assets/') and response.status_code == 200:
         response.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
     elif not request.url.path.startswith('/api/'):
@@ -284,7 +305,7 @@ def health():
     return {
         "status": "ok",
         "version": __version__,
-        "release_name": "Playlist Bridge 2.1 Beta 1",
+        "release_name": "Playlist Bridge 2.1 Beta 2",
         "update": stored_status(config.repository),
         "build": __build__,
         "playlists": len(playlists),

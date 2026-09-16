@@ -97,6 +97,7 @@ class Client:
         self.key = cfg['api_key']
 
     def call(self, method, path, **kwargs):
+        started = time.monotonic()
         try:
             response = requests.request(method, self.url + '/api/v1/' + path,
                 headers={'X-Api-Key': self.key, 'Accept': 'application/json'},
@@ -107,11 +108,15 @@ class Client:
                 raise HTTPException(502, 'Lidarr redirected the request. Use its final server URL, including its URL base.')
             if not response.ok:
                 raise HTTPException(502, f'Lidarr returned HTTP {response.status_code}. Check its logs; no automatic write retries were made.')
-            return response.json() if response.content else None
+            result = response.json() if response.content else None
+            from .api import _record_log
+            _record_log('DEBUG', 'Lidarr', f'{method} {path} HTTP {response.status_code} in {time.monotonic()-started:.2f}s')
+            return result
         except requests.Timeout:
             raise HTTPException(504, 'Lidarr timed out. If this was an add or search, inspect Lidarr before retrying; it may have accepted the request.') from None
-        except (requests.RequestException, ValueError):
-            raise HTTPException(502, 'Could not read Lidarr’s response. Check the connection and its logs before retrying.') from None
+        except (requests.RequestException, ValueError) as exc:
+            from .diagnostics import service_failure
+            raise service_failure(f'Lidarr {method} {path}', exc, started) from None
 
     def options(self):
         status = self.call('GET', 'system/status')
@@ -190,8 +195,11 @@ def musicbrainz_search(repo, cfg, request):
     try:
         saved = state_get(repo, 'musicbrainz_cache', key)
         if saved and time.time() - saved['at'] < cfg['cache_days'] * 86400:
+            from .api import _record_log
+            _record_log('DEBUG', 'MusicBrainz', 'Using cached metadata result')
             return {'rows': saved['rows'], 'cached': True, 'provider': 'MusicBrainz'}
         time.sleep(max(0, 1.1 - (time.monotonic() - _mb_last)))
+        started = time.monotonic()
         try:
             _mb_last = time.monotonic()
             response = requests.get('https://musicbrainz.org/ws/2/' + entity,
@@ -200,8 +208,9 @@ def musicbrainz_search(repo, cfg, request):
                 timeout=(5, 20))
             response.raise_for_status()
             data = response.json()
-        except (requests.RequestException, ValueError):
-            raise HTTPException(502, 'MusicBrainz is unavailable or rate limited. Try later, or search Lidarr by album name.') from None
+        except (requests.RequestException, ValueError) as exc:
+            from .diagnostics import service_failure
+            raise service_failure('MusicBrainz', exc, started) from None
         rows = {}
         records = data.get('release-groups', []) if known else data.get('recordings', [])
         for record in records:

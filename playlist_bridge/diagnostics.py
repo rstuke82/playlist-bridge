@@ -53,7 +53,33 @@ def redact(message, config=None):
                        (config.config.get('notifications') or {}).get('url')):
             if secret:
                 text = text.replace(str(secret), '[REDACTED]')
+    text = re.sub(r'(?i)(Bearer|Basic)\s+[A-Za-z0-9+/=_\-.]+', r'\1 [REDACTED]', text)
     text = re.sub(r'\x1b\[[0-9;]*m', '', text)
     text = re.sub(r'(?i)(https?://)[^\s/@]+:[^\s/@]+@', r'\1[REDACTED]@', text)
-    text = re.sub(r'(?i)((?:x-plex-token|token|authorization|password|secret)[\s\"\x27]*[:=][\s\"\x27]*)([^\s&,\"\x27}]+)', r'\1[REDACTED]', text)
+    text = re.sub(r'(?i)((?:x-plex-token|x-api-key|api[_-]?key|access[_-]?token|token|authorization|password|secret)[\s\"\x27]*[:=][\s\"\x27]*)([^\s&,\"\x27}]+)', r'\1[REDACTED]', text)
     return text[:16000]
+
+
+def service_failure(service, exc, started):
+    """Classify upstream failures without exposing request URLs, keys or bodies."""
+    import time
+    from fastapi import HTTPException
+    status = getattr(getattr(exc, 'response', None), 'status_code', None)
+    if isinstance(exc, requests.exceptions.SSLError):
+        reason = 'TLS certificate verification failed. Check the server certificate.'
+    elif isinstance(exc, requests.exceptions.Timeout):
+        reason = 'Request timed out. Check connectivity and try again later.'
+    elif isinstance(exc, requests.exceptions.ConnectionError):
+        reason = 'Connection failed (DNS, network, or refused connection). Check connectivity from the Bridge container.'
+    elif status == 429:
+        reason = 'Rate limited (HTTP 429). Wait before retrying.'
+    elif status in (401, 403):
+        reason = f'Access rejected (HTTP {status}). Check credentials or service access restrictions.'
+    elif status:
+        reason = f'Service returned HTTP {status}. Check the service status before retrying.'
+    elif isinstance(exc, ValueError):
+        reason = 'The service returned invalid JSON.'
+    else:
+        reason = 'The request could not be completed.'
+    return HTTPException(504 if isinstance(exc, requests.exceptions.Timeout) else 502,
+        f'{service}: {reason} ({type(exc).__name__}, {time.monotonic()-started:.2f}s)')

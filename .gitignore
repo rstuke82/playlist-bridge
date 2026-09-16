@@ -53,3 +53,5 @@ backups/
 
 !tests/test_lidarr.py
 !tests/test_beta_workflows.py
+
+!tests/test_logging.py

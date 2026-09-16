@@ -25,14 +25,16 @@ def lookup(request):
         if time.monotonic() - _last < 3.2:
             raise HTTPException(429, 'Please wait a few seconds before searching Apple again.')
         _last = time.monotonic()
+        started = time.monotonic()
         try:
             response = requests.get('https://itunes.apple.com/search', params={
                 'term': request.title + ' ' + request.artist, 'entity': 'song',
                 'media': 'music', 'limit': 12, 'country': request.country}, timeout=(5, 15))
             response.raise_for_status()
             data = response.json()
-        except (requests.RequestException, ValueError):
-            raise HTTPException(502, 'Apple catalog search is unavailable. Try again later.') from None
+        except (requests.RequestException, ValueError) as exc:
+            from .diagnostics import service_failure
+            raise service_failure('Apple catalog', exc, started) from None
         rows = []
         for row in data.get('results', []):
             track_id = row.get('trackId')

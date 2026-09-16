@@ -244,7 +244,9 @@ class Manager:
         except Exception as exc:
             message = redact(getattr(exc,'detail',str(exc)),api._config())
             self.store.update(job['id'],status='failed',error=message,progress='Failed — ' + message,finished_at=now())
-            api._record_log('ERROR',job['action'],message)
+            api._record_log('ERROR',job['action'],f'{type(exc).__name__}: {message}')
+            import traceback
+            api._record_log('DEBUG',job['action'],traceback.format_exc())
         finally:
             _local.context = None
             _local.target = None
