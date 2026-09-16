@@ -45,6 +45,8 @@ from .notifications import WebhookNotifier, WebhookSettings
 async def lifespan(app):
     config = Config()
     config.repository.add_log("INFO", "startup", f"Playlist Bridge {__version__} started")
+    from .console_logging import configure
+    configure(config.repository)
     manager = jobs.Manager(config.repository)
     manager.start()
     app.state.jobs = manager
@@ -174,6 +176,9 @@ def _record_log(level, operation, message, config=None):
     try:
         config = config or _config(read_only=True, namespaces=[])
         context = jobs.current()
+        if context or level == 'ERROR':
+            import logging
+            logging.getLogger('uvicorn.error').log(logging.ERROR if level == 'ERROR' else logging.INFO, '%s: %s', operation, redact(message, config))
         config.repository.add_log(level, context.action if context else operation, redact(message, config))
         if context:
             context.store.event(context.id, message, operation)
@@ -279,7 +284,7 @@ def health():
     return {
         "status": "ok",
         "version": __version__,
-        "release_name": "Playlist Bridge 2.0.1",
+        "release_name": "Playlist Bridge 2.1 Beta 1",
         "update": stored_status(config.repository),
         "build": __build__,
         "playlists": len(playlists),
@@ -1232,6 +1237,14 @@ def _health_batch(playlists, config):
 
 
 def execute_job(action, payload):
+    if action=='ignore':
+        return ignore_missing(IgnoreRequest(**payload))
+    if action=='match_batch':
+        from .match_queue import execute
+        return execute(payload)
+    if action=='lidarr_add':
+        from .lidarr import execute
+        return execute(payload)
     if action=='check_updates':
         from .updates import check
         jobs.progress('Checking the published release image')
@@ -1349,7 +1362,14 @@ class IgnoreRequest(BaseModel):
     playlist_keys: List[str] = Field(default_factory=list)
 
 
-@app.post('/api/missing/ignore')
+@app.post('/api/missing/ignore', status_code=202)
+def queue_ignore(request: IgnoreRequest):
+    if not request.universal and not request.playlist_keys:
+        raise HTTPException(422, 'Select playlists or choose universal ignore')
+    store=job_store()
+    return store.get(store.enqueue('ignore', request.model_dump()))
+
+
 def ignore_missing(request: IgnoreRequest):
     if not request.universal and not request.playlist_keys:
         raise HTTPException(422,'Select playlists or choose universal ignore')
@@ -1364,6 +1384,14 @@ def ignore_missing(request: IgnoreRequest):
             key=_playlist_key(playlist)
             if not request.universal and key not in request.playlist_keys:
                 continue
+            # A sync may have resolved it while the ignore request was waiting.
+            if not request.universal:
+                syncer._ignore_track(key, track)
+            for search_key in list(config.mapping.get(key, {})):
+                title, _, artist = search_key.partition('|')
+                if syncer._same_missing_identity({'title': title, 'artist': artist}, track):
+                    config.mapping[key].pop(search_key, None)
+                    syncer._remove_match_provenance(key, search_key)
             remaining=[]
             for t in config.missing.get(key,[]):
                 if syncer._same_missing_identity(t,track):
@@ -1510,6 +1538,14 @@ from .settings_routes import register as register_settings
 register_settings(app)
 from .updates import register as register_updates
 register_updates(app)
+from .lidarr import register as register_lidarr
+register_lidarr(app)
+from .match_queue import register as register_match_queue
+register_match_queue(app)
+from .console_logging import register as register_console
+register_console(app)
+from .previews import register as register_previews
+register_previews(app)
 
 WEB_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"
 if WEB_DIST.exists():

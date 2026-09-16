@@ -14,3 +14,9 @@ body>.modal-backdrop .modal input:not([type=checkbox]):not([type=radio]),body>.m
 /* Desktop sidebar stays a viewport-height column, including the 761–850px range. */
 @media(min-width:761px){.shell{display:grid;grid-template-columns:220px minmax(0,1fr)}.shell>aside{display:flex;flex-direction:column;position:sticky;top:0;height:100dvh;min-height:0;overflow-y:auto;align-self:start}.shell>aside>nav{display:grid;flex:none}.shell>aside>nav button{width:100%}.shell>aside>.sidebar-bottom{display:flex;flex-direction:column;align-items:stretch;margin-top:auto;padding-top:12px;flex:none}.sidebar-bottom button{width:100%}.sidebar-bottom .sidebar-version{margin-left:0;overflow-wrap:anywhere}.sidebar-bottom .activity-nav{margin-bottom:0}}
 .control-popover{max-height:min(65vh,480px);overflow-y:auto}
+
+.lidarr-fields{border:0;padding:0;margin:0;min-width:0}.lidarr-fields .form-grid label:last-child{grid-column:auto}.lidarr-candidates{margin-top:16px}.lidarr-review{padding:12px 0;overflow-wrap:anywhere}.missing-list>.muted:first-child{margin-top:0}.missing-list .panel-head .actions{flex-wrap:wrap}.missing-list .list-controls h2{margin:0}.missing-list .panel-head>div:first-child{min-width:0}.missing-list .track-title{overflow-wrap:anywhere}
+
+.match-queue h2{font-size:16px}.match-queue details{margin-top:12px}.queued-match{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 0;border-bottom:1px solid var(--border)}.queued-match span{min-width:0;overflow-wrap:anywhere}.queued-match small{display:block;color:var(--muted);margin-top:5px}.song-preview iframe{width:100%;border:0;border-radius:12px;height:175px}.song-preview{margin:16px 0}.song-preview .candidate{font-size:13px}
+
+.missing-list .list-secondary input{background:var(--input);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:10px 12px}

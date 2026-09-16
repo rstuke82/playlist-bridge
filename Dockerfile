@@ -7,8 +7,8 @@ COPY web/ ./
 RUN npm run build
 
 FROM python:3.12-slim-bookworm AS runtime
-ARG VERSION=2.0.1
-ARG BUILD=20260916.1
+ARG VERSION=2.1.0-beta.1
+ARG BUILD=20260916.2
 ARG VCS_REF=unknown
 LABEL org.opencontainers.image.title="Playlist Bridge" \
       org.opencontainers.image.description="Sync Spotify and Apple Music playlists to Plex" \
@@ -19,7 +19,8 @@ LABEL org.opencontainers.image.title="Playlist Bridge" \
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PLAYLIST_BRIDGE_DATA_DIR=/data \
-    PLAYLIST_BRIDGE_PORT=8173
+    PLAYLIST_BRIDGE_PORT=8173 \
+    PLAYLIST_BRIDGE_UPDATE_CHANNEL=beta
 WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt

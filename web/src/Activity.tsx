@@ -4,7 +4,7 @@ import { Icon } from './Controls'
 import { displayText } from './labels'
 import { stamp } from './HealthCard'
 
-export const actionName=(value:string)=>({sync:'Sync',health:'Health Check',analyze:'Analyze playlist',add:'Add playlist',fix_match:'Fix Match',track_match:'Update track matches',remove:'Remove playlists',backup:'Backup',check_updates:'Check for Updates',restore_backup:'Restore Backup',ignore:'Ignore track',startup:'Startup',jobs:'Jobs'}[value]||value)
+export const actionName=(value:string)=>({match_batch:'Apply Match Queue',lidarr_add:'Add Album to Lidarr',sync:'Sync',health:'Health Check',analyze:'Analyze playlist',add:'Add playlist',fix_match:'Fix Match',track_match:'Update track matches',remove:'Remove playlists',backup:'Backup',check_updates:'Check for Updates',restore_backup:'Restore Backup',ignore:'Ignore track',startup:'Startup',jobs:'Jobs'}[value]||value)
 export function showActivity(id:string){location.hash=`activity/${encodeURIComponent(id)}`}
 const duration=(seconds:number)=>seconds<60?`${seconds}s`:`${Math.floor(seconds/60)}m ${seconds%60}s`
 const elapsed=(value?:string,end=Date.now())=>value?duration(Math.max(0,Math.floor((end-Date.parse(value))/1000))):'0s'

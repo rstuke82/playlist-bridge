@@ -50,3 +50,6 @@ backups/
 
 # Development Test Scripts
 /tests/*
+
+!tests/test_lidarr.py
+!tests/test_beta_workflows.py

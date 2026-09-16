@@ -868,7 +868,9 @@ def print(*args, **kwargs):
     """Keep CLI output and mirror this thread's terminal messages into its job."""
     import builtins
     from . import jobs
-    builtins.print(*args, **kwargs)
+    from . import console_logging
+    if not console_logging.web_mode or console_logging.enabled:
+        builtins.print(*args, **kwargs)
     jobs.output(kwargs.get('sep', ' ').join(str(a) for a in args))
 
 

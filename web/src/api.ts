@@ -109,6 +109,14 @@ function request<T>(path:string, init?:RequestInit):Promise<T> {
 }
 
 export const api = {
+  applePreview:(track:any)=>request<any>('/api/tracks/apple-preview',{method:'POST',body:JSON.stringify(track)}),
+  stageMatch:(data:any)=>request<any>('/api/matches/queue',{method:'POST',body:JSON.stringify(data)}),
+  stageMatchPreview:(preview_id:string)=>request<any>('/api/matches/queue/preview',{method:'POST',body:JSON.stringify({preview_id})}),
+  matchQueue:()=>request<any>('/api/matches/queue'),
+  applyMatchQueue:()=>request<Job>('/api/matches/queue/apply',{method:'POST'}),
+  discardMatch:(id:string)=>request<any>(`/api/matches/queue/${id}`,{method:'DELETE'}),
+  consoleSettings:()=>request<{debug:boolean}>('/api/settings/console'),
+  saveConsole:(debug:boolean)=>request<{debug:boolean}>('/api/settings/console',{method:'PUT',body:JSON.stringify({debug})}),
   tasks:()=>request<any>('/api/tasks'),
   history:(offset=0)=>request<any>(`/api/job-history?offset=${offset}`),
   autoSync:(playlist_keys:string[],auto_sync:boolean)=>request<any>('/api/playlists/auto-sync',{method:'POST',body:JSON.stringify({playlist_keys,auto_sync})}),

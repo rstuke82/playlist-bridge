@@ -10,7 +10,7 @@ from . import __version__
 _lock = threading.Lock()
 INTERVAL = 6 * 3600
 REPO = 'rstuke82/playlist-bridge'
-CHANNEL = os.environ.get('PLAYLIST_BRIDGE_UPDATE_CHANNEL','main')
+CHANNEL = os.environ.get('PLAYLIST_BRIDGE_UPDATE_CHANNEL','beta' if '-beta.' in __version__ else 'main')
 if CHANNEL not in ('main','beta'):CHANNEL='main'
 
 
