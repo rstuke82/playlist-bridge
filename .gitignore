@@ -39,6 +39,7 @@ cron.log
 *.bak
 
 # Container/native persistent data and local backups
+backups/
 /data/
 /backup-state/
 *.bak

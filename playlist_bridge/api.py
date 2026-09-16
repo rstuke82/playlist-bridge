@@ -279,7 +279,7 @@ def health():
     return {
         "status": "ok",
         "version": __version__,
-        "release_name": "Playlist Bridge 2.0",
+        "release_name": "Playlist Bridge 2.0.1",
         "update": stored_status(config.repository),
         "build": __build__,
         "playlists": len(playlists),
@@ -793,13 +793,32 @@ def missing_tracks(scope: Literal["all", "favorites"] = "all"):
         playlists = [p for p in playlists if p.get("favorite") is True]
     syncer = Syncer(config)
     rows = syncer.collect_all_missing_tracks_deduped(playlists=playlists)
+    # Index registered manual mappings once; never infer manual from identity alone.
+    manual = {}
+    def identity(track):
+        return tuple(repair_text(track.get(field, "")).casefold().strip() for field in ("title", "artist"))
+    for playlist in config.config.get('playlists', []):
+        key = _playlist_key(playlist)
+        for search_key, plex_id in config.mapping.get(key, {}).items():
+            if not plex_id or syncer._get_match_provenance(key, search_key) != 'manual':
+                continue
+            title, _, artist = search_key.partition('|')
+            track = {'title': title, 'artist': artist}
+            if any(syncer._same_missing_identity(t, track) for t in config.missing.get(key, [])):
+                continue
+            if syncer._find_ignored_track_key(key, track):
+                continue
+            manual.setdefault(identity(track), []).append({'key': key, 'name': playlist.get('plex_playlist_name', key)})
     for row in rows:
+        row['manual_matches_elsewhere'] = list({m['key']: m for m in manual.get(identity(row), [])}.values())
         members = []
         for playlist in playlists:
             key = _playlist_key(playlist)
             matches = [t for t in config.missing.get(key, []) if syncer._same_missing_identity(t, row)]
             if matches:
                 members.append({"key":key, "name":playlist.get("plex_playlist_name", key),
+                                "source":playlist.get("source"), "favorite":bool(playlist.get("favorite")),
+                                "statuses":list({"LOST" if t.get("status")=="lost" else "Missing" for t in matches}),
                                 "count":len(matches), "last_checked":playlist.get("last_match_attempt") or playlist.get("last_synced")})
         row['memberships'] = members
         row['playlist_count'] = len(members)

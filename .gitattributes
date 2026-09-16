@@ -1,0 +1,3 @@
+# Keep runtime backups out of Git-generated release archives.
+backups export-ignore
+**/backups export-ignore

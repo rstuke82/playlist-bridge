@@ -4784,6 +4784,13 @@ class Matcher:
             - best_details["candidate_variant_types"]
         )
 
+        # A different recording requires review even when song identity is exact.
+        # Album metadata can explicitly request live as well as the source title.
+        source_live = 'live' in (cls._title_release_types(source_track.get('title', ''))
+                                 | cls._album_types(source_track.get('album', '')))
+        if 'live' in best_details['candidate_variant_types'] and not source_live:
+            return None
+
         strong_identity_match = (
             best_details["identity_score"] >= cls.MATCH_THRESHOLD
             and best_details["title_score"] >= 75

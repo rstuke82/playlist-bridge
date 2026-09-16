@@ -1,12 +1,19 @@
 # Playlist Bridge
 
-**Release:** Playlist Bridge 2.0
+**Release:** Playlist Bridge 2.0.1
 
 Playlist Bridge syncs public **Spotify** and **Apple Music** playlists to playlists in your local **Plex music library**.
 
 Version 2.0 adds a self-hosted **React + TypeScript** web interface with a **FastAPI** backend while retaining the existing matching engine, CLI, with SQLite runtime storage.
 
 > Back up the existing data directory before upgrading; keep its mount and connection settings.
+
+## 2.0.1 changes
+
+- Activity, Settings and version stay at the bottom of the desktop sidebar across intermediate widths.
+- Unrequested live recordings require review instead of automatic acceptance. Existing saved selections are preserved.
+- Missing has remembered source, playlist, favorite, Missing/LOST and Manually matched elsewhere filters, with the same filter/sort controls as Playlists and playlist details.
+- Runtime backup folders are excluded from Git, Docker contexts and release archives.
 
 ## Features
 
@@ -18,7 +25,7 @@ Playlist Bridge 2.0 is the final release of the web application, with SQLite per
 - All dialogs render above the application panels, centered in the visible viewport even after scrolling. Dialog content scrolls internally, controls remain reachable on mobile, keyboard focus stays within the dialog and returns to the trigger when closed. This includes Ignore, Fix Match, removal, backup restore, log clearing and Quick Actions.
 - Match labels are consistently Auto, Manual, Saved, Missing, LOST and Ignored. Saved means an older match whose origin is unknown; it is not relabeled as Auto or Manual. Existing mappings and internal field names are preserved. Sorting uses Last synced.
 - Activity has permanent desktop and mobile navigation, full job history and retained logs. Playlist filters, bulk Auto Sync, consistent Settings pages, daily backups, restore and midnight-aligned recurring tasks from Beta 8 are included.
-- Git branches main and beta and Docker image tags main, beta and 2.0.0 receive the same final release. The default Compose image and update channel are main. Set PLAYLIST_BRIDGE_UPDATE_CHANNEL=beta to follow beta update notifications instead.
+- Git branches main and beta and Docker image tags main, beta and 2.0.1 receive the same final release. The default Compose image and update channel are main. Set PLAYLIST_BRIDGE_UPDATE_CHANNEL=beta to follow beta update notifications instead.
 
 Storage remains SQLite schema 4. New activity snapshots use the existing generic state table; Beta 5 databases require no schema migration. Jobs and output survive restarts. The API keeps idle polling slow; live activity uses one completion-scheduled request at a time while expanded, then stops after final output. Lists and settings load on demand. Two bounded detail workers, request timeouts, read-only health concurrency, matching thresholds, Docker port 8173 and CLI support are preserved.
 
@@ -99,7 +106,7 @@ docker compose up -d --no-build
 ```
 
 The default image is `ghcr.io/rstuke82/playlist-bridge:main`. This archive does not publish an image.
-To pin this build, set `PLAYLIST_BRIDGE_IMAGE=ghcr.io/rstuke82/playlist-bridge:2.0.0`
+To pin this build, set `PLAYLIST_BRIDGE_IMAGE=ghcr.io/rstuke82/playlist-bridge:2.0.1`
 in `.env` once that tag is published. The `main` tag follows stable releases; use the version tag to select 2.0.
 Beta images should never be tagged `latest`.
 
@@ -109,7 +116,7 @@ Maintainers can publish both server architectures with the existing buildx build
 docker buildx use playlist-bridge-builder
 docker buildx inspect --bootstrap
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -t ghcr.io/rstuke82/playlist-bridge:2.0.0 \
+  -t ghcr.io/rstuke82/playlist-bridge:2.0.1 \
   -t ghcr.io/rstuke82/playlist-bridge:main --push .
 ```
 

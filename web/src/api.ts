@@ -61,7 +61,8 @@ export type MissingTrack = {
   lost_occurrence_count?: number
   playlists: string[]
   last_checked?: string | null
-  memberships: {key:string;name:string;count:number;last_checked?:string}[]
+  manual_matches_elsewhere?: {key:string;name:string}[]
+  memberships: {key:string;name:string;count:number;last_checked?:string;source?:string;favorite?:boolean;statuses?:string[]}[]
 }
 
 export type Candidate = {
