@@ -21,21 +21,22 @@ class DiagnosticsTests(unittest.TestCase):
             self.assertEqual('Rate limited' in detail, code == 429)
 
     def test_api_logs_keep_reason_and_request_id(self):
+        import asyncio
+        from types import SimpleNamespace
         from unittest.mock import patch
         from fastapi import HTTPException
-        from fastapi.testclient import TestClient
+        from starlette.requests import Request
         from playlist_bridge import api
-        route_count = len(api.app.router.routes)
-        @api.app.get('/api/diagnostic-test')
-        def fail():
-            raise HTTPException(502, 'MusicBrainz returned HTTP 503')
-        try:
+        async def exercise():
+            request = Request({'type':'http', 'method':'POST', 'path':'/api/lidarr/search',
+                'headers':[], 'scheme':'http', 'server':('test',80), 'query_string':b'',
+                'route':SimpleNamespace(path='/api/lidarr/search')})
+            async def fail(request):
+                return await api.diagnostic_http_error(request, HTTPException(502, 'MusicBrainz returned HTTP 503'))
             with patch.object(api, '_record_log') as log:
-                response = TestClient(api.app).get('/api/diagnostic-test')
+                response = await api.log_operations(request, fail)
             self.assertEqual(response.status_code, 502)
-            self.assertIn('X-Request-ID', response.headers)
             message = log.call_args.args[2]
             self.assertIn('MusicBrainz returned HTTP 503', message)
             self.assertIn(response.headers['X-Request-ID'], message)
-        finally:
-            del api.app.router.routes[route_count:]
+        asyncio.run(exercise())
