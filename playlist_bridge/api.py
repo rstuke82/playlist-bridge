@@ -305,7 +305,7 @@ def health():
     return {
         "status": "ok",
         "version": __version__,
-        "release_name": "Playlist Bridge 2.1 Beta 2",
+        "release_name": "Playlist Bridge 2.1 Beta 3",
         "update": stored_status(config.repository),
         "build": __build__,
         "playlists": len(playlists),
@@ -1590,3 +1590,6 @@ def run():
 
 if __name__ == "__main__":
     run()
+
+from .musicbrainz_settings import register as register_musicbrainz
+register_musicbrainz(app)

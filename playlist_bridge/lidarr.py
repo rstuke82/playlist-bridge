@@ -48,6 +48,7 @@ class Lookup(BaseModel):
     album: str = Field(default='', max_length=500)
     query: str = Field(default='', max_length=500)
     provider: Literal['lidarr', 'musicbrainz'] = 'lidarr'
+    force_refresh: bool = False
 
 
 class Preview(Defaults):
@@ -177,10 +178,12 @@ def mb_quote(value):
     return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
 
 
-def musicbrainz_search(repo, cfg, request):
+def musicbrainz_search(repo, cfg, request, test=False):
     global _mb_last
-    if not cfg['musicbrainz_enabled']:
-        raise HTTPException(409, 'MusicBrainz lookup is disabled in Lidarr settings.')
+    from .musicbrainz_settings import settings, ordered
+    preferences = settings(repo)
+    if not preferences['enabled'] and not test:
+        raise HTTPException(409, 'MusicBrainz lookup is disabled in Settings → MusicBrainz.')
     if not request.artist.strip() or (not request.title.strip() and not request.album.strip()):
         raise HTTPException(422, 'Enter a track title and artist for MusicBrainz lookup.')
     album = request.album.strip()
@@ -194,10 +197,10 @@ def musicbrainz_search(repo, cfg, request):
         raise HTTPException(429, 'Another metadata lookup is running. Try again shortly.')
     try:
         saved = state_get(repo, 'musicbrainz_cache', key)
-        if saved and time.time() - saved['at'] < cfg['cache_days'] * 86400:
+        if not request.force_refresh and saved and time.time() - saved['at'] < preferences['cache_days'] * 86400:
             from .api import _record_log
             _record_log('DEBUG', 'MusicBrainz', 'Using cached metadata result')
-            return {'rows': saved['rows'], 'cached': True, 'provider': 'MusicBrainz'}
+            return {'rows': ordered(saved['rows'], preferences)[:50], 'cached': True, 'provider': 'MusicBrainz'}
         time.sleep(max(0, 1.1 - (time.monotonic() - _mb_last)))
         started = time.monotonic()
         try:
@@ -223,11 +226,11 @@ def musicbrainz_search(repo, cfg, request):
                     'artist': credit, 'year': group.get('first-release-date', '')[:4],
                     'type': group.get('primary-type', ''), 'secondary_types': group.get('secondary-types', []),
                     'exists': None}
-        result = list(rows.values())[:50]
+        result = list(rows.values())
         state_put(repo, 'musicbrainz_cache', key, {'at': time.time(), 'rows': result})
         with repo.connect() as db:
             db.execute("DELETE FROM state WHERE namespace='musicbrainz_cache' AND key NOT IN (SELECT key FROM state WHERE namespace='musicbrainz_cache' ORDER BY json_extract(value,'$.at') DESC LIMIT 500)")
-        return {'rows': result, 'cached': False, 'provider': 'MusicBrainz'}
+        return {'rows': ordered(result, preferences)[:50], 'cached': False, 'provider': 'MusicBrainz'}
     finally:
         _mb_lock.release()
 

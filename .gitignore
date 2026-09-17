@@ -55,3 +55,6 @@ backups/
 !tests/test_beta_workflows.py
 
 !tests/test_logging.py
+
+!tests/test_musicbrainz.py
+!tests/test_musicbrainz_retry.cjs

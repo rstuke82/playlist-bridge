@@ -1,3 +1,11 @@
+# Playlist Bridge 2.1 Beta 3
+
+- Add Settings → MusicBrainz with release priority, studio-release preference, cache retention, connection test and cache clearing.
+- Reorder cached and fresh candidates before applying the display limit, without changing automatic track matching.
+- Retry transient MusicBrainz lookup failures up to the configured limit (default two retries), with 15/30/45-second countdowns.
+- Retry Once bypasses cache and automatic retries, making one attempt per press. Closing the dialog cancels pending retries.
+- Existing MusicBrainz enable/cache preferences are used until the separate settings are saved.
+
 # Playlist Bridge 2.1 Beta 2
 
 - Keep API failure reasons, timing and request IDs in application logs; retain job IDs and debug stack traces.

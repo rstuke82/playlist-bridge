@@ -1,0 +1,40 @@
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+from playlist_bridge.storage import Repository
+from playlist_bridge.musicbrainz_settings import Preferences, settings, ordered
+from playlist_bridge import lidarr
+
+class MusicBrainzTests(unittest.TestCase):
+    def test_order_and_secondary_types(self):
+        rows=[{'type':'Album','secondary_types':['Live'],'title':'Live'}, {'type':'Single','title':'Single'}, {'type':'Album','title':'Studio'}]
+        prefs=Preferences().model_dump()
+        self.assertEqual([r['title'] for r in ordered(rows,prefs)],['Studio','Single','Live'])
+        prefs.update(prefer_studio=False,release_priority=['Single','EP','Album','Other'])
+        self.assertEqual(ordered(rows,prefs)[0]['title'],'Single')
+        with self.assertRaises(ValueError):Preferences(release_priority=['Album']*4)
+
+    def test_migrate_and_reorder_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo=Repository(Path(directory)/'bridge.sqlite')
+            repo.save({'lidarr':{'settings':{'musicbrainz_enabled':False,'cache_days':30}}})
+            self.assertFalse(settings(repo)['enabled'])
+            self.assertEqual(settings(repo)['cache_days'],30)
+            prefs=Preferences().model_dump()
+            repo.save({'musicbrainz_settings':{'preferences':prefs}})
+            request=lidarr.Lookup(title='Track',artist='Artist',album='Album',provider='musicbrainz')
+            import hashlib,time
+            key=hashlib.sha256(('release-group'+'releasegroup:"Album" AND artist:"Artist"').encode()).hexdigest()
+            lidarr.state_put(repo,'musicbrainz_cache',key,{'at':time.time(),'rows':[{'type':'Single'},{'type':'Album'}]})
+            with patch.object(lidarr.requests,'get') as get:
+                result=lidarr.musicbrainz_search(repo,{},request)
+                self.assertTrue(result['cached'])
+                self.assertEqual(result['rows'][0]['type'],'Album')
+                get.assert_not_called()
+            with patch.object(lidarr.requests,'get') as get:
+                get.return_value.json.return_value={'release-groups':[]}
+                request.force_refresh=True
+                result=lidarr.musicbrainz_search(repo,{},request)
+                self.assertFalse(result['cached'])
+                get.assert_called_once()
