@@ -1,3 +1,10 @@
+# Playlist Bridge 2.1 Beta 3 — album review diagnostics
+
+- Add Retry Review Once after a failed read-only album review; prevent overlapping review requests.
+- Log Lidarr request starts, completions, release-group IDs and review stages at INFO.
+- Preserve available Lidarr error response text and exception details at ERROR with credential redaction.
+- Identify the exact failed endpoint and elapsed time; distinguish read-only timeouts from uncertain writes.
+
 # Playlist Bridge 2.1 Beta 3 — maintenance update
 
 - Register MusicBrainz settings before the website route so album lookup can initialize.

@@ -40,3 +40,28 @@ class DiagnosticsTests(unittest.TestCase):
             self.assertIn('MusicBrainz returned HTTP 503', message)
             self.assertIn(response.headers['X-Request-ID'], message)
         asyncio.run(exercise())
+
+    def test_lidarr_timeout_identifies_read_only_step(self):
+        from unittest.mock import patch
+        from fastapi import HTTPException
+        from playlist_bridge.lidarr import Client
+        with patch('playlist_bridge.lidarr.requests.request', side_effect=requests.Timeout('upstream timed out')), patch('playlist_bridge.api._record_log') as log:
+            with self.assertRaises(HTTPException) as raised:
+                Client({'url':'http://lidarr:8686','api_key':'private-key'}).call('GET','album/lookup',params={'term':'lidarr:example-id'})
+        self.assertEqual(raised.exception.status_code,504)
+        self.assertIn('GET /api/v1/album/lookup [lidarr:example-id]',raised.exception.detail)
+        self.assertIn('upstream timed out',raised.exception.detail)
+        self.assertIn('no album was added or changed',raised.exception.detail)
+        self.assertEqual(log.call_args.args[0],'ERROR')
+
+    def test_lidarr_response_error_is_preserved_and_redacted(self):
+        from unittest.mock import patch, Mock
+        from fastapi import HTTPException
+        from playlist_bridge.lidarr import Client
+        response=Mock(status_code=500,ok=False,text='SkyHook lookup failed; api_key=private-key')
+        with patch('playlist_bridge.lidarr.requests.request',return_value=response), patch('playlist_bridge.api._record_log') as log:
+            with self.assertRaises(HTTPException) as raised:
+                Client({'url':'http://lidarr:8686','api_key':'private-key'}).call('GET','album/lookup')
+        self.assertIn('SkyHook lookup failed',raised.exception.detail)
+        self.assertNotIn('private-key',raised.exception.detail)
+        self.assertEqual(log.call_args.args[0],'ERROR')

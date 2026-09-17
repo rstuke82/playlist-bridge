@@ -99,6 +99,13 @@ class Client:
 
     def call(self, method, path, **kwargs):
         started = time.monotonic()
+        from .api import _record_log
+        from .diagnostics import redact
+        target = f'{method} /api/v1/{path}'
+        identity = (kwargs.get('params') or {}).get('term') or (kwargs.get('params') or {}).get('foreignAlbumId')
+        if identity:
+            target += f' [{identity}]'
+        _record_log('INFO', 'Lidarr', f'Starting {target}')
         try:
             response = requests.request(method, self.url + '/api/v1/' + path,
                 headers={'X-Api-Key': self.key, 'Accept': 'application/json'},
@@ -108,16 +115,21 @@ class Client:
             if 300 <= response.status_code < 400:
                 raise HTTPException(502, 'Lidarr redirected the request. Use its final server URL, including its URL base.')
             if not response.ok:
-                raise HTTPException(502, f'Lidarr returned HTTP {response.status_code}. Check its logs; no automatic write retries were made.')
+                detail = response.text[:4000].replace(self.key, '[REDACTED]')
+                raise HTTPException(502, f'Lidarr returned HTTP {response.status_code}: {redact(detail)}')
             result = response.json() if response.content else None
             from .api import _record_log
-            _record_log('DEBUG', 'Lidarr', f'{method} {path} HTTP {response.status_code} in {time.monotonic()-started:.2f}s')
+            _record_log('INFO', 'Lidarr', f'Completed {target}: HTTP {response.status_code} in {time.monotonic()-started:.2f}s')
             return result
-        except requests.Timeout:
-            raise HTTPException(504, 'Lidarr timed out. If this was an add or search, inspect Lidarr before retrying; it may have accepted the request.') from None
+        except HTTPException as exc:
+            _record_log('ERROR', 'Lidarr', f'{target} failed after {time.monotonic()-started:.2f}s: {exc.detail}')
+            raise
         except (requests.RequestException, ValueError) as exc:
-            from .diagnostics import service_failure
-            raise service_failure(f'Lidarr {method} {path}', exc, started) from None
+            exact = redact(str(exc).replace(self.key, '[REDACTED]'))
+            message = f'{target} failed after {time.monotonic()-started:.2f}s: {type(exc).__name__}: {exact}'
+            _record_log('ERROR', 'Lidarr', message)
+            suffix = 'This was a read-only request; no album was added or changed.' if method == 'GET' else 'Inspect Lidarr before retrying; it may have accepted the write.'
+            raise HTTPException(504 if isinstance(exc, requests.Timeout) else 502, message + ' ' + suffix) from None
 
     def options(self):
         status = self.call('GET', 'system/status')
@@ -246,15 +258,21 @@ def resolve(client, album_id):
 def prepare(repo, request):
     cfg = enabled(repo)
     client = Client(cfg)
+    from .api import _record_log
+    _record_log('INFO', 'Album review', f'Started read-only review of release group {request.album_id}; loading Lidarr profiles')
     options = client.options()
+    _record_log('INFO', 'Album review', 'Lidarr profiles loaded; validating album options')
     defaults = request.model_dump(exclude={'album_id'})
     validate_defaults(defaults, options)
+    _record_log('INFO', 'Album review', f'Resolving release group {request.album_id} through Lidarr metadata lookup')
     album = resolve(client, request.album_id)
     artist = album['artist']
+    _record_log('INFO', 'Album review', f"Resolved {album.get('title')} — {artist.get('artistName')}; checking whether album exists in Lidarr")
     current = client.call('GET', 'album', params={'foreignAlbumId': str(request.album_id)})
     existing = next((a for a in current if a.get('foreignAlbumId') == str(request.album_id)), None)
     if artist.get('id') and not artist.get('monitored') and (defaults['monitor_album'] or defaults['search_now']):
         raise HTTPException(409, 'This artist is unmonitored in Lidarr. Enable its monitoring there first, or add without monitoring/search. Other albums will not be changed here.')
+    _record_log('INFO', 'Album review', f"Review ready: {album.get('title')} — {artist.get('artistName')}; artist exists={bool(artist.get('id'))}, album exists={bool(existing)}. No Lidarr changes made.")
     token = str(uuid.uuid4())
     record = {'at': time.time(), 'config_hash': fingerprint(cfg), 'album_id': str(request.album_id),
               'artist_id': artist['foreignArtistId'], 'defaults': defaults,
