@@ -36,6 +36,8 @@ class FakeClient:
             return {'id': 7}
         if path == 'artist/4' and method == 'GET':
             return {**self.artist, 'tags': [4]}
+        if method == 'POST' and path == 'command':
+            return {'id':42,'status':'completed'}
         return {}
 
 
@@ -148,6 +150,42 @@ class LidarrTests(unittest.TestCase):
             self.assertTrue(result['cached'])
             self.assertEqual(get.call_count, 1)
         self.assertEqual(result['rows'][0]['album_id'], ALBUM)
+
+    def test_new_album_refresh_finishes_before_search(self):
+        self.defaults['search_now'] = True
+        _, payload = self.preview()
+        original = self.client.call
+        states = iter([{'id':42,'status':'started'}, {'id':42,'status':'completed'}])
+        def call(method,path,**kwargs):
+            result = original(method,path,**kwargs)
+            if method == 'POST' and path == 'command' and kwargs['json']['name']=='RefreshAlbum':
+                return {'id':42,'status':'queued'}
+            if path == 'command/42':
+                return next(states)
+            return result
+        with patch.object(self.client,'call',side_effect=call), patch.object(lidarr.time,'sleep'):
+            result = lidarr.execute(payload)
+        commands = [c[2]['json']['name'] for c in self.client.calls if c[:2]==('POST','command')]
+        self.assertEqual(commands,['RefreshAlbum','AlbumSearch'])
+        self.assertEqual(sum(c[1]=='command/42' for c in self.client.calls),2)
+        self.assertTrue(result['search_requested'])
+        body = next(c[2]['json'] for c in self.client.calls if c[:2]==('POST','album'))
+        self.assertFalse(body['addOptions']['searchForNewAlbum'])
+
+    def test_failed_refresh_does_not_search_or_add_twice(self):
+        self.defaults['search_now'] = True
+        _, payload = self.preview()
+        original = self.client.call
+        def call(method,path,**kwargs):
+            result = original(method,path,**kwargs)
+            if method == 'POST' and path == 'command':
+                return {'id':42,'status':'failed','message':'Metadata unavailable'}
+            return result
+        with patch.object(self.client,'call',side_effect=call):
+            with self.assertRaisesRegex(ValueError,'Metadata unavailable'):
+                lidarr.execute(payload)
+        self.assertEqual(sum(c[:2]==('POST','album') for c in self.client.calls),1)
+        self.assertEqual([c[2]['json']['name'] for c in self.client.calls if c[:2]==('POST','command')],['RefreshAlbum'])
 
 
 if __name__ == '__main__':

@@ -286,6 +286,33 @@ def prepare(repo, request):
             'metadata': next(r['name'] for r in options['metadata'] if r['id'] == defaults['metadata_profile_id'])}
 
 
+def run_album_command(client, body, label, timeout=120):
+    from .api import _record_log
+    jobs.progress(label)
+    command = client.call('POST', 'command', json=body)
+    if not command or not command.get('id'):
+        raise ValueError(f'{label}: Lidarr did not return a command ID. Inspect Lidarr before retrying.')
+    command_id = command['id']
+    deadline = time.monotonic() + timeout
+    previous = None
+    while True:
+        status = str(command.get('status', '')).lower()
+        if status != previous:
+            _record_log('INFO', 'Lidarr command', f'{label}: command {command_id} {status or "pending"}')
+            previous = status
+        if status == 'completed':
+            return command_id
+        if status in ('failed', 'aborted', 'cancelled', 'orphaned'):
+            detail = str(command.get('message') or command.get('exception') or status).replace(client.key if hasattr(client, 'key') else '\0', '[REDACTED]')
+            raise ValueError(f'{label}: command {command_id} {status}: {detail}')
+        if time.monotonic() >= deadline:
+            raise ValueError(f'{label}: command {command_id} still {status or "pending"} after {timeout}s. The album remains in Lidarr; inspect the command before retrying.')
+        jobs.progress(f'{label} · command {command_id} {status or "pending"}')
+        time.sleep(2)
+        jobs.progress(f'Checking {label.lower()}')
+        command = client.call('GET', f'command/{command_id}')
+
+
 def execute(payload):
     repo = repository()
     cfg = enabled(repo)
@@ -316,7 +343,7 @@ def execute(payload):
         body = copy.deepcopy(album)
         body.pop('id', None)
         body['monitored'] = defaults['monitor_album']
-        body['addOptions'] = {'addType': 'manual', 'searchForNewAlbum': defaults['search_now']}
+        body['addOptions'] = {'addType': 'manual', 'searchForNewAlbum': False}
         if not artist.get('id'):
             body['artist'] = {**artist, 'rootFolderPath': defaults['root_folder'],
                 'qualityProfileId': defaults['quality_profile_id'], 'metadataProfileId': defaults['metadata_profile_id'],
@@ -329,14 +356,22 @@ def execute(payload):
             body['artist'].pop('path', None)
         jobs.progress('Adding the selected album to Lidarr')
         result = client.call('POST', 'album', json=body)
-        jobs.output(f"Added {payload['title']} — {payload['artist']} to Lidarr" + ('; album search requested' if defaults['search_now'] else '; no immediate search requested'))
-        return {'album_id': result.get('id'), 'title': payload['title'], 'added': True, 'search_requested': defaults['search_now']}
+        jobs.output(f"Added {payload['title']} — {payload['artist']} to Lidarr")
+        search_command = None
+        if defaults['search_now']:
+            album_id = result.get('id')
+            if not album_id:
+                raise ValueError('Album added, but Lidarr returned no album ID. Search was not started; inspect Lidarr.')
+            run_album_command(client, {'name': 'RefreshAlbum', 'albumId': album_id}, f"Refreshing metadata for {payload['title']}")
+            search_command = run_album_command(client, {'name': 'AlbumSearch', 'albumIds': [album_id]}, f"Searching for {payload['title']}")
+            jobs.output(f"Lidarr search completed for {payload['title']}; check Lidarr for download results")
+        return {'album_id': result.get('id'), 'title': payload['title'], 'added': True, 'search_requested': defaults['search_now'], 'search_command_id': search_command}
     if defaults['monitor_album'] and not existing.get('monitored'):
         jobs.progress('Monitoring the selected album in Lidarr')
         client.call('PUT', 'album/monitor', json={'albumIds': [existing['id']], 'monitored': True})
     if defaults['search_now']:
         jobs.progress('Requesting a search for the selected album')
-        client.call('POST', 'command', json={'name': 'AlbumSearch', 'albumIds': [existing['id']]})
+        run_album_command(client, {'name': 'AlbumSearch', 'albumIds': [existing['id']]}, f"Searching for {payload['title']}")
     jobs.output(f"Album already in Lidarr: {payload['title']}" + ('; search requested' if defaults['search_now'] else '; no immediate search requested'))
     return {'album_id': existing['id'], 'title': payload['title'], 'added': False, 'search_requested': defaults['search_now']}
 

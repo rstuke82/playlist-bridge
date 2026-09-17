@@ -1,3 +1,10 @@
+# Playlist Bridge 2.1 Beta 3 — album search and navigation
+
+- Wait for album metadata refresh before explicitly searching a newly added album, and track command completion with a bounded wait.
+- Report refresh/search failures without repeating album additions or claiming downloads succeeded.
+- Stay on the current page after queuing an album request.
+- Add the same Lidarr album workflow to playlist-detail tracks.
+
 # Playlist Bridge 2.1 Beta 3 — album review diagnostics
 
 - Add Retry Review Once after a failed read-only album review; prevent overlapping review requests.
