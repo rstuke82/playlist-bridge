@@ -34,6 +34,12 @@ class FakeClient:
         if method == 'POST' and path == 'album':
             self.existing = True
             return {'id': 7}
+        if method == 'GET' and path == 'command':
+            return []
+        if method == 'GET' and path == 'album/7':
+            return {**copy.deepcopy(self.album), 'id':7, 'artistId':4}
+        if method == 'GET' and path == 'track':
+            return [{'id':1,'albumId':7}]
         if path == 'artist/4' and method == 'GET':
             return {**self.artist, 'tags': [4]}
         if method == 'POST' and path == 'command':
@@ -51,7 +57,7 @@ class LidarrTests(unittest.TestCase):
         self.defaults = lidarr.Defaults(**self.cfg).model_dump()
         self.client = FakeClient()
         self.patches = [patch.object(lidarr, 'repository', return_value=self.repo),
-                        patch.object(lidarr, 'Client', return_value=self.client)]
+                        patch.object(lidarr, 'Client', return_value=self.client), patch.object(lidarr.time, 'sleep')]
         for p in self.patches:
             p.start()
 
@@ -151,41 +157,65 @@ class LidarrTests(unittest.TestCase):
             self.assertEqual(get.call_count, 1)
         self.assertEqual(result['rows'][0]['album_id'], ALBUM)
 
-    def test_new_album_refresh_finishes_before_search(self):
+    def test_new_album_waits_without_starting_refresh(self):
         self.defaults['search_now'] = True
         _, payload = self.preview()
         original = self.client.call
-        states = iter([{'id':42,'status':'started'}, {'id':42,'status':'completed'}])
+        states = iter([[{'status':'started','body':{'name':'RefreshAlbum','albumId':7}}], [], []])
         def call(method,path,**kwargs):
             result = original(method,path,**kwargs)
-            if method == 'POST' and path == 'command' and kwargs['json']['name']=='RefreshAlbum':
-                return {'id':42,'status':'queued'}
-            if path == 'command/42':
-                return next(states)
-            return result
-        with patch.object(self.client,'call',side_effect=call), patch.object(lidarr.time,'sleep'):
+            return next(states) if method == 'GET' and path == 'command' else result
+        with patch.object(self.client,'call',side_effect=call):
             result = lidarr.execute(payload)
-        commands = [c[2]['json']['name'] for c in self.client.calls if c[:2]==('POST','command')]
-        self.assertEqual(commands,['RefreshAlbum','AlbumSearch'])
-        self.assertEqual(sum(c[1]=='command/42' for c in self.client.calls),2)
+        self.assertEqual([c[2]['json']['name'] for c in self.client.calls if c[:2]==('POST','command')],['AlbumSearch'])
+        self.assertEqual(sum(c[:2]==('GET','command') for c in self.client.calls),3)
         self.assertTrue(result['search_requested'])
         body = next(c[2]['json'] for c in self.client.calls if c[:2]==('POST','album'))
         self.assertFalse(body['addOptions']['searchForNewAlbum'])
 
-    def test_failed_refresh_does_not_search_or_add_twice(self):
+    def test_failed_search_is_partial_and_preserves_exact_exception(self):
         self.defaults['search_now'] = True
         _, payload = self.preview()
         original = self.client.call
         def call(method,path,**kwargs):
             result = original(method,path,**kwargs)
             if method == 'POST' and path == 'command':
-                return {'id':42,'status':'failed','message':'Metadata unavailable'}
+                return {'id':42,'status':'failed','message':'Failed','exception':'Specific upstream failure'}
             return result
         with patch.object(self.client,'call',side_effect=call):
-            with self.assertRaisesRegex(ValueError,'Metadata unavailable'):
-                lidarr.execute(payload)
+            result=lidarr.execute(payload)
+        self.assertTrue(result['partial_success'])
+        self.assertIn('Specific upstream failure',result['error'])
+        self.assertEqual(result['summary'],'Album added; search failed')
         self.assertEqual(sum(c[:2]==('POST','album') for c in self.client.calls),1)
-        self.assertEqual([c[2]['json']['name'] for c in self.client.calls if c[:2]==('POST','command')],['RefreshAlbum'])
+
+    def test_album_request_deduplicates_across_tracks(self):
+        from playlist_bridge.lidarr_requests import register, server_id
+        app=FastAPI();lidarr.register(app);register(app)
+        add=next(r.endpoint for r in app.routes if r.path=='/api/lidarr/add')
+        retry=next(r.endpoint for r in app.routes if r.path=='/api/lidarr/requests/{album}/retry-search')
+        with patch('playlist_bridge.api.job_store',return_value=jobs.Store(self.repo)):
+            first,_=self.preview()
+            j1=add(lidarr.Confirm(preview_id=first['preview_id'],source_title='One',source_artist='Artist'))
+            second,_=self.preview()
+            j2=add(lidarr.Confirm(preview_id=second['preview_id'],source_title='Two',source_artist='Artist'))
+            self.assertEqual(j1['id'],j2['id'])
+            record=lidarr.state_get(self.repo,'lidarr_requests',ALBUM)
+            self.assertEqual(len(record['sources']),2)
+            jobs.Store(self.repo).update(j1['id'],status='completed')
+            from playlist_bridge.lidarr_requests import save
+            save(self.repo,ALBUM,lidarr_id=7,status='search_failed')
+            retried=retry(ALBUM)
+            again=retry(ALBUM)
+            self.assertEqual(retried['id'],again['id'])
+            self.assertEqual(retried['action'],'lidarr_search')
+        self.client.existing=True
+        self.client.calls.clear()
+        result=lidarr.retry_search({'album_id':ALBUM,'server':server_id(self.cfg)})
+        self.assertTrue(result['search_requested'])
+        writes=[c for c in self.client.calls if c[0]!='GET']
+        self.assertEqual([c[1] for c in writes],['command'])
+        self.assertEqual(writes[0][2]['json']['name'],'AlbumSearch')
 
 
 if __name__ == '__main__':

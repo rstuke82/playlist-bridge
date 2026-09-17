@@ -305,7 +305,7 @@ def health():
     return {
         "status": "ok",
         "version": __version__,
-        "release_name": "Playlist Bridge 2.1 Beta 3",
+        "release_name": "Playlist Bridge 2.1 Beta 4",
         "update": stored_status(config.repository),
         "build": __build__,
         "playlists": len(playlists),
@@ -1267,6 +1267,9 @@ def execute_job(action, payload):
     if action=='match_batch':
         from .match_queue import execute
         return execute(payload)
+    if action=='lidarr_search':
+        from .lidarr import retry_search
+        return retry_search(payload)
     if action=='lidarr_add':
         from .lidarr import execute
         return execute(payload)
@@ -1576,6 +1579,9 @@ register_previews(app)
 
 from .musicbrainz_settings import register as register_musicbrainz
 register_musicbrainz(app)
+
+from .lidarr_requests import register as register_lidarr_requests
+register_lidarr_requests(app)
 
 WEB_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"
 if WEB_DIST.exists():

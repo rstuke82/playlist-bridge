@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from croniter import croniter
 
-ACTIONS = {'sync', 'health', 'analyze', 'add', 'fix_match', 'track_match', 'remove', 'backup', 'check_updates', 'restore_backup', 'lidarr_add', 'match_batch', 'ignore'}
+ACTIONS = {'sync', 'health', 'analyze', 'add', 'fix_match', 'track_match', 'remove', 'backup', 'check_updates', 'restore_backup', 'lidarr_add', 'lidarr_search', 'match_batch', 'ignore'}
 SCOPES = {'all', 'favorites', 'automatic', 'selected'}
 TERMINAL = {'completed', 'failed', 'cancelled', 'interrupted'}
 _local = threading.local()
@@ -309,6 +309,8 @@ def waiting(service):
 
 
 def completion_message(result):
+    if isinstance(result,dict) and isinstance(result.get('summary'),str):
+        return result['summary']
     rows = result.get('playlists', []) if isinstance(result, dict) else []
     values = [row.get('result', {}).get('health') or row.get('result', {}).get('summary') or row.get('result') or row.get('summary') or {} for row in rows]
     if not values:

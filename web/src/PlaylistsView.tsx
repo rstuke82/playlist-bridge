@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api, Job, Playlist } from './api'
 import Modal from './Modal'
-import { playlistPredicates, FILTER_STORAGE } from './playlistFilters'
+import { playlistPredicates, FILTER_STORAGE, normalizePlaylistFilters } from './playlistFilters'
 import HealthCard, { RelativeTime, HealthIndicator } from './HealthCard'
 
 import { Icon, FilterMenu, FilterChips, SortMenu } from './Controls'
@@ -10,7 +10,7 @@ const savedView=(initial?:string)=>{try{const value=initial?JSON.parse(decodeURI
 const filterChoices=Object.keys(playlistPredicates)
 const link=(key:string)=>`#playlist/${encodeURIComponent(key)}`
 export default function PlaylistsView({playlists,loaded,enqueue,refresh,favorite,initialView}:{initialView?:string;playlists:Playlist[];loaded:boolean;enqueue:(action:string,payload?:any)=>Promise<Job>;refresh:()=>Promise<void>;favorite:(p:Playlist)=>void}){
- const [query,setQuery]=useState<string>(()=>typeof savedView(initialView).query==='string'?savedView(initialView).query:''),[filters,setFilters]=useState<string[]>(()=>Array.isArray(savedView(initialView).filters)?savedView(initialView).filters.filter((f:string)=>filterChoices.includes(f)):[]),[sort,setSort]=useState(()=>savedView(initialView).sort==='last_synced'?'last_synced':'name'),[error,setError]=useState(''),[remove,setRemove]=useState<Playlist[]>([]),[removing,setRemoving]=useState(false)
+ const [query,setQuery]=useState<string>(()=>typeof savedView(initialView).query==='string'?savedView(initialView).query:''),[filters,setFilters]=useState<string[]>(()=>Array.isArray(savedView(initialView).filters)?normalizePlaylistFilters(savedView(initialView).filters):[]),[sort,setSort]=useState(()=>savedView(initialView).sort==='last_synced'?'last_synced':'name'),[error,setError]=useState(''),[remove,setRemove]=useState<Playlist[]>([]),[removing,setRemoving]=useState(false)
  const [selected,setSelected]=useState<string[]>([]),[deletePlex,setDeletePlex]=useState(false)
  const [view,setView]=useState(()=>{try{return localStorage.getItem('playlist-bridge-view')==='compact'?'compact':'expanded'}catch{return 'expanded'}})
  const predicates=playlistPredicates

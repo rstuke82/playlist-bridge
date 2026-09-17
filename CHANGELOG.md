@@ -1,3 +1,12 @@
+# Playlist Bridge 2.1 Beta 4
+
+- Observe Lidarr initial refresh and track readiness without starting a duplicate refresh.
+- Persist album requests across playlists and restarts, with album-added/search-pending/search-failed outcomes and a search-only retry action.
+- Avoid duplicate album requests; a pending search command is resumed rather than submitted twice. Unknown search submissions require inspection in Lidarr.
+- Simplify Add Album to one dialog, automatically search Lidarr on opening, and show confirmation on the originating page.
+- Add Ignore to playlist details with playlist-only and universal scope.
+- Consolidate playlist health/missing/LOST filters under Needs Attention; migrate stored filter selections and simplify the health summary wording.
+
 # Playlist Bridge 2.1 Beta 3 — album search and navigation
 
 - Wait for album metadata refresh before explicitly searching a newly added album, and track command completion with a bounded wait.

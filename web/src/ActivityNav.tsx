@@ -5,7 +5,7 @@ import { actionName } from './Activity'
 export default function ActivityNav({jobs,page,mobile=false}:{jobs:Job[];page:string;mobile?:boolean}){
  const [seen,setSeen]=useState(()=>{try{return localStorage.getItem('bridge-activity-reviewed')||''}catch{return ''}})
  const active=jobs.find(j=>j.status==='running')||jobs.find(activeJob)
- const latestFailure=jobs.filter(j=>['failed','interrupted'].includes(j.status)&&j.finished_at).sort((a,b)=>(b.finished_at||'').localeCompare(a.finished_at||''))[0]
+ const latestFailure=jobs.filter(j=>(['failed','interrupted'].includes(j.status)||j.result?.partial_success)&&j.finished_at).sort((a,b)=>(b.finished_at||'').localeCompare(a.finished_at||''))[0]
  const attention=!!latestFailure&&(latestFailure.finished_at||'')>seen
  useEffect(()=>{if(page==='activity'&&latestFailure?.finished_at){setSeen(latestFailure.finished_at);try{localStorage.setItem('bridge-activity-reviewed',latestFailure.finished_at)}catch{}}},[page,latestFailure?.finished_at])
  const lanes=Object.values(active?.activity?.lanes||{}) as any[]

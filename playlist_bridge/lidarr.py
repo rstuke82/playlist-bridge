@@ -57,6 +57,8 @@ class Preview(Defaults):
 
 class Confirm(BaseModel):
     preview_id: uuid.UUID
+    source_title: str = Field(default='', max_length=500)
+    source_artist: str = Field(default='', max_length=500)
 
 
 def repository():
@@ -286,13 +288,15 @@ def prepare(repo, request):
             'metadata': next(r['name'] for r in options['metadata'] if r['id'] == defaults['metadata_profile_id'])}
 
 
-def run_album_command(client, body, label, timeout=120):
+def run_album_command(client, body, label, timeout=120, existing_id=None, accepted=None):
     from .api import _record_log
     jobs.progress(label)
-    command = client.call('POST', 'command', json=body)
+    command = client.call('GET', f'command/{existing_id}') if existing_id else client.call('POST', 'command', json=body)
     if not command or not command.get('id'):
         raise ValueError(f'{label}: Lidarr did not return a command ID. Inspect Lidarr before retrying.')
     command_id = command['id']
+    if accepted:
+        accepted(command_id)
     deadline = time.monotonic() + timeout
     previous = None
     while True:
@@ -303,7 +307,7 @@ def run_album_command(client, body, label, timeout=120):
         if status == 'completed':
             return command_id
         if status in ('failed', 'aborted', 'cancelled', 'orphaned'):
-            detail = str(command.get('message') or command.get('exception') or status).replace(client.key if hasattr(client, 'key') else '\0', '[REDACTED]')
+            detail = str(command.get('exception') or command.get('message') or status).replace(client.key if hasattr(client, 'key') else '\0', '[REDACTED]')
             raise ValueError(f'{label}: command {command_id} {status}: {detail}')
         if time.monotonic() >= deadline:
             raise ValueError(f'{label}: command {command_id} still {status or "pending"} after {timeout}s. The album remains in Lidarr; inspect the command before retrying.')
@@ -313,7 +317,7 @@ def run_album_command(client, body, label, timeout=120):
         command = client.call('GET', f'command/{command_id}')
 
 
-def execute(payload):
+def execute_add(payload):
     repo = repository()
     cfg = enabled(repo)
     if fingerprint(cfg) != payload['config_hash']:
@@ -357,23 +361,104 @@ def execute(payload):
         jobs.progress('Adding the selected album to Lidarr')
         result = client.call('POST', 'album', json=body)
         jobs.output(f"Added {payload['title']} — {payload['artist']} to Lidarr")
-        search_command = None
-        if defaults['search_now']:
-            album_id = result.get('id')
-            if not album_id:
-                raise ValueError('Album added, but Lidarr returned no album ID. Search was not started; inspect Lidarr.')
-            run_album_command(client, {'name': 'RefreshAlbum', 'albumId': album_id}, f"Refreshing metadata for {payload['title']}")
-            search_command = run_album_command(client, {'name': 'AlbumSearch', 'albumIds': [album_id]}, f"Searching for {payload['title']}")
-            jobs.output(f"Lidarr search completed for {payload['title']}; check Lidarr for download results")
-        return {'album_id': result.get('id'), 'title': payload['title'], 'added': True, 'search_requested': defaults['search_now'], 'search_command_id': search_command}
+        from .lidarr_requests import save
+        save(repo, payload['album_id'], lidarr_id=result.get('id'), status='added', error='')
+        return finish_search(repo, client, payload, result.get('id'), added=True)
     if defaults['monitor_album'] and not existing.get('monitored'):
         jobs.progress('Monitoring the selected album in Lidarr')
         client.call('PUT', 'album/monitor', json={'albumIds': [existing['id']], 'monitored': True})
-    if defaults['search_now']:
-        jobs.progress('Requesting a search for the selected album')
-        run_album_command(client, {'name': 'AlbumSearch', 'albumIds': [existing['id']]}, f"Searching for {payload['title']}")
-    jobs.output(f"Album already in Lidarr: {payload['title']}" + ('; search requested' if defaults['search_now'] else '; no immediate search requested'))
-    return {'album_id': existing['id'], 'title': payload['title'], 'added': False, 'search_requested': defaults['search_now']}
+    from .lidarr_requests import save
+    save(repo, payload['album_id'], lidarr_id=existing['id'], status='added', error='')
+    return finish_search(repo, client, payload, existing['id'], added=False)
+
+
+def wait_album_ready(client, album_id, timeout=120):
+    """Observe Lidarr's initial refresh; never start another one."""
+    deadline = time.monotonic() + timeout
+    stable = 0
+    while True:
+        jobs.progress('Waiting for Lidarr initial refresh and track metadata')
+        album = client.call('GET', f'album/{album_id}')
+        commands = client.call('GET', 'command')
+        pending = any(str(c.get('status','')).lower() in ('queued','started','running') and
+            ((c.get('body',{}).get('name',c.get('name')) == 'RefreshAlbum' and c.get('body',{}).get('albumId') in (None,album_id)) or
+             (c.get('body',{}).get('name',c.get('name')) == 'RefreshArtist' and c.get('body',{}).get('artistId') in (None,album.get('artistId')))) for c in commands)
+        tracks = client.call('GET','track',params={'albumId':album_id})
+        stable = stable + 1 if tracks and not pending else 0
+        if stable >= 2:
+            jobs.output(f'Lidarr album {album_id} ready: {len(tracks)} tracks, initial refresh no longer active')
+            return
+        if time.monotonic() >= deadline:
+            raise TimeoutError('Initial Lidarr refresh or track metadata is still pending. No additional refresh or search was started.')
+        time.sleep(2)
+
+
+def finish_search(repo, client, payload, album_id, added=False):
+    from .lidarr_requests import save
+    from .api import _record_log
+    base = 'Album added' if added else 'Album is in Lidarr'
+    result = {'album_id':album_id,'title':payload['title'],'added':added,'search_requested':False}
+    if not payload['defaults']['search_now']:
+        result['summary'] = base + '; no search requested'
+        return result
+    save(repo,payload['album_id'],status='search_pending')
+    command_id = None
+    submitting = False
+    try:
+        if not album_id:
+            raise ValueError('Lidarr returned no confirmed album ID. Check Lidarr.')
+        previous = state_get(repo,'lidarr_requests',payload['album_id']) or {}
+        previous_id = previous.get('search_command_id')
+        if previous_id:
+            prior = client.call('GET', f'command/{previous_id}')
+            if str(prior.get('status','')).lower() in ('failed','aborted','cancelled','orphaned'):
+                previous_id = None
+        if not previous_id:
+            wait_album_ready(client,album_id)
+        def accepted(cid):
+            nonlocal command_id
+            command_id = cid
+            save(repo,payload['album_id'],search_command_id=cid,status='search_pending')
+        submitting = True
+        cid = run_album_command(client,{'name':'AlbumSearch','albumIds':[album_id]},f"Searching for {payload['title']}",existing_id=previous_id,accepted=accepted)
+        save(repo,payload['album_id'],status='search_completed',error='')
+        result.update(search_requested=True,search_command_id=cid,summary=base+'; search completed (downloads are managed by Lidarr)')
+    except Exception as exc:
+        from .diagnostics import redact
+        detail = redact(str(getattr(exc,'detail',str(exc))).replace(getattr(client,'key','') or '\0','[REDACTED]'))
+        pending = isinstance(exc,TimeoutError) or (command_id and 'still ' in detail)
+        unknown = submitting and not command_id and isinstance(exc,HTTPException)
+        status = 'search_unknown' if unknown else 'search_pending' if pending else 'search_failed'
+        summary = base + ('; search submission unconfirmed' if unknown else '; search pending' if pending else '; search failed')
+        save(repo,payload['album_id'],status=status,error=detail)
+        _record_log('ERROR','Lidarr search',summary+': '+detail)
+        result.update(partial_success=True,summary=summary,error=detail,search_command_id=command_id)
+    return result
+
+
+def execute(payload):
+    from .lidarr_requests import save
+    repo = repository()
+    try:
+        return execute_add(payload)
+    except Exception as exc:
+        from .diagnostics import redact
+        save(repo,payload['album_id'],status='add_failed',error=redact(getattr(exc,'detail',str(exc))))
+        raise
+
+
+def retry_search(payload):
+    from .lidarr_requests import server_id
+    repo = repository()
+    cfg = enabled(repo)
+    if payload['server'] != server_id(cfg):
+        raise ValueError('Lidarr server changed; review the album on the new server.')
+    record = state_get(repo,'lidarr_requests',payload['album_id'])
+    client = Client(cfg)
+    album = client.call('GET',f"album/{record['lidarr_id']}")
+    if album.get('foreignAlbumId') != payload['album_id']:
+        raise ValueError('Lidarr album identity changed; search was not submitted.')
+    return finish_search(repo,client,{'album_id':payload['album_id'],'title':record['title'],'defaults':{'search_now':True}},record['lidarr_id'])
 
 
 def register(app):
@@ -445,7 +530,23 @@ def register(app):
             else:
                 if time.time() - payload['at'] > 900 or payload['config_hash'] != fingerprint(cfg):
                     raise HTTPException(409, 'The preview expired or settings changed. Review the album again.')
-                job_id = job_store().enqueue('lidarr_add', payload, db=db)
+                from .lidarr_requests import server_id, active
+                server = server_id(cfg)
+                old = db.execute("SELECT value FROM state WHERE namespace='lidarr_requests' AND key=?", (payload['album_id'],)).fetchone()
+                record = json.loads(old[0]) if old else {}
+                if record.get('server') != server:
+                    record = {}
+                source = {'title':request.source_title,'artist':request.source_artist}
+                sources = record.get('sources',[])
+                if source['title'] and source not in sources:
+                    sources.append(source)
+                if record and (active(db,record.get('job_id')) or record.get('lidarr_id')):
+                    job_id = record['job_id']
+                    record['sources'] = sources
+                else:
+                    job_id = job_store().enqueue('lidarr_add', payload, db=db)
+                    record = {'server':server,'sources':sources,'title':payload['title'],'artist':payload['artist'],'job_id':job_id,'status':'queued','updated_at':time.time()}
+                db.execute("INSERT INTO state(namespace,key,value) VALUES('lidarr_requests',?,?) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value", (payload['album_id'],json.dumps(record)))
                 payload['job_id'] = job_id
                 db.execute("UPDATE state SET value=? WHERE namespace='lidarr_previews' AND key=?", (json.dumps(payload), str(request.preview_id)))
         return job_store().get(job_id)

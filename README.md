@@ -1,6 +1,6 @@
 # Playlist Bridge
 
-**Release:** Playlist Bridge 2.1 Beta 3
+**Release:** Playlist Bridge 2.1 Beta 4
 
 Playlist Bridge syncs public **Spotify** and **Apple Music** playlists to playlists in your local **Plex music library**.
 
@@ -8,17 +8,21 @@ Version 2.0 adds a self-hosted **React + TypeScript** web interface with a **Fas
 
 > Back up the existing data directory before upgrading; keep its mount and connection settings.
 
-## 2.1 Beta 3: Lidarr
+## 2.1 Beta 4: Lidarr
 
-This beta is published only to the beta branch and the Docker tags `beta` and `2.1.0-beta.3`. Stable `main` remains on 2.0.1.
+This beta is published only to the beta branch and the Docker tags `beta` and `2.1.0-beta.4`. Stable `main` remains on 2.0.1.
 
 In Settings → Lidarr, enter the server URL (including any URL base) and API key. Test Connection loads root folders, quality profiles and metadata profiles from that instance. Choosing a root folder loads its quality, metadata, monitoring and tag defaults; Use Root Folder Defaults restores them after overrides. A metadata profile named None is supported and is distinct from monitoring None. Choose defaults, enable the integration and save. Blank API-key fields retain the existing key only when the server URL stays the same. Keys remain server-side in the persistent SQLite database; do not publish the data directory or backups.
 
-On Missing, choose **Add Album to Lidarr**. Search by album name or use **Find Albums for This Track** to query MusicBrainz. Select an album, review its identity and options, then confirm. Missing source albums are resolved through recording search; metadata results are candidates for review, not automatic identifications. MusicBrainz uses its public API without credentials, a descriptive User-Agent, throttling, and a SQLite cache (7 or 30 days, at most 500 lookups). Its availability and Lidarr's metadata catalog can differ.
+On Missing or playlist details, choose **Add Album to Lidarr**. Opening the dialog searches Lidarr using the source album, or track and artist when the album is unknown. Select a result, adjust options inline and click **Add to Lidarr**. Validation runs before the request is queued, then the dialog closes with confirmation on the same page. **Find Albums for This Track** provides MusicBrainz results as an alternative. Missing source albums are resolved through recording search; metadata results are candidates for review, not automatic identifications. MusicBrainz uses its public API without credentials, a descriptive User-Agent, throttling, and a SQLite cache (7 or 30 days, at most 500 lookups). Its availability and Lidarr's metadata catalog can differ.
 
 Defaults monitor only the selected album, do not monitor future discoveries, and do not search immediately. Broader monitoring choices apply only when adding a new artist. Existing artists retain their profiles, paths and other album flags. Paused artists must be enabled in Lidarr before requesting monitored/searching additions. Existing album entries are reused; an already monitored album is never silently unmonitored. Confirmation queues a persistent Activity job; changing settings invalidates an unexecuted preview. A timed-out external write is not automatically retried: inspect Lidarr before retrying.
 
 Adding an album does not remove Bridge's missing entry or alter Plex. Once Lidarr's download/import reaches Plex, Sync / Refresh can resolve it. No scheduled bulk album adds, automatic downloads of every missing album, or automatic MusicBrainz-to-track match changes are included.
+
+When searching a newly added album, Bridge waits for Lidarr’s own refresh and track data rather than starting another refresh. Request status is retained in SQLite and shared across playlists: **Requested in Lidarr**, **Album added; search pending**, or **Album added; search failed**. **Retry Search** only checks readiness and submits or resumes the album search; it does not add or refresh the album again. A pending command is observed, not resubmitted. A search submission that times out without a command ID requires inspection in Lidarr.
+
+Playlist filters now consolidate drift, health errors, missing and LOST under **Needs Attention**. Playlist details also support Ignore in the current playlist or universally. See [the roadmap](ROADMAP.md) for deferred Beta 5 improvements.
 
 This beta also includes:
 
@@ -130,7 +134,7 @@ docker compose up -d --no-build
 ```
 
 The default image in this beta is `ghcr.io/rstuke82/playlist-bridge:beta`. This archive does not publish an image.
-To pin this build, set `PLAYLIST_BRIDGE_IMAGE=ghcr.io/rstuke82/playlist-bridge:2.1.0-beta.3`
+To pin this build, set `PLAYLIST_BRIDGE_IMAGE=ghcr.io/rstuke82/playlist-bridge:2.1.0-beta.4`
 in `.env` once that tag is published. The `main` tag follows stable releases; use the version tag to pin this beta.
 Beta images should never be tagged `latest`.
 
@@ -140,7 +144,7 @@ Maintainers can publish both server architectures with the existing buildx build
 docker buildx use playlist-bridge-builder
 docker buildx inspect --bootstrap
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -t ghcr.io/rstuke82/playlist-bridge:2.1.0-beta.3 \
+  -t ghcr.io/rstuke82/playlist-bridge:2.1.0-beta.4 \
   -t ghcr.io/rstuke82/playlist-bridge:beta --push .
 ```
 
