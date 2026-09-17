@@ -70,6 +70,32 @@ class LidarrTests(unittest.TestCase):
         result = lidarr.prepare(self.repo, lidarr.Preview(album_id=ALBUM, **self.defaults))
         return result, lidarr.state_get(self.repo, 'lidarr_previews', result['preview_id'])
 
+    def test_existing_search_deduplicates_and_never_adds_or_changes_monitoring(self):
+        self.client.existing = True
+        app = FastAPI()
+        lidarr.register(app)
+        endpoint = next(r.endpoint for r in app.routes if r.path == '/api/lidarr/search-existing')
+        store = jobs.Store(self.repo)
+        with patch('playlist_bridge.api.job_store', return_value=store):
+            first = endpoint(lidarr.ExistingSearch(album_id=ALBUM, source_title='Track', source_artist='Artist'))
+            second = endpoint(lidarr.ExistingSearch(album_id=ALBUM, source_title='Other track', source_artist='Artist'))
+        self.assertEqual(first['id'], second['id'])
+        record = lidarr.state_get(self.repo, 'lidarr_requests', ALBUM)
+        self.assertEqual(len(record['sources']), 2)
+        result = lidarr.retry_search(first['payload'])
+        self.assertTrue(result['search_requested'])
+        writes = [(m,p) for m,p,_ in self.client.calls if m != 'GET']
+        self.assertEqual(writes, [('POST','command')])
+        self.assertFalse(self.client.album['monitored'])
+
+    def test_existing_search_rejects_absent_album(self):
+        app = FastAPI()
+        lidarr.register(app)
+        endpoint = next(r.endpoint for r in app.routes if r.path == '/api/lidarr/search-existing')
+        with self.assertRaises(HTTPException) as error:
+            endpoint(lidarr.ExistingSearch(album_id=ALBUM))
+        self.assertEqual(error.exception.status_code, 409)
+
     def test_read_only_preview_then_selected_album_add(self):
         preview, payload = self.preview()
         self.assertFalse(preview['album_exists'])

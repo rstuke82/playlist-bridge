@@ -97,14 +97,14 @@ def execute(payload):
             try:
                 summary, _ = _capture(syncer.sync_playlist, playlist)
                 ok = not summary.get('errors')
-                results.append({'key': key, 'name': playlist.get('plex_playlist_name', key), 'ok': ok, 'result': {'summary': summary}})
+                results.append({'key': key, 'name': playlist.get('plex_playlist_name', key), 'ok': ok, 'error': '' if ok else 'Match edits saved; Plex sync or verification failed. See the track differences in the log.', 'result': {'summary': summary}})
             except Exception as exc:
                 results.append({'key': key, 'name': playlist.get('plex_playlist_name', key), 'ok': False, 'error': redact(getattr(exc, 'detail', str(exc)), config)})
             ctx = jobs.current()
             if ctx:
                 ctx.store.update(ctx.id, result={'playlists': results, 'total': len(selected), 'matches_saved': len(changes)})
         if any(not r['ok'] for r in results):
-            raise ValueError('Matches were saved, but a playlist sync failed. Review Activity and sync the affected playlist again.')
+            return {'playlists': results, 'total': len(selected), 'matches_saved': len(changes), 'partial_success': True, 'summary': f'{len(changes)} match edits saved; {sum(not r["ok"] for r in results)} playlist sync(s) failed. Review the track differences and retry the affected sync. Your matches do not need to be entered again.'}
         return {'playlists': results, 'total': len(selected), 'matches_saved': len(changes)}
 
 

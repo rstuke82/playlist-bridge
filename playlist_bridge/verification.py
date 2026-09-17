@@ -19,3 +19,23 @@ def compare(expected, items):
 def describe(result):
     return (f"Plex verification: expected {result['expected_count']} occurrences, retained {result['actual_count']}; "
             f"missing IDs/counts: {result['missing']}; extra IDs/counts: {result['extra']}; source order preserved: {result['order_matches']}")
+
+
+def track_details(expected, items, library):
+    """Explain absent IDs separately from missing repeated occurrences."""
+    wanted = Counter(str(v) for v in expected)
+    actual = Counter(str(t.get('plex_id')) for t in items)
+    lookup = {str(t.get('plex_id')): t for t in items}
+    for track in library:
+        key = str(track.get('plex_id'))
+        lookup[key] = {**lookup.get(key, {}), **track}
+    lines = []
+    for kind, counts in [('Missing', wanted-actual), ('Unexpected', actual-wanted)]:
+        for key in counts:
+            track = lookup.get(key, {})
+            title = track.get('title') or 'Unknown title'
+            artist = track.get('artist') or 'Unknown artist'
+            album = track.get('album') or 'Unknown album'
+            reason = 'entire track absent' if kind == 'Missing' and not actual[key] else 'occurrence difference'
+            lines.append(f'{kind}: {title} — {artist} ({album}) · Plex ID {key} · expected {wanted[key]}, retained {actual[key]} · {reason}')
+    return lines

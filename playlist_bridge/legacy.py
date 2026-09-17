@@ -3104,7 +3104,13 @@ class PlexAPI:
                         params={'uri':self._library_uri(track_id), 'next':0}, timeout=15)
                     response.raise_for_status()
             except Exception as exc:
-                print('⚠ Plex play queue unavailable; using standard playlist additions:', exc)
+                from .diagnostics import redact
+                response = getattr(exc, 'response', None)
+                detail = f'HTTP {response.status_code}: {response.text[:2000]}' if response is not None else str(exc)
+                for secret in self.headers.values():
+                    if secret and str(secret) in detail and len(str(secret)) > 12:
+                        detail = detail.replace(str(secret), '[REDACTED]')
+                print('⚠ Plex play queue unavailable; using standard playlist additions:', redact(detail))
                 queue_id = None
         jobs.progress('Clearing destination Plex playlist', check=False)
         if not self.clear_playlist(playlist_id):
@@ -3116,7 +3122,12 @@ class PlexAPI:
             if response.status_code in (200, 201):
                 print(f'✓ Submitted {len(ids)} ordered occurrences from the play queue')
                 return True
-            print('⚠ Plex did not accept the play queue; retrying standard additions')
+            from .diagnostics import redact
+            detail = response.text[:2000]
+            token = self.headers.get('X-Plex-Token')
+            if token:
+                detail = detail.replace(str(token), '[REDACTED]')
+            print(f'⚠ Plex did not accept the play queue (HTTP {response.status_code}); retrying standard additions: {redact(detail)}')
             if not self.clear_playlist(playlist_id):
                 return False
         success = True
@@ -6666,13 +6677,15 @@ class Syncer:
                 actual = plex.get_playlist_items(str(plex_playlist_id))
                 persist_sync_health(self.config, playlist_entry, source_tracks, matched_tracks,
                                     unmatched, match_stats, actual)
-                from .verification import compare, describe
+                from .verification import compare, describe, track_details
                 verification = compare(matched_tracks, actual)
                 operation_error = not verification['ok'] if matched_tracks else False
                 if verification['duplicates_collapsed']:
                     print(f"⚠ Plex retained fewer repeated occurrences ({verification['duplicates_collapsed']}); sync completed with this server limitation.")
                 elif operation_error:
                     print('✗ ' + describe(verification))
+                    for detail in track_details(matched_tracks, actual, plex_library):
+                        print('  ' + detail)
             except Exception as exc:
                 operation_error = True
                 self.config.repository.record_health_attempt(mapping_key, "Sync verification failed: " + str(exc))

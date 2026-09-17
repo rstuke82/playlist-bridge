@@ -1,6 +1,6 @@
 # Playlist Bridge
 
-**Release:** Playlist Bridge 2.1 Beta 4
+**Release:** Playlist Bridge 2.1 Beta 5
 
 Playlist Bridge syncs public **Spotify** and **Apple Music** playlists to playlists in your local **Plex music library**.
 
@@ -8,9 +8,9 @@ Version 2.0 adds a self-hosted **React + TypeScript** web interface with a **Fas
 
 > Back up the existing data directory before upgrading; keep its mount and connection settings.
 
-## 2.1 Beta 4: Lidarr
+## 2.1 Beta 5: Lidarr
 
-This beta is published only to the beta branch and the Docker tags `beta` and `2.1.0-beta.4`. Stable `main` remains on 2.0.1.
+This beta is published only to the beta branch and the Docker tags `beta` and `2.1.0-beta.5`. Stable `main` remains on 2.0.1.
 
 In Settings → Lidarr, enter the server URL (including any URL base) and API key. Test Connection loads root folders, quality profiles and metadata profiles from that instance. Choosing a root folder loads its quality, metadata, monitoring and tag defaults; Use Root Folder Defaults restores them after overrides. A metadata profile named None is supported and is distinct from monitoring None. Choose defaults, enable the integration and save. Blank API-key fields retain the existing key only when the server URL stays the same. Keys remain server-side in the persistent SQLite database; do not publish the data directory or backups.
 
@@ -134,7 +134,7 @@ docker compose up -d --no-build
 ```
 
 The default image in this beta is `ghcr.io/rstuke82/playlist-bridge:beta`. This archive does not publish an image.
-To pin this build, set `PLAYLIST_BRIDGE_IMAGE=ghcr.io/rstuke82/playlist-bridge:2.1.0-beta.4`
+To pin this build, set `PLAYLIST_BRIDGE_IMAGE=ghcr.io/rstuke82/playlist-bridge:2.1.0-beta.5`
 in `.env` once that tag is published. The `main` tag follows stable releases; use the version tag to pin this beta.
 Beta images should never be tagged `latest`.
 
@@ -144,7 +144,7 @@ Maintainers can publish both server architectures with the existing buildx build
 docker buildx use playlist-bridge-builder
 docker buildx inspect --bootstrap
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -t ghcr.io/rstuke82/playlist-bridge:2.1.0-beta.4 \
+  -t ghcr.io/rstuke82/playlist-bridge:2.1.0-beta.5 \
   -t ghcr.io/rstuke82/playlist-bridge:beta --push .
 ```
 
@@ -427,3 +427,9 @@ Dashboard shows statistics and Add Playlist, including analysis, queue status, s
 Global search finds playlist names and tracks from saved source snapshots, health previews, missing records, and mappings; it does not search external music services. Open a playlist for its live source list and track filtering.
 
 Missing sorts by name, last checked, occurrences, or playlist count. Occurrences counts repeated track entries; playlist count counts distinct registered playlists. Expand memberships to navigate to each playlist. Ignore can apply to selected playlists or universally to current and future matching occurrences. Ignore changes local matching rules; the next sync updates Plex. Restore ignored rules from Settings → Ignored Tracks.
+
+### Beta 5 search and sync improvements
+
+Album search starts with `Artist - Album` (or `Artist - Track` when the album is unknown). Bypass cache requests fresh MusicBrainz results while preserving rate limiting; Lidarr lookups already go directly to Lidarr. Upstream caches remain outside Bridge’s control. Existing results stay visible while retrying, and album options use saved defaults under Options.
+
+Existing Lidarr albums show their monitoring state and offer Search Album. This action queues a search without re-adding the album or changing monitoring settings. If match edits save but a subsequent Plex sync fails, Activity reports partial completion and retains the individual playlist errors. Plex verification reports missing titles/artists and occurrence counts, with sensitive response details redacted.

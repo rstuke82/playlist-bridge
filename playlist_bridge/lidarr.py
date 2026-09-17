@@ -55,6 +55,12 @@ class Preview(Defaults):
     album_id: uuid.UUID
 
 
+class ExistingSearch(BaseModel):
+    album_id: uuid.UUID
+    source_title: str = Field(default='', max_length=500)
+    source_artist: str = Field(default='', max_length=500)
+
+
 class Confirm(BaseModel):
     preview_id: uuid.UUID
     source_title: str = Field(default='', max_length=500)
@@ -185,7 +191,7 @@ def album_summary(album):
     return {'album_id': album.get('foreignAlbumId'), 'title': album.get('title', ''),
             'artist': artist.get('artistName', ''), 'artist_id': artist.get('foreignArtistId'),
             'year': str(album.get('releaseDate', ''))[:4], 'type': album.get('albumType', ''),
-            'secondary_types': [x.get('name', '') if isinstance(x, dict) else str(x) for x in (album.get('secondaryTypes') or [])], 'exists': bool(album.get('id'))}
+            'secondary_types': [x.get('name', '') if isinstance(x, dict) else str(x) for x in (album.get('secondaryTypes') or [])], 'exists': bool(album.get('id')), 'monitored': bool(album.get('monitored')) if album.get('id') else None, 'lidarr_id': album.get('id')}
 
 
 def mb_quote(value):
@@ -509,6 +515,43 @@ def register(app):
             raise HTTPException(422, 'Enter an album name, or use Find albums for this track with MusicBrainz.')
         rows = Client(cfg).call('GET', 'album/lookup', params={'term': term})
         return {'rows': [album_summary(a) for a in rows[:50] if a.get('foreignAlbumId')], 'cached': False, 'provider': 'Lidarr'}
+
+    @app.post('/api/lidarr/search-existing', status_code=202)
+    def search_existing(request: ExistingSearch):
+        from .api import job_store
+        from .lidarr_requests import server_id, active
+        repo = repository()
+        cfg = enabled(repo)
+        album_key = str(request.album_id)
+        rows = Client(cfg).call('GET', 'album', params={'foreignAlbumId': album_key})
+        album = next((a for a in rows if a.get('foreignAlbumId') == album_key and a.get('id')), None)
+        if not album:
+            raise HTTPException(409, 'This album is no longer in Lidarr. Search again to refresh the results.')
+        server = server_id(cfg)
+        with repo.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute("SELECT value FROM state WHERE namespace='lidarr_requests' AND key=?", (album_key,)).fetchone()
+            record = json.loads(row[0]) if row else {}
+            if record.get('server') != server:
+                record = {}
+            if record.get('status') == 'search_unknown':
+                raise HTTPException(409, 'A previous search submission is unconfirmed. Inspect Lidarr before retrying.')
+            sources = record.get('sources', [])
+            source = {'title': request.source_title, 'artist': request.source_artist}
+            if source['title'] and source not in sources:
+                sources.append(source)
+            if active(db, record.get('job_id')):
+                jid = record['job_id']
+            else:
+                # Completed searches may be explicitly run again; pending ones resume their command.
+                if record.get('status') == 'search_completed':
+                    record.pop('search_command_id', None)
+                jid = job_store().enqueue('lidarr_search', {'album_id': album_key, 'server': server}, db=db)
+                record.update(job_id=jid, status='search_pending', error='')
+            record.update(server=server, lidarr_id=album['id'], title=album.get('title',''),
+                          artist=(album.get('artist') or {}).get('artistName',''), sources=sources, updated_at=time.time())
+            db.execute("INSERT INTO state(namespace,key,value) VALUES('lidarr_requests',?,?) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value", (album_key, json.dumps(record)))
+        return job_store().get(jid)
 
     @app.post('/api/lidarr/preview')
     def preview(request: Preview):

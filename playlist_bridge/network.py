@@ -30,8 +30,15 @@ def request(method, url, **kwargs):
             report('ERROR', service_failure(service, exc, started).detail)
             raise
         elapsed = time.monotonic() - started
-        report('WARNING' if response.status_code >= 400 else 'DEBUG',
-               f'{method} returned HTTP {response.status_code} in {elapsed:.2f}s')
+        message = f'{method} {urlsplit(str(url)).path} returned HTTP {response.status_code} in {elapsed:.2f}s'
+        if response.status_code >= 400:
+            from .diagnostics import redact
+            detail = response.text[:2000]
+            for key, value in (kwargs.get('headers') or {}).items():
+                if any(name in key.lower() for name in ('token', 'key', 'authorization')) and value:
+                    detail = detail.replace(str(value), '[REDACTED]')
+            message += ' — ' + redact(detail, ctx.redaction_config if ctx else None)
+        report('ERROR' if response.status_code >= 400 else 'DEBUG', message)
         return response
 
 

@@ -305,7 +305,7 @@ def health():
     return {
         "status": "ok",
         "version": __version__,
-        "release_name": "Playlist Bridge 2.1 Beta 4",
+        "release_name": "Playlist Bridge 2.1 Beta 5",
         "update": stored_status(config.repository),
         "build": __build__,
         "playlists": len(playlists),
@@ -483,10 +483,12 @@ def add_playlist(request: PlaylistAddRequest):
             verification_error = None
             try:
                 actual = plex.get_playlist_items(str(plex_playlist_id))
-                from .verification import compare, describe
+                from .verification import compare, describe, track_details
                 verification = compare(matched, actual)
                 if not verification['ok']:
                     verification_error = describe(verification)
+                    for detail in track_details(matched, actual, _library or []):
+                        jobs.output(detail)
                 elif verification['duplicates_collapsed']:
                     jobs.output(f"⚠ Plex collapsed {verification['duplicates_collapsed']} repeated occurrences; completed with a server limitation.")
             except Exception as exc:

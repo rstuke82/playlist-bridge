@@ -1,3 +1,13 @@
+# Playlist Bridge 2.1 Beta 5
+
+- Prefill album searches with Artist - Album, falling back to Artist - Track.
+- Add Bypass cache for fresh MusicBrainz lookups; Lidarr searches already go directly to Lidarr. Keep prior results visible during retries.
+- Show monitoring status for existing Lidarr albums and offer Search Album without adding the album or changing monitoring settings.
+- Collapse album options under saved defaults.
+- Add a musical bridge logo to the sidebar and page headers.
+- Report named missing Plex tracks, expected/retained counts and redacted upstream error responses. Duplicate collapse remains acceptable; unmatched source tracks do not fail syncs.
+- Report saved match edits plus failed follow-up syncs as partial success, retaining per-playlist errors for repair.
+
 # Playlist Bridge 2.1 Beta 4
 
 - Observe Lidarr initial refresh and track readiness without starting a duplicate refresh.

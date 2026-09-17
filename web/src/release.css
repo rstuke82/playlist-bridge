@@ -24,3 +24,14 @@ body>.modal-backdrop .modal input:not([type=checkbox]):not([type=radio]),body>.m
 .lidarr-fields .form-grid{align-items:start}.lidarr-fields .form-grid>label,.lidarr-tag-field>label{display:flex;flex-direction:column;gap:8px;justify-content:flex-start}.lidarr-fields .form-grid select,.lidarr-fields .form-grid input{height:38px;min-height:38px;max-height:38px;margin:0;width:100%;padding:7px 10px}.lidarr-tag-entry{display:flex;gap:6px;align-items:center;min-width:0}.lidarr-tag-entry input{min-width:0;flex:1}.lidarr-tag-entry button{height:38px;white-space:nowrap;padding:7px 10px;font-size:12px}.lidarr-tag-field .filter-chips{margin-top:8px}.lidarr-tag-field{min-width:0}
 
 .lidarr-request-status{font-size:12px;max-width:100%;overflow-wrap:anywhere}.lidarr-request-status small{display:block;color:var(--muted)}.lidarr-request-status details{margin:5px 0}.missing-row{flex-wrap:wrap}
+
+/* Beta 5 branding remains legible in both themes and at compact sizes. */
+.bridge-brand{display:inline-flex;align-items:center;gap:.6rem;min-width:0;color:var(--text,#182638)}
+.bridge-logo{width:2rem;height:2rem;flex:none;color:var(--accent,#168c85)}
+.brand .bridge-brand{font-size:1.15rem;line-height:1.15}
+header h1{display:flex;align-items:center;gap:.65rem}
+header h1 .bridge-logo{width:1.75rem;height:1.75rem}
+.lidarr-options{margin-top:1rem}.lidarr-options>summary{cursor:pointer;padding:.75rem 0;font-weight:600}
+.lidarr-candidates[aria-busy=true]{opacity:.65}
+.brand .bridge-brand{display:inline-flex;text-transform:none;letter-spacing:-.4px;margin:0;color:var(--text);font-size:1rem}
+.brand .bridge-brand>span{display:inline;font:inherit;color:inherit;text-transform:none;letter-spacing:inherit;margin:0}

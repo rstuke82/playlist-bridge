@@ -38,6 +38,41 @@ class WorkflowTests(unittest.TestCase):
         self.assertFalse(config.missing[key])
         self.assertFalse(match_queue.available(self.repo))
 
+    def test_saved_edits_survive_failed_sync_as_partial_success(self):
+        key = 'spotify:one'
+        playlist = {'source': 'spotify', 'source_id': 'one', 'plex_playlist_name': 'One'}
+        tracks = [{'title': f'Track {n}', 'artist': 'Artist', 'album': ''} for n in range(5)]
+        changes = [{'playlist_key': key, 'playlist_name': 'One', 'search_key': f"{t['title']}|Artist",
+                    'source': t, 'before': 'unresolved', 'previous_plex_id': None, 'plex_id': str(n), 'provenance': 'manual'} for n, t in enumerate(tracks)]
+        match_queue.stage_changes(self.repo, changes)
+        config = SimpleNamespace(config={'playlists': [playlist]}, mapping={}, missing={key: tracks},
+                                 ignored_tracks={}, match_metadata={}, save=Mock())
+        plex = Mock()
+        plex.search_library.return_value = [{**t, 'plex_id': str(n)} for n, t in enumerate(tracks)]
+        with patch.object(api, '_config', return_value=config), patch.object(api, '_health_plex', return_value=plex), patch.object(api, 'job_store', return_value=self.store), patch('playlist_bridge.legacy.ProcessLock', return_value=contextlib.nullcontext()), patch.object(api, '_capture', return_value=({'errors': 1}, '')) as sync:
+            result = match_queue.execute({'changes': match_queue.available(self.repo)})
+        self.assertEqual(sync.call_count, 1)
+        self.assertEqual(result['matches_saved'], 5)
+        self.assertEqual(result['total'], 1)
+        self.assertEqual(len(config.mapping[key]), 5)
+        self.assertFalse(config.missing[key])
+        self.assertFalse(match_queue.available(self.repo))
+
+        self.assertTrue(result['partial_success'])
+        self.assertFalse(result['playlists'][0]['ok'])
+        self.assertIn('Match edits saved', result['playlists'][0]['error'])
+
+    def test_verification_names_absent_tracks_and_accepts_duplicate_collapse(self):
+        from playlist_bridge.verification import compare, track_details
+        expected = ['1','2','1']
+        actual = [{'plex_id':'1'}]
+        library = [{'plex_id':'1','title':'Repeated','artist':'Artist'}, {'plex_id':'2','title':'Missing Song','artist':'Other','album':'Album'}]
+        self.assertFalse(compare(expected, actual)['ok'])
+        details = track_details(expected, actual, library)
+        self.assertTrue(any('Missing Song — Other' in line and 'entire track absent' in line for line in details))
+        self.assertTrue(any('Repeated' in line and 'occurrence difference' in line for line in details))
+        self.assertTrue(compare(expected, [{'plex_id':'1'},{'plex_id':'2'}])['ok'])
+
     def test_latest_draft_replaces_choice_without_duplicate(self):
         change = {'playlist_key': 'spotify:one', 'search_key': 'Title|Artist', 'plex_id': '1'}
         match_queue.stage_changes(self.repo, [change])

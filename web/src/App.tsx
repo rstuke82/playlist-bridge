@@ -1,3 +1,4 @@
+import Brand from './Brand'
 import {LidarrRequestStatus, refreshLidarrRequests} from './LidarrRequests'
 import MusicBrainzSettings from './MusicBrainz'
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -79,8 +80,8 @@ export default function App(){
   const active=jobs.filter(activeJob)
   const playlistCard=(label:string,filter?:string)=> <Stat key={label} label={label} value={filter?playlists.filter(playlistPredicates[filter]).length:playlists.length} onClick={()=>openPlaylistView(filter?[filter]:[])}/>
   async function favorite(p:Playlist){try{await api.updatePlaylist(p.key,{favorite:!p.favorite});await refresh()}catch(e:any){setMessage(e.message)}}
-  return <div className="shell"><ThemeListener/><aside><div className="brand">Playlist Bridge</div><nav>{['dashboard','playlists','missing','search'].map(p=><button className={page===p?'active':''} key={p} onClick={()=>{location.hash=p}}><Icon name={p}/><span>{p[0].toUpperCase()+p.slice(1)}</span></button>)}</nav><div className="sidebar-bottom"><ActivityNav jobs={jobs} page={page}/><button className={page==='settings'?'active':''} onClick={()=>{location.hash='settings'}}><Icon name="settings"/><span>Settings</span></button><div className="sidebar-version">{health.release_name||'Playlist Bridge 2.0'}{health.update?.available&&<a className="update-badge" href="#settings/about" title={`Update available: ${health.update.latest_version}`}>Update available ↗</a>}</div></div></aside>
-  <main><header><div><h1>{track?'Track details':detail?'Playlist details':page[0]?.toUpperCase()+page.slice(1)}</h1></div></header>
+  return <div className="shell"><ThemeListener/><aside><div className="brand"><Brand wordmark/></div><nav>{['dashboard','playlists','missing','search'].map(p=><button className={page===p?'active':''} key={p} onClick={()=>{location.hash=p}}><Icon name={p}/><span>{p[0].toUpperCase()+p.slice(1)}</span></button>)}</nav><div className="sidebar-bottom"><ActivityNav jobs={jobs} page={page}/><button className={page==='settings'?'active':''} onClick={()=>{location.hash='settings'}}><Icon name="settings"/><span>Settings</span></button><div className="sidebar-version">{health.release_name||'Playlist Bridge 2.0'}{health.update?.available&&<a className="update-badge" href="#settings/about" title={`Update available: ${health.update.latest_version}`}>Update available ↗</a>}</div></div></aside>
+  <main><header><div><h1><Brand/>{track?'Track details':detail?'Playlist details':page[0]?.toUpperCase()+page.slice(1)}</h1></div></header>
     {['missing','playlists','search'].includes(page)&&<MatchQueue jobs={jobs}/>}
     {message&&<div className="notice"><p role="status">{message}</p><button onClick={()=>setMessage('')} aria-label="Dismiss message">×</button></div>}
     {page==='activity'&&<><Activity jobs={jobs} jobId={route.split('/')[1]||''}/><JobHistory jobs={jobs} refresh={refresh}/></>}
