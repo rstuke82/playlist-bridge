@@ -45,6 +45,8 @@ def lookup(request):
             rows.append({'id': track_id, 'title': row.get('trackName', ''), 'artist': row.get('artistName', ''),
                          'album': row.get('collectionName', ''), 'store_url': url,
                          'embed_url': f'https://embed.music.apple.com/{request.country.lower()}/song/{track_id}'})
+        from .api import _record_log
+        _record_log('INFO', 'Apple preview', f'{request.title} — {request.artist}: found {len(rows)} preview candidates')
         return {'rows': rows}
     finally:
         _lock.release()

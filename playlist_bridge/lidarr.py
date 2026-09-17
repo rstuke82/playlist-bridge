@@ -329,6 +329,10 @@ def register(app):
         repo = repository()
         return {**public_settings(config(repo)), 'cache_entries': len(repo.load('musicbrainz_cache'))}
 
+    @app.get('/api/settings/lidarr/tags')
+    def saved_tags():
+        return Client(config(repository())).call('GET', 'tag')
+
     @app.post('/api/settings/lidarr/test')
     def test(request: Settings):
         return Client(merged(request, repository())).options()

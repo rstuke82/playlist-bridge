@@ -38,3 +38,12 @@ class MusicBrainzTests(unittest.TestCase):
                 result=lidarr.musicbrainz_search(repo,{},request)
                 self.assertFalse(result['cached'])
                 get.assert_called_once()
+
+    def test_settings_routes_precede_website_mount(self):
+        from playlist_bridge.api import app, WEB_DIST
+        from starlette.routing import Match
+        self.assertTrue(WEB_DIST.exists(), 'Build frontend before checking production routing')
+        for method,path in [('GET','/api/settings/musicbrainz'),('PUT','/api/settings/musicbrainz'),('POST','/api/settings/musicbrainz/test'),('GET','/api/settings/lidarr/tags')]:
+            scope={'type':'http','method':method,'path':path,'root_path':''}
+            first=next(route for route in app.routes if route.matches(scope)[0] == Match.FULL)
+            self.assertEqual(first.path,path)

@@ -1,3 +1,11 @@
+# Playlist Bridge 2.1 Beta 3 — maintenance update
+
+- Register MusicBrainz settings before the website route so album lookup can initialize.
+- Load saved Lidarr tag names on settings entry and flag missing tags.
+- Replace stale loading text after album options fail to load.
+- Log track identity and results for automatic matches, candidate search and Apple previews; include top candidate scores and penalties in debug output.
+- Add regression coverage for API routing with the built website present.
+
 # Playlist Bridge 2.1 Beta 3
 
 - Add Settings → MusicBrainz with release priority, studio-release preference, cache retention, connection test and cache clearing.

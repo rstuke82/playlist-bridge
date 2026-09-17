@@ -894,7 +894,11 @@ def missing_candidates(request: MissingCandidateRequest):
         ),
         reverse=True,
     )
-    return rows[: request.limit]
+    result = rows[: request.limit]
+    _record_log('INFO', 'Candidate search', f'{request.title} — {request.artist}: returned {len(result)} candidates from {len(library)} library tracks', config)
+    for row in result[:5]:
+        _record_log('DEBUG', 'Candidate search', f"{row['title']} — {row['artist']} ({row['album']}): score={row['score']}, identity={row['identity_score']}, album penalty={row['album_penalty']}, version penalty={row['title_variant_penalty']}, release penalty={row['release_intent_penalty']}", config)
+    return result
 
 
 def save_missing_match(request: MissingMatchRequest):
@@ -1550,6 +1554,8 @@ def retry_automatic(request: MissingCandidateRequest):
     if candidate:
         score = Matcher.score_candidate(source, candidate)
         candidate = {**candidate, 'plex_id': str(candidate_id), 'score': round(score['adjusted_score'],1)}
+    outcome = f"{candidate['title']} — {candidate['artist']} ({candidate.get('album', '')}), score {candidate['score']}" if candidate else 'no acceptable automatic match'
+    _record_log('INFO', 'Automatic matching', f'{request.title} — {request.artist}: {outcome}', config)
     return {'candidate': candidate}
 
 
@@ -1567,6 +1573,9 @@ from .console_logging import register as register_console
 register_console(app)
 from .previews import register as register_previews
 register_previews(app)
+
+from .musicbrainz_settings import register as register_musicbrainz
+register_musicbrainz(app)
 
 WEB_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"
 if WEB_DIST.exists():
@@ -1591,5 +1600,3 @@ def run():
 if __name__ == "__main__":
     run()
 
-from .musicbrainz_settings import register as register_musicbrainz
-register_musicbrainz(app)
