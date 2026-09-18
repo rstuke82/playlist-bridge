@@ -133,10 +133,9 @@ docker compose pull
 docker compose up -d --no-build
 ```
 
-The default image in this beta is `ghcr.io/rstuke82/playlist-bridge:beta`. This archive does not publish an image.
+The default image is `ghcr.io/rstuke82/playlist-bridge:latest`.
 To pin this build, set `PLAYLIST_BRIDGE_IMAGE=ghcr.io/rstuke82/playlist-bridge:2.1.0`
-in `.env` once that tag is published. The `main` tag follows stable releases; use the version tag to pin this beta.
-Beta images should never be tagged `latest`.
+in `.env`. The `main` and `latest` tags follow stable releases.
 
 Maintainers can publish both server architectures with the existing buildx builder:
 
@@ -145,6 +144,8 @@ docker buildx use playlist-bridge-builder
 docker buildx inspect --bootstrap
 docker buildx build --platform linux/amd64,linux/arm64 \
   -t ghcr.io/rstuke82/playlist-bridge:2.1.0 \
+  -t ghcr.io/rstuke82/playlist-bridge:main \
+  -t ghcr.io/rstuke82/playlist-bridge:latest \
   -t ghcr.io/rstuke82/playlist-bridge:beta --push .
 ```
 
