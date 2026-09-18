@@ -1,3 +1,12 @@
+# Playlist Bridge 2.1 Beta 7
+
+- Restore Ignored, Manual and Automatic alongside Needs Attention in playlist-detail filters.
+- Add ascending/descending playlist sorting by name, last synced and missing count.
+- Request the selected Apple preview album through Lidarr while retaining the preview and page context.
+- Add Activity → Downloads with persistent album status, real download progress, import errors, and confirmed cancel/replacement actions; retry searches recheck active downloads.
+- Distinguish imported music from Plex availability, preserve imported files, and reject ambiguous multi-album queue removals.
+- Audit logging: MusicBrainz lookup/cache/retry/result details at INFO, upstream errors at ERROR, pending operations at WARNING, and routine HTTP polling/candidate diagnostics at DEBUG. Correlate request logs and redact secrets.
+
 # Playlist Bridge 2.1 Beta 6
 
 - Return from Track Details to the originating playlist/page, retaining filters and scroll position; preserve origin through refresh and browser Back.

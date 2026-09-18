@@ -172,6 +172,9 @@ def _source_for_url(url: str):
     raise HTTPException(status_code=400, detail="URL must be a Spotify or Apple Music playlist")
 
 
+from contextvars import ContextVar
+_request_log_id = ContextVar("request_log_id", default="")
+
 def _record_log(level, operation, message, config=None):
     import logging
     from .console_logging import enabled
@@ -181,6 +184,8 @@ def _record_log(level, operation, message, config=None):
     try:
         config = config or _config(read_only=True, namespaces=[])
         message = redact(message, config)
+        if _request_log_id.get() and not message.startswith(f'[{_request_log_id.get()}]'):
+            message = f"[{_request_log_id.get()}] {message}"
         if context:
             message = f"[job {context.id}] {message}"
         logging.getLogger('uvicorn.error').log(getattr(logging, level, logging.INFO), '%s: %s', operation, message)
@@ -204,6 +209,7 @@ async def diagnostic_http_error(request, exc):
 async def log_operations(request, call_next):
     started = time.monotonic()
     request_id = uuid.uuid4().hex[:12]
+    log_token = _request_log_id.set(request_id)
     try:
         response = await call_next(request)
     except Exception as exc:
@@ -212,6 +218,7 @@ async def log_operations(request, call_next):
         await run_in_threadpool(_record_log, "ERROR", route,
             f"[{request_id}] {request.method} failed after {time.monotonic()-started:.2f}s: {type(exc).__name__}: {exc}")
         await run_in_threadpool(_record_log, "DEBUG", route, traceback.format_exc())
+        _request_log_id.reset(log_token)
         raise
     route = request.scope.get("route")
     path = getattr(route, "path", "")
@@ -220,6 +227,7 @@ async def log_operations(request, call_next):
         detail = getattr(request.state, 'failure_detail', '')
         await run_in_threadpool(_record_log, level, path,
             f"[{request_id}] {request.method} HTTP {response.status_code} in {time.monotonic()-started:.2f}s" + (f" — {detail}" if detail else ''))
+    _request_log_id.reset(log_token)
     response.headers['X-Request-ID'] = request_id
     if request.url.path.startswith('/assets/') and response.status_code == 200:
         response.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
@@ -305,7 +313,7 @@ def health():
     return {
         "status": "ok",
         "version": __version__,
-        "release_name": "Playlist Bridge 2.1 Beta 6",
+        "release_name": "Playlist Bridge 2.1 Beta 7",
         "update": stored_status(config.repository),
         "build": __build__,
         "playlists": len(playlists),

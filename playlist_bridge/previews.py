@@ -26,6 +26,8 @@ def lookup(request):
             raise HTTPException(429, 'Please wait a few seconds before searching Apple again.')
         _last = time.monotonic()
         started = time.monotonic()
+        from .api import _record_log
+        _record_log("INFO", "Apple preview", f"Searching Apple catalog: {request.title} — {request.artist}")
         try:
             response = requests.get('https://itunes.apple.com/search', params={
                 'term': request.title + ' ' + request.artist, 'entity': 'song',
@@ -34,7 +36,9 @@ def lookup(request):
             data = response.json()
         except (requests.RequestException, ValueError) as exc:
             from .diagnostics import service_failure
-            raise service_failure('Apple catalog', exc, started) from None
+            failure=service_failure('Apple catalog', exc, started)
+            _record_log('ERROR','Apple preview',failure.detail)
+            raise failure from None
         rows = []
         for row in data.get('results', []):
             track_id = row.get('trackId')

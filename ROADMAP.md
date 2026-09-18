@@ -1,3 +1,14 @@
+# Beta 7 implemented
+
+- MusicBrainz lookup logging: persist INFO events for lookup start (artist, track/album, recording versus release-group), cache hit/miss/bypass, each attempt and retry delay, HTTP status/duration, candidate count, and applied release priorities. Log failures at ERROR with the upstream reason and request correlation; keep raw payloads/tracebacks at DEBUG with secrets redacted. Distinguish direct MusicBrainz lookups from normal Lidarr searches in Settings logs.
+- Playlist Details filters: keep Needs Attention and restore Ignored, Manual, and Automatic. Clear filters shows all tracks. Do not restore separate Missing, LOST, or Legacy choices.
+- Playlists page sorting: provide ascending and descending directions for each sort field, including the new Missing track count sort (ascending = fewest missing first; descending = most missing first).
+- Add an album-specific Lidarr action beside the selected song preview, such as Add Dare to Lidarr. Open the shared Lidarr dialog and automatically search using the selected preview's artist and album (for example, The Human League - Dare), rather than the original source track's album. Keep album review before adding; do not change the source metadata or saved match.
+- Preserve the selected preview, page filters, and scroll position when opening and closing the Lidarr dialog. Reuse the existing Lidarr request/status display rather than adding a duplicate status feature.
+- Extend existing Lidarr request status with album-level download feedback: Searching, Waiting for download, Downloading (percentage and remaining size when available), Importing, Imported into Lidarr, and Blocked/Failed with the actual reported reason. Keep Imported separate from verified Available in Plex. Refresh visible active requests with shared, non-overlapping polling and slow down when idle; do not invent progress when Lidarr provides none.
+- Add album-level download controls through Lidarr: Cancel download removes the selected download from the client without requesting an immediate replacement; Find another download removes and blocklists the failed release and searches for a replacement; Retry search starts a new search when no download is active. Confirm cancellation/replacement with the affected album and download clearly identified. Recheck current queue state before acting, prevent duplicate submissions, retain useful operation/error logs, and refresh status after the action. Cancellation does not unmonitor the album or guarantee it can never be grabbed later.
+- Treat import failures separately from download failures: show Lidarr's reported cause and an Open in Lidarr action rather than automatically downloading again. Preserve already imported music and the album's registration when cancelling a queued download.
+
 # Beta 6 implemented
 
 - Apply saved release priority and studio preference consistently to both Lidarr and MusicBrainz results before limiting results.

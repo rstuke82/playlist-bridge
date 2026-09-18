@@ -53,7 +53,7 @@ export default function LidarrSettings(){
  <div className="settings-save"><button className="primary" type="button" onClick={save}>Save Changes</button></div></fieldset>
  {message&&<p role="status">{message}</p>}{error&&<p role="alert" className="error">{error}</p>}</section>
 }
-export function AddLidarrAlbum({track,onClose}:{track:Pick<MissingTrack,'title'|'artist'|'album'>;onClose:()=>void}){
+export function AddLidarrAlbum({track,onClose,sourceTrack=track}:{track:Pick<MissingTrack,'title'|'artist'|'album'>;sourceTrack?:Pick<MissingTrack,'title'|'artist'|'album'>;onClose:()=>void}){
  const unknownAlbum=!track.album||['n/a','unknown'].includes(track.album.trim().toLowerCase())
  const [appleRows,setAppleRows]=useState<any[]|null>(null),[lookupAlbum,setLookupAlbum]=useState('')
  const initialQuery=track.album&&!['n/a','unknown'].includes(track.album.toLowerCase())?`${track.artist} - ${track.album}`:`${track.artist} - ${track.title}`
@@ -76,10 +76,10 @@ export function AddLidarrAlbum({track,onClose}:{track:Pick<MissingTrack,'title'|
   if(g!==generation.current)return;setRows(result.rows);setMessage(`${result.rows.length} album candidates · ${result.provider}${result.cached?' · cached':''}. Choose the album you want.`)
  }catch(e:any){if(g===generation.current){setError(e.message);setMessage(rows.length?'Previous results are still shown.':'');setMbFailed(provider==='musicbrainz')}}finally{searching.current=false;if(g===generation.current)setBusy(false)}}
  async function findAppleAlbums(){if(busy||saving)return;const g=++generation.current;setBusy(true);setError('');setMessage('Finding possible albums in Apple Music…');try{const result=await api.applePreview(track);if(g!==generation.current)return;const unique=Array.from(new Map(result.rows.filter((r:any)=>r.album).map((r:any)=>[`${r.artist}|${r.album}`,r])).values());setAppleRows(unique);setMessage(unique.length?'Choose an Apple Music suggestion to search Lidarr. Check the track and artist before choosing.':'No Apple Music album suggestions found. Try Advanced Lookup.')}catch(e:any){if(g===generation.current)setError(e.message)}finally{if(g===generation.current)setBusy(false)}}
- async function searchExisting(a:Album){if(submitting.current)return;submitting.current=true;setSaving(true);setError('');try{await call('/api/lidarr/search-existing','POST',{album_id:a.album_id,source_title:track.title,source_artist:track.artist});window.dispatchEvent(new CustomEvent('bridge-notice',{detail:`Search queued in Lidarr: ${a.title}. Progress is available in Activity.`}));window.dispatchEvent(new Event('lidarr-requested'));onClose()}catch(e:any){setError(e.message)}finally{submitting.current=false;setSaving(false)}}
+ async function searchExisting(a:Album){if(submitting.current)return;submitting.current=true;setSaving(true);setError('');try{await call('/api/lidarr/search-existing','POST',{album_id:a.album_id,source_title:sourceTrack.title,source_artist:sourceTrack.artist});window.dispatchEvent(new CustomEvent('bridge-notice',{detail:`Search queued in Lidarr: ${a.title}. Progress is available in Activity.`}));window.dispatchEvent(new Event('lidarr-requested'));onClose()}catch(e:any){setError(e.message)}finally{submitting.current=false;setSaving(false)}}
  async function add(){if(!selected||submitting.current)return;submitting.current=true;setSaving(true);setError('');setMessage('Checking the selected album and queuing your request…');try{
   const preview=await call<Preview>('/api/lidarr/preview','POST',{...value,album_id:selected.album_id})
-  await call('/api/lidarr/add','POST',{preview_id:preview.preview_id,source_title:track.title,source_artist:track.artist})
+  await call('/api/lidarr/add','POST',{preview_id:preview.preview_id,source_title:sourceTrack.title,source_artist:sourceTrack.artist})
   window.dispatchEvent(new CustomEvent('bridge-notice',{detail:`Requested in Lidarr: ${selected.title}. Progress is available in Activity.`}))
   window.dispatchEvent(new Event('lidarr-requested'));onClose()
  }catch(e:any){setError(e.message);setMessage('Request could not be completed. Check the error before retrying.')}finally{submitting.current=false;setSaving(false)}}

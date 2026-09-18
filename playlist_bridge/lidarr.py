@@ -49,6 +49,9 @@ class Lookup(BaseModel):
     query: str = Field(default='', max_length=500)
     provider: Literal['lidarr', 'musicbrainz'] = 'lidarr'
     force_refresh: bool = False
+    attempt: int = Field(default=1, ge=1, le=4)
+    attempts: int = Field(default=1, ge=1, le=4)
+    retry_delay: int = Field(default=0, ge=0, le=120)
 
 
 class Preview(Defaults):
@@ -106,6 +109,8 @@ class Client:
         self.key = cfg['api_key']
 
     def call(self, method, path, **kwargs):
+        quiet = kwargs.pop('quiet', False)
+        level = 'DEBUG' if quiet else 'INFO'
         started = time.monotonic()
         from .api import _record_log
         from .diagnostics import redact
@@ -113,7 +118,7 @@ class Client:
         identity = (kwargs.get('params') or {}).get('term') or (kwargs.get('params') or {}).get('foreignAlbumId')
         if identity:
             target += f' [{identity}]'
-        _record_log('INFO', 'Lidarr', f'Starting {target}')
+        _record_log(level, 'Lidarr', f'Starting {target}')
         try:
             response = requests.request(method, self.url + '/api/v1/' + path,
                 headers={'X-Api-Key': self.key, 'Accept': 'application/json'},
@@ -127,7 +132,7 @@ class Client:
                 raise HTTPException(502, f'Lidarr returned HTTP {response.status_code}: {redact(detail)}')
             result = response.json() if response.content else None
             from .api import _record_log
-            _record_log('INFO', 'Lidarr', f'Completed {target}: HTTP {response.status_code} in {time.monotonic()-started:.2f}s')
+            _record_log(level, 'Lidarr', f'Completed {target}: HTTP {response.status_code} in {time.monotonic()-started:.2f}s')
             return result
         except HTTPException as exc:
             _record_log('ERROR', 'Lidarr', f'{target} failed after {time.monotonic()-started:.2f}s: {exc.detail}')
@@ -202,6 +207,8 @@ def musicbrainz_search(repo, cfg, request, test=False):
     global _mb_last
     from .musicbrainz_settings import settings, ordered
     preferences = settings(repo)
+    from .api import _record_log
+    _record_log('INFO','MusicBrainz',f'Lookup {request.artist} — {request.title}; album={request.album or "unknown"}; attempt {request.attempt}/{request.attempts}; retry delay elapsed={request.retry_delay}s')
     if not preferences['enabled'] and not test:
         raise HTTPException(409, 'MusicBrainz lookup is disabled in Settings → MusicBrainz.')
     if not request.artist.strip() or (not request.title.strip() and not request.album.strip()):
@@ -219,8 +226,9 @@ def musicbrainz_search(repo, cfg, request, test=False):
         saved = state_get(repo, 'musicbrainz_cache', key)
         if not request.force_refresh and saved and time.time() - saved['at'] < preferences['cache_days'] * 86400:
             from .api import _record_log
-            _record_log('DEBUG', 'MusicBrainz', 'Using cached metadata result')
+            _record_log('INFO', 'MusicBrainz', f'Cache hit for {entity}: {query}; {len(saved["rows"])} candidates; priority={preferences["release_priority"]}; prefer studio={preferences["prefer_studio"]}')
             return {'rows': ordered(saved['rows'], preferences)[:50], 'cached': True, 'provider': 'MusicBrainz'}
+        _record_log('INFO','MusicBrainz',f'{entity} lookup: {query}; cache={"bypass" if request.force_refresh else "miss"}')
         time.sleep(max(0, 1.1 - (time.monotonic() - _mb_last)))
         started = time.monotonic()
         try:
@@ -233,7 +241,14 @@ def musicbrainz_search(repo, cfg, request, test=False):
             data = response.json()
         except (requests.RequestException, ValueError) as exc:
             from .diagnostics import service_failure
-            raise service_failure('MusicBrainz', exc, started) from None
+            from .diagnostics import redact
+            failure=service_failure('MusicBrainz', exc, started)
+            response=getattr(exc,'response',None)
+            detail=redact(response.text[:2000]) if response is not None else redact(str(exc))
+            _record_log('ERROR','MusicBrainz',f'{failure.detail} — {detail}')
+            if request.attempt < request.attempts:
+                _record_log('INFO','MusicBrainz',f'Client may retry after {15*request.attempt}s if lookup remains open and error is retryable')
+            raise failure from None
         rows = {}
         records = data.get('release-groups', []) if known else data.get('recordings', [])
         for record in records:
@@ -247,6 +262,7 @@ def musicbrainz_search(repo, cfg, request, test=False):
                     'type': group.get('primary-type', ''), 'secondary_types': group.get('secondary-types', []),
                     'exists': None}
         result = list(rows.values())
+        _record_log('INFO','MusicBrainz',f'HTTP {response.status_code} in {time.monotonic()-started:.2f}s; {len(records)} records, {len(result)} album candidates; priority={preferences["release_priority"]}; prefer studio={preferences["prefer_studio"]}')
         state_put(repo, 'musicbrainz_cache', key, {'at': time.time(), 'rows': result})
         with repo.connect() as db:
             db.execute("DELETE FROM state WHERE namespace='musicbrainz_cache' AND key NOT IN (SELECT key FROM state WHERE namespace='musicbrainz_cache' ORDER BY json_extract(value,'$.at') DESC LIMIT 500)")
@@ -437,7 +453,7 @@ def finish_search(repo, client, payload, album_id, added=False):
         status = 'search_unknown' if unknown else 'search_pending' if pending else 'search_failed'
         summary = base + ('; search submission unconfirmed' if unknown else '; search pending' if pending else '; search failed')
         save(repo,payload['album_id'],status=status,error=detail)
-        _record_log('ERROR','Lidarr search',summary+': '+detail)
+        _record_log('WARNING' if pending else 'ERROR','Lidarr search',summary+': '+detail)
         result.update(partial_success=True,summary=summary,error=detail,search_command_id=command_id)
     return result
 
@@ -464,6 +480,9 @@ def retry_search(payload):
     album = client.call('GET',f"album/{record['lidarr_id']}")
     if album.get('foreignAlbumId') != payload['album_id']:
         raise ValueError('Lidarr album identity changed; search was not submitted.')
+    from .lidarr_downloads import queue
+    if any(q.get('albumId')==record['lidarr_id'] for q in queue(client)):
+        raise ValueError('This album already has a queued download. Review it in Activity → Downloads.')
     return finish_search(repo,client,{'album_id':payload['album_id'],'title':record['title'],'defaults':{'search_now':True}},record['lidarr_id'])
 
 

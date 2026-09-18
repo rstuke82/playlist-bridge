@@ -10,11 +10,12 @@ class AccessFilter(logging.Filter):
         args = record.args
         if isinstance(args, tuple) and len(args) >= 5:
             method, status = args[1], args[4]
-            if method == 'GET' and int(status) < 400:
-                if not enabled:
-                    return False
-                record.levelno = logging.DEBUG
-                record.levelname = 'DEBUG'
+            status = int(status)
+            level = logging.ERROR if status >= 500 else logging.WARNING if status >= 400 else logging.DEBUG
+            if level == logging.DEBUG and not enabled:
+                return False
+            record.levelno = level
+            record.levelname = logging.getLevelName(level)
         return True
 
 

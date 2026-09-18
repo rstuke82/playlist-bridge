@@ -8,7 +8,7 @@ export async function mbLookup<T>(body:unknown,retries:number,onStatus:(message:
  for(let attempt=0;;attempt++){
   if(!active())throw new Error('Lookup cancelled')
   onStatus(`Searching MusicBrainz · attempt ${attempt+1} of ${retries+1}…`)
-  try{return await mbCall<T>('/api/lidarr/search','POST',body)}catch(e:any){
+  try{return await mbCall<T>('/api/lidarr/search','POST',{...(body as object),attempt:attempt+1,attempts:retries+1,retry_delay:attempt?15*attempt:0})}catch(e:any){
    if(!e.retryable||attempt>=retries)throw e
    for(let seconds=15*(attempt+1);seconds>0;seconds--){if(!active())throw new Error('Lookup cancelled');onStatus(`MusicBrainz is busy or unavailable. Retrying in ${seconds}s · attempt ${attempt+2} of ${retries+1}`);await new Promise(resolve=>setTimeout(resolve,1000))}
   }

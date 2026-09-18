@@ -58,3 +58,5 @@ backups/
 
 !tests/test_musicbrainz.py
 !tests/test_musicbrainz_retry.cjs
+
+!tests/test_lidarr_downloads.py

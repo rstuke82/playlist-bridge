@@ -1,6 +1,6 @@
 # Playlist Bridge
 
-**Release:** Playlist Bridge 2.1 Beta 6
+**Release:** Playlist Bridge 2.1 Beta 7
 
 Playlist Bridge syncs public **Spotify** and **Apple Music** playlists to playlists in your local **Plex music library**.
 
@@ -8,9 +8,9 @@ Version 2.0 adds a self-hosted **React + TypeScript** web interface with a **Fas
 
 > Back up the existing data directory before upgrading; keep its mount and connection settings.
 
-## 2.1 Beta 6: Lidarr
+## 2.1 Beta 7: Lidarr
 
-This beta is published only to the beta branch and the Docker tags `beta` and `2.1.0-beta.6`. Stable `main` remains on 2.0.1.
+This beta is published only to the beta branch and the Docker tags `beta` and `2.1.0-beta.7`. Stable `main` remains on 2.0.1.
 
 In Settings → Lidarr, enter the server URL (including any URL base) and API key. Test Connection loads root folders, quality profiles and metadata profiles from that instance. Choosing a root folder loads its quality, metadata, monitoring and tag defaults; Use Root Folder Defaults restores them after overrides. A metadata profile named None is supported and is distinct from monitoring None. Choose defaults, enable the integration and save. Blank API-key fields retain the existing key only when the server URL stays the same. Keys remain server-side in the persistent SQLite database; do not publish the data directory or backups.
 
@@ -134,7 +134,7 @@ docker compose up -d --no-build
 ```
 
 The default image in this beta is `ghcr.io/rstuke82/playlist-bridge:beta`. This archive does not publish an image.
-To pin this build, set `PLAYLIST_BRIDGE_IMAGE=ghcr.io/rstuke82/playlist-bridge:2.1.0-beta.6`
+To pin this build, set `PLAYLIST_BRIDGE_IMAGE=ghcr.io/rstuke82/playlist-bridge:2.1.0-beta.7`
 in `.env` once that tag is published. The `main` tag follows stable releases; use the version tag to pin this beta.
 Beta images should never be tagged `latest`.
 
@@ -144,7 +144,7 @@ Maintainers can publish both server architectures with the existing buildx build
 docker buildx use playlist-bridge-builder
 docker buildx inspect --bootstrap
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -t ghcr.io/rstuke82/playlist-bridge:2.1.0-beta.6 \
+  -t ghcr.io/rstuke82/playlist-bridge:2.1.0-beta.7 \
   -t ghcr.io/rstuke82/playlist-bridge:beta --push .
 ```
 
@@ -439,3 +439,11 @@ Existing Lidarr albums show their monitoring state and offer Search Album. This 
 Track Details returns to the playlist or page it was opened from, with its filters and scroll position retained. Song previews expand inline, and closing them stops playback. Track Details also offers Ignore and Add Album to Lidarr; a sole playlist membership is selected automatically, while multiple playlists require an explicit selection for matching.
 
 Playlist detail offers Needs Attention as its single status filter; clearing it shows all tracks. Release priority and studio preference apply to both Lidarr and MusicBrainz album results. MusicBrainz is labeled Advanced Lookup. When source album metadata is missing, Find Album with Apple Music offers suggestions you can review and use for a Lidarr search without overwriting source metadata.
+
+### Beta 7 downloads and logging
+
+Activity → Downloads shows requested albums and Lidarr's download/import status. Progress percentages appear only when Lidarr reports a size. Imported into Lidarr does not confirm Plex has scanned the album. Status refreshes while relevant pages are visible; completed requests remain in SQLite.
+
+Cancel Download removes the selected download and its temporary files from the download client, without deleting imported library music or the album registration. Find Another Download also blocklists the release and asks Lidarr for a replacement. Both require confirmation; shared multi-album downloads must be managed in Lidarr. Cancel does not unmonitor an album. Import failures show the upstream reason and a link to Lidarr.
+
+MusicBrainz lookup starts, cache decisions, retry attempts and results are retained at INFO. Failures are ERROR; pending operations are WARNING. Successful HTTP access/polling and detailed candidate diagnostics require the console debugging option. Logs redact credentials. Preview album actions use the selected recording's artist and album, preserving source metadata and saved matches.

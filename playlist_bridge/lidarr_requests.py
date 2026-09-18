@@ -28,11 +28,16 @@ def active(db, job_id):
 
 def register(app):
     from .lidarr import repository, enabled
+    from .lidarr_downloads import register as register_downloads
+    register_downloads(app)
     @app.get('/api/lidarr/requests')
     def list_requests():
         repo = repository()
         from .lidarr import config
-        server = server_id(config(repo))
+        cfg=config(repo)
+        from .lidarr_downloads import snapshot
+        snapshot(repo,cfg)
+        server = server_id(cfg)
         rows = []
         with repo.connect() as db:
             for key,value in repo.load('lidarr_requests').items():
