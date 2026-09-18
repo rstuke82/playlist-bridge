@@ -1,3 +1,18 @@
+# Beta 8 implemented
+
+- Add Downloads status filters (In Progress, Needs Attention, Completed, Cancelled), artist/album text filtering, Clear filters, counts, and remembered preferences using the shared controls.
+
+- Standardize success, warning, and error notices throughout the app. In particular, queuing a match on Track Details must show a success notice rather than red error styling.
+- Align Track Details filters with Playlist Details: Needs Attention, Ignored, Manual, and Automatic, with Clear filters showing all. Remove separate Saved, Missing, and LOST choices from this menu without removing their underlying data or status information.
+- Standardize selection controls and scope across list pages: Select visible, Clear selection, and a selected count. Never silently apply an action to hidden selections; clear them on filter changes consistently with Missing bulk Ignore, or explicitly identify any intentionally retained hidden selections before confirmation. Distinguish any all-results action from selecting only visible results.
+- Simplify sorting throughout Playlists, Missing, Playlist Details, and Track Details: list each sort field once and provide one Reverse sort toggle with a visible active state. Replace separate ascending/descending menu entries. Preserve the chosen field and direction when revisiting a page and migrate existing saved sort preferences. This supersedes Beta 7's separate direction entries.
+- In Ignored Tracks, display friendly playlist names instead of internal identifiers and label single/bulk actions Stop Ignoring instead of Restore; reserve Restore for backups.
+- In Downloads, use the shared refresh icon/control layout. Show active and blocked requests first and place completed requests under collapsible history, retaining their details.
+- Replace generic Track Details loading messages with the actual operation, such as Searching Plex, Preparing match, or Queuing changes. Keep progress and disabled-action explanations consistent with the operation being performed.
+- Missing page bulk Ignore: add track selection checkboxes, Select visible, Clear selection, a selected count, and an Ignore selected action. Respect the current filtered view and discard hidden selections when filters change. Use one confirmation showing the selected tracks and an explicit playlist-specific versus universal ignore scope, following existing ignore behavior. Queue the batch safely during other activity, report partial failures, and refresh the list while preserving filters and scroll position.
+- Shorten user-facing errors throughout the app: show the service, concise decoded error message, and useful next action instead of raw JSON or stack traces. Put technical details behind an expandable disclosure. Retain the actual service error and request correlation at ERROR level; keep stack traces and raw diagnostic payloads at DEBUG with credentials redacted. For partial success, clearly state what succeeded and what failed before suggesting a retry.
+- Clarify Activity navigation with clearly labeled Jobs and Downloads tabs and a distinct page heading for the selected view. Use Jobs for Playlist Bridge operations (sync, matching, health checks, and other tasks), and Album Downloads for Lidarr download/import progress and controls. Visually highlight the active tab so the two views are easy to distinguish on desktop and mobile.
+
 # Beta 7 implemented
 
 - MusicBrainz lookup logging: persist INFO events for lookup start (artist, track/album, recording versus release-group), cache hit/miss/bypass, each attempt and retry delay, HTTP status/duration, candidate count, and applied release priorities. Log failures at ERROR with the upstream reason and request correlation; keep raw payloads/tracebacks at DEBUG with secrets redacted. Distinguish direct MusicBrainz lookups from normal Lidarr searches in Settings logs.
@@ -39,3 +54,9 @@ Beta 4 prioritizes persistent Requested in Lidarr indicators and accurate partia
 - MusicBrainz cache is server-wide and shared across users. MusicBrainz and Lidarr settings are admin-only, hidden from ordinary users and excluded from their API responses.
 - Each user owns their playlists. Scheduling is server-wide and admin-controlled: Sync Auto Sync Playlists processes enabled playlists across all users, using each owner's Plex account. No personal schedules.
 - Present album acquisition as Request Album, with helper text explaining it requests addition to the Plex library. Keep Lidarr implementation/configuration behind the scenes; admin controls request permissions.
+
+# 3.0 Last.fm discovery
+
+- Import music from Last.fm to identify gaps in the user's Plex music library. Decide which Last.fm collections/history and import ranges to support during feature design.
+- Match imported tracks against the configured Plex library and existing saved matches before presenting missing music. Reuse track identity, version handling, and manual-match rules; distinguish confirmed Plex matches, uncertain candidates requiring review, and missing tracks. Do not treat incomplete Last.fm album metadata as proof that music is missing.
+- Deduplicate imported entries for missing-music review while retaining their Last.fm origin. Allow users to review or fix matches and request missing albums through the existing acquisition workflow; importing alone must not automatically request downloads.

@@ -1,3 +1,4 @@
+import ErrorNotice from './ErrorNotice'
 import { useEffect, useRef, useState } from 'react'
 import { api, Candidate, MissingTrack, Playlist } from './api'
 import Modal from './Modal'
@@ -65,7 +66,7 @@ export default function MatchPicker({track,playlistKey,onClose,onSave}:{
         {playlistKey&&<p className="muted">The current playlist's match will also be replaced. Apply the match queue to sync each affected playlist once.</p>}
         {automaticDone&&<section className="automatic-candidate"><h3>Auto match retry</h3>{automatic?<><p><strong>{automatic.title}</strong> — {automatic.artist} · {automatic.album}</p><p>The current automatic matcher selected this candidate. Accepting this suggestion records Auto provenance.</p><button disabled={saving} onClick={()=>{setChoice(automatic);setProvenance('automatic')}}>Use Match</button></>:<p>No strong automatic candidate was found.</p>}<button disabled={loading||saving} onClick={()=>search('')}>Show More Candidates</button><button disabled={saving} onClick={()=>dialog.current?.querySelector<HTMLInputElement>('input[aria-label="Search Plex"]')?.focus()}>Manual Search</button></section>}
         <form className="add" onSubmit={e=>{e.preventDefault();search(query)}}><input aria-label="Search Plex" placeholder="Search Plex title, artist or album" value={query} disabled={saving} onChange={e=>setQuery(e.target.value)}/><button disabled={saving||loading}>Search</button></form>
-        {error&&<p role="alert" className="error">{error}</p>}
+        {error&&<ErrorNotice error={error}/>}
         {loading?<p role="status"><span className="spinner"/> Retrying automatic matching / finding candidates…</p>:<>
           {!candidates.length&&!automatic&&<p>No candidates found. Try another search.</p>}
           {candidates.map(c=><button type="button" className={`candidate ${choice?.plex_id===c.plex_id?'chosen':''}`} aria-pressed={choice?.plex_id===c.plex_id} disabled={saving} key={c.plex_id} onClick={()=>{setChoice(c);setProvenance('manual')}}><span><strong>{c.title}</strong><small>{c.artist} · {c.album||'N/A'}</small></span><b>{c.score}%</b></button>)}

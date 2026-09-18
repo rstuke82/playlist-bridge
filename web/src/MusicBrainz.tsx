@@ -1,3 +1,4 @@
+import ErrorNotice from './ErrorNotice'
 import {useEffect,useState} from 'react'
 export type MBSettings={enabled:boolean;cache_days:number;release_priority:string[];prefer_studio:boolean;retries:number;cache_entries:number}
 export async function mbCall<T>(path:string,method='GET',body?:unknown):Promise<T>{
@@ -28,5 +29,5 @@ export default function MusicBrainzSettings(){
  <p className="muted">Retries wait 15, 30, then 45 seconds. Retry Once always makes one attempt, without automatic retries. {value.cache_entries} cached lookups.</p>
  <div className="actions"><button onClick={()=>action(async()=>{setMessage('Testing MusicBrainz · one request…');const r=await mbCall<{message:string}>('/api/settings/musicbrainz/test','POST');setMessage(r.message)})}>Test Connection</button><button onClick={()=>action(async()=>{const r=await mbCall<MBSettings>('/api/settings/musicbrainz/cache','DELETE');setValue(v=>v?{...v,cache_entries:r.cache_entries}:v);setMessage('Metadata cache cleared.')})}>Clear Cache</button></div>
  <div className="settings-save"><button className="primary" onClick={()=>action(async()=>{setValue(await mbCall<MBSettings>('/api/settings/musicbrainz','PUT',value));setMessage('MusicBrainz settings saved.')})}>Save Changes</button></div>
- </fieldset>}{message&&<p role="status">{message}</p>}{error&&<p role="alert" className="error">{error}</p>}</section>
+ </fieldset>}{message&&<p role="status">{message}</p>}{error&&<ErrorNotice error={error}/>}</section>
 }

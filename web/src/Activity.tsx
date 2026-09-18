@@ -1,3 +1,4 @@
+import ErrorNotice from './ErrorNotice'
 import {LidarrRequestStatus} from './LidarrRequests'
 import { useEffect, useRef, useState } from 'react'
 import { api, Job, activeJob } from './api'
@@ -5,7 +6,7 @@ import { Icon } from './Controls'
 import { displayText } from './labels'
 import { stamp } from './HealthCard'
 
-export const actionName=(value:string)=>({match_batch:'Apply Match Queue',lidarr_add:'Add Album to Lidarr',lidarr_search:'Retry Lidarr Search',sync:'Sync',health:'Health Check',analyze:'Analyze playlist',add:'Add playlist',fix_match:'Fix Match',track_match:'Update track matches',remove:'Remove playlists',backup:'Backup',check_updates:'Check for Updates',restore_backup:'Restore Backup',ignore:'Ignore track',startup:'Startup',jobs:'Jobs'}[value]||value)
+export const actionName=(value:string)=>({ignore_batch:'Ignore tracks',match_batch:'Apply Match Queue',lidarr_add:'Add Album to Lidarr',lidarr_search:'Retry Lidarr Search',sync:'Sync',health:'Health Check',analyze:'Analyze playlist',add:'Add playlist',fix_match:'Fix Match',track_match:'Update track matches',remove:'Remove playlists',backup:'Backup',check_updates:'Check for Updates',restore_backup:'Restore Backup',ignore:'Ignore track',startup:'Startup',jobs:'Jobs'}[value]||value)
 export function showActivity(id:string){location.hash=`activity/${encodeURIComponent(id)}`}
 const duration=(seconds:number)=>seconds<60?`${seconds}s`:`${Math.floor(seconds/60)}m ${seconds%60}s`
 const elapsed=(value?:string,end=Date.now())=>value?duration(Math.max(0,Math.floor((end-Date.parse(value))/1000))):'0s'
@@ -49,7 +50,7 @@ function ResultSummary({job}:{job:Job}){
  const records=batch?results.filter((r:any)=>r.ok!==false).map((r:any)=>r.result?.health||r.result?.summary||r.result||r.summary):[job.result?.health||job.result]
  const sum=(keys:string[])=>{let known=false;const n=records.reduce((n:number,r:any)=>{const key=keys.find(k=>typeof r?.[k]==='number');if(!key)return n;known=true;return n+r[key]},0);return known?n:null}
  const counts=[['Matched',sum(['matched_in_library','matched'])],['Missing',sum(['unresolved'])],['LOST',sum(['lost','newly_lost'])]]
- return <div className="result-summary">{job.result?.partial_success&&<p role="status">{job.result.summary}</p>}{['lidarr_add','lidarr_search'].includes(job.action)&&<LidarrRequestStatus albumKey={job.payload.album_id}/>}{batch&&<p>{successful} playlists completed · {failed} failed{notStarted!==null?` · ${notStarted} not started`:''}{!running&&results.length<Number(total)&&started>results.length?' · remaining started work was stopped':''}</p>}<div className="result-counts">{counts.filter(([,v])=>v!==null).map(([label,value])=><span key={label}>{value} <small>{label}</small></span>)}</div>{job.error&&<p className="error" role="alert">{displayText(job.error)}</p>}{!running&&job.status==='cancelled'&&<p>Stopped at a safe checkpoint. Completed changes were kept; review the output for any unfinished playlist.</p>}{job.result?.key&&<a href={`#playlist/${encodeURIComponent(job.result.key)}`}>Open {job.result.name||'playlist'}</a>}</div>
+ return <div className="result-summary">{(job.result?.partial_success||job.action==='ignore_batch')&&job.result?.summary&&<p className={job.result.partial_success?'warning-notice':'success-notice'} role="status">{job.result.summary}</p>}{['lidarr_add','lidarr_search'].includes(job.action)&&<LidarrRequestStatus albumKey={job.payload.album_id}/>}{batch&&<p>{successful} playlists completed · {failed} failed{notStarted!==null?` · ${notStarted} not started`:''}{!running&&results.length<Number(total)&&started>results.length?' · remaining started work was stopped':''}</p>}<div className="result-counts">{counts.filter(([,v])=>v!==null).map(([label,value])=><span key={label}>{value} <small>{label}</small></span>)}</div>{job.error&&<ErrorNotice error={displayText(job.error)}/>}{!running&&job.status==='cancelled'&&<p>Stopped at a safe checkpoint. Completed changes were kept; review the output for any unfinished playlist.</p>}{job.result?.key&&<a href={`#playlist/${encodeURIComponent(job.result.key)}`}>Open {job.result.name||'playlist'}</a>}</div>
 }
 
 export default function Activity({jobs,jobId=''}:{jobs:Job[];jobId?:string}){
@@ -94,9 +95,9 @@ export default function Activity({jobs,jobId=''}:{jobs:Job[];jobId?:string}){
  <small className="muted">Started {stamp(job.started_at)}{job.finished_at&&` · Finished ${stamp(job.finished_at)}`}</small>
  {active&&current.map(l=><div className="activity-stage" key={l.key}><strong>{l.name}{l.playlist_index&&l.playlist_total?` · playlist ${l.playlist_index} of ${l.playlist_total}`:''}</strong><p role="status">{l.mode==='waiting'?`Waiting for ${l.service} · ${elapsed(l.since,clock)}`:displayText(l.stage)}</p>{l.mode==='waiting'&&<small className="muted">{displayText(l.stage)} · request pending</small>}{l.total>0&&l.completed!=null&&<progress max={l.total} value={l.completed}/>}</div>)}
  {job.status==='queued'&&<p>Queued — waiting for the current job to finish.</p>}{job.status==='cancelling'&&<p>Stopping at the next safe checkpoint. If a Plex update has begun, that playlist update finishes first. Completed changes are kept.</p>}
- <ResultSummary job={job}/>{error&&<p className="error" role="alert">{error}</p>}
+ <ResultSummary job={job}/>{error&&<ErrorNotice error={error}/>}
  <Terminal events={events} download={`/api/jobs/${id}/log`} copy={()=>api.jobLog(id)} empty={active?'Waiting for the worker’s first output…':'No detailed events in this older job. Saved results are available below.'}/>
 
- {job.result?.backup&&<p>Backup saved: <a href={`/api/backups/${encodeURIComponent(job.result.backup)}/download`}>Download backup</a></p>}{job.result?.restored&&<p>Restored {job.result.restored}. Safety backup: {job.result.safety_backup}. Plex was left untouched.</p>}{job.result?.playlists&&<details><summary>Playlist results</summary>{job.result.playlists.map((r:any)=><p key={r.key}><a href={`#playlist/${encodeURIComponent(r.key)}`}>{r.name||r.key}</a> · {r.ok===false?displayText(r.error):'Completed'}</p>)}</details>}
+ {job.result?.tracks&&<details><summary>Track results</summary>{job.result.tracks.map((r:any,i:number)=><div key={i}><p>{r.title} — {r.artist} · {r.ok?'Ignored':'Failed'}</p>{r.error&&<ErrorNotice error={r.error}/>}</div>)}</details>}{job.result?.backup&&<p>Backup saved: <a href={`/api/backups/${encodeURIComponent(job.result.backup)}/download`}>Download backup</a></p>}{job.result?.restored&&<p>Restored {job.result.restored}. Safety backup: {job.result.safety_backup}. Plex was left untouched.</p>}{job.result?.playlists&&<details><summary>Playlist results</summary>{job.result.playlists.map((r:any)=><p key={r.key}><a href={`#playlist/${encodeURIComponent(r.key)}`}>{r.name||r.key}</a> · {r.ok===false?displayText(r.error):'Completed'}</p>)}</details>}
  </div>}</section>
 }

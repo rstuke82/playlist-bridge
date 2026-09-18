@@ -184,6 +184,12 @@ def _record_log(level, operation, message, config=None):
     try:
         config = config or _config(read_only=True, namespaces=[])
         message = redact(message, config)
+        if level in ('ERROR','WARNING'):
+            from .diagnostics import concise_error
+            short=concise_error(message)
+            if short != message:
+                _record_log('DEBUG',operation,message,config)
+                message=short
         if _request_log_id.get() and not message.startswith(f'[{_request_log_id.get()}]'):
             message = f"[{_request_log_id.get()}] {message}"
         if context:
@@ -313,7 +319,7 @@ def health():
     return {
         "status": "ok",
         "version": __version__,
-        "release_name": "Playlist Bridge 2.1 Beta 7",
+        "release_name": "Playlist Bridge 2.1 Beta 8",
         "update": stored_status(config.repository),
         "build": __build__,
         "playlists": len(playlists),
@@ -1046,7 +1052,7 @@ def test_notification():
 
 @app.get("/api/settings/logs")
 def get_logs(limit: int = Query(default=100, ge=1, le=500),
-             level: Optional[Literal["INFO", "ERROR"]] = None, action: Optional[str] = None):
+             level: Optional[Literal["DEBUG", "INFO", "WARNING", "ERROR"]] = None, action: Optional[str] = None):
     config = _config(read_only=True, namespaces=[])
     rows = config.repository.logs(limit, level, action)
     for row in rows:
@@ -1060,7 +1066,7 @@ class RemoveRequest(BaseModel):
 
 
 class JobRequest(BaseModel):
-    action: Literal['sync','health','analyze','add','fix_match','track_match','remove','backup','check_updates']
+    action: Literal['sync','health','analyze','add','fix_match','track_match','remove','backup','check_updates','ignore_batch']
     payload: dict = Field(default_factory=dict)
 
 
@@ -1077,6 +1083,11 @@ def job_store():
 
 
 def validated_payload(action, payload):
+    if action == 'ignore_batch':
+        batch=BulkIgnoreRequest(**payload)
+        if any(not t.universal and not t.playlist_keys for t in batch.tracks):
+            raise ValueError('Select playlists or universal ignore for every track')
+        return batch.model_dump()
     if action in ('backup','check_updates'):return {}
     if action == 'remove':
         return RemoveRequest(**payload).model_dump()
@@ -1272,6 +1283,20 @@ def _health_batch(playlists, config):
 
 
 def execute_job(action, payload):
+    if action=='ignore_batch':
+        request=BulkIgnoreRequest(**payload)
+        results=[]
+        for index,track in enumerate(request.tracks):
+            jobs.progress(f'Ignoring track {index+1} of {len(request.tracks)}: {track.title}',completed=index,total=len(request.tracks))
+            try:
+                result=ignore_missing(track)
+                results.append({'title':track.title,'artist':track.artist,'ok':True,**result})
+            except Exception as exc:
+                message=redact(getattr(exc,'detail',str(exc)))
+                _record_log('ERROR','Bulk ignore',f'{track.title} — {track.artist}: {message}')
+                results.append({'title':track.title,'artist':track.artist,'ok':False,'error':message})
+        failed=sum(not row['ok'] for row in results)
+        return {'tracks':results,'partial_success':bool(failed),'summary':f'{len(results)-failed} tracks ignored; {failed} failed. Plex changes apply on the next sync.'}
     if action=='ignore':
         return ignore_missing(IgnoreRequest(**payload))
     if action=='match_batch':
@@ -1400,6 +1425,10 @@ class IgnoreRequest(BaseModel):
     playlist_keys: List[str] = Field(default_factory=list)
 
 
+class BulkIgnoreRequest(BaseModel):
+    tracks: List[IgnoreRequest] = Field(min_length=1,max_length=500)
+
+
 @app.post('/api/missing/ignore', status_code=202)
 def queue_ignore(request: IgnoreRequest):
     if not request.universal and not request.playlist_keys:
@@ -1414,6 +1443,10 @@ def ignore_missing(request: IgnoreRequest):
     with ProcessLock():
         config=_config()
         syncer=Syncer(config)
+        if not request.universal:
+            existing={_playlist_key(p) for p in config.config.get('playlists',[])}
+            if set(request.playlist_keys)-existing:
+                raise HTTPException(409,'One or more selected playlists were removed. Refresh the Missing page before retrying.')
         track=request.model_dump(include={'title','artist','album'})
         affected=0
         if request.universal:
@@ -1451,7 +1484,7 @@ def ignore_missing(request: IgnoreRequest):
 @app.get('/api/ignored')
 def list_ignored():
     config=_config(read_only=True, namespaces=[])
-    return [{'playlist_key':key,'ignore_key':identity,**track} for key,bucket in config.ignored_tracks.items() for identity,track in bucket.items()]
+    return [{'playlist_key':key,'ignore_key':identity,**track,'playlist_name':next((p.get('plex_playlist_name') or p.get('name') or 'Unnamed playlist' for p in config.config.get('playlists',[]) if _playlist_key(p)==key),'Removed playlist')} for key,bucket in config.ignored_tracks.items() for identity,track in bucket.items()]
 
 
 class RestoreIgnoreRequest(BaseModel):

@@ -1,3 +1,11 @@
+# Playlist Bridge 2.1 Beta 8
+
+- Add Missing-page bulk Ignore with one scope confirmation, queued per-track results, and protection against hidden selections.
+- Replace duplicate sort directions with one Reverse sort toggle; preserve saved preferences and align Track Details filtering with Playlist Details.
+- Separate Jobs and Album Downloads with clear headings and active tabs. Add remembered download status/text filters, standard refresh controls, and collapsible completed/cancelled history.
+- Use concise decoded service errors and expandable technical details; keep stack traces/raw diagnostic bodies at DEBUG and actual failure messages at ERROR.
+- Correct success-message styling and operation-specific progress text. Show friendly playlist names and Stop Ignoring actions in settings.
+
 # Playlist Bridge 2.1 Beta 7
 
 - Restore Ignored, Manual and Automatic alongside Needs Attention in playlist-detail filters.

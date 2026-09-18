@@ -128,8 +128,11 @@ class Client:
             if 300 <= response.status_code < 400:
                 raise HTTPException(502, 'Lidarr redirected the request. Use its final server URL, including its URL base.')
             if not response.ok:
-                detail = response.text[:4000].replace(self.key, '[REDACTED]')
-                raise HTTPException(502, f'Lidarr returned HTTP {response.status_code}: {redact(detail)}')
+                detail = redact(response.text[:12000].replace(self.key, '[REDACTED]'))
+                from .diagnostics import concise_error
+                _record_log('DEBUG','Lidarr',f'{target}: {detail}')
+                short=concise_error(detail)
+                raise HTTPException(502, f'Lidarr returned HTTP {response.status_code}: {short}')
             result = response.json() if response.content else None
             from .api import _record_log
             _record_log(level, 'Lidarr', f'Completed {target}: HTTP {response.status_code} in {time.monotonic()-started:.2f}s')

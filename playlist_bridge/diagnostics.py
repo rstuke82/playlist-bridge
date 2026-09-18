@@ -83,3 +83,19 @@ def service_failure(service, exc, started):
         reason = 'The request could not be completed.'
     return HTTPException(504 if isinstance(exc, requests.exceptions.Timeout) else 502,
         f'{service}: {reason} ({type(exc).__name__}, {time.monotonic()-started:.2f}s)')
+
+
+def concise_error(message):
+    """Keep service messages at ERROR; reserve diagnostic bodies/stacks for DEBUG."""
+    import json
+    text=redact(message)
+    start=text.find('{')
+    if start >= 0:
+        try:
+            value=json.loads(text[start:])
+            if isinstance(value,dict):
+                text=text[:start]+str(value.get('message') or value.get('error') or value.get('detail') or 'Service returned an error.')
+        except (ValueError,TypeError):
+            pass
+    text=re.split(r'\n\s*(?:at |Traceback|File ")|--- End of stack trace',text)[0].strip()
+    return text[:1200]
