@@ -1,3 +1,12 @@
+# Beta 9 planned
+
+- Add a Requests sidebar section listing albums requested through Playlist Bridge and their current status, including completed requests. Keep Activity > Downloads focused on active downloads and items awaiting import; avoid duplicating completed request history there.
+- Fix Missing row spacing: align selection checkbox, track/artist/album, status and actions in consistent columns, keep supporting details under the track, reduce excessive gaps, and stack cleanly on mobile.
+- Add Missing sort fields Artist and Album using the shared Reverse sort option and remembered preferences.
+- Show album artwork in Lidarr lookup results when supplied by the service, with a clean fallback when unavailable.
+- Add Lidarr album search to the Search page so albums can be reviewed and requested without starting from a missing track. Reuse the existing defaults, request status and add flow.
+- Design universal playlist selection for the 2.2 multi-user work: admin-managed source playlists available across users with server-controlled sync. Decide automatic assignment versus opt-in before implementing user distribution; do not imply current single-user playlists are already distributed to other Plex accounts.
+
 # Beta 8 implemented
 
 - Add Downloads status filters (In Progress, Needs Attention, Completed, Cancelled), artist/album text filtering, Clear filters, counts, and remembered preferences using the shared controls.
