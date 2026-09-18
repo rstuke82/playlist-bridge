@@ -1,4 +1,6 @@
-# Beta 9 planned
+# 2.1 final
+
+- editable MusicBrainz Recording, Artist and Album fields prefilled from source metadata; blank fields are omitted, including album-only searches.
 
 - Add a Requests sidebar section listing albums requested through Playlist Bridge and their current status, including completed requests. Keep Activity > Downloads focused on active downloads and items awaiting import; avoid duplicating completed request history there.
 - Fix Missing row spacing: align selection checkbox, track/artist/album, status and actions in consistent columns, keep supporting details under the track, reduce excessive gaps, and stack cleanly on mobile.

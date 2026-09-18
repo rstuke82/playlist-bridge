@@ -1,3 +1,11 @@
+# 2.1 final
+
+- Requests navigation and download/import-only Activity view.
+- Missing row alignment and Artist/Album sorting.
+- Lidarr album artwork and standalone album search from Search.
+- Editable MusicBrainz Recording, Artist and Album fields, including album-only searches.
+- Includes all 2.1 beta improvements; universal playlist distribution remains planned for 2.2.
+
 # Playlist Bridge 2.1 Beta 8
 
 - Add Missing-page bulk Ignore with one scope confirmation, queued per-track results, and protection against hidden selections.

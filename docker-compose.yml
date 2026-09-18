@@ -1,6 +1,6 @@
 services:
   playlist-bridge:
-    image: ${PLAYLIST_BRIDGE_IMAGE:-ghcr.io/rstuke82/playlist-bridge:beta}
+    image: ${PLAYLIST_BRIDGE_IMAGE:-ghcr.io/rstuke82/playlist-bridge:latest}
     build:
       context: .
     restart: unless-stopped
@@ -10,7 +10,7 @@ services:
       PLAYLIST_BRIDGE_PORT: ${PLAYLIST_BRIDGE_PORT:-8173}
       PLAYLIST_BRIDGE_DATA_DIR: /data
       TZ: ${TZ:-}
-      PLAYLIST_BRIDGE_UPDATE_CHANNEL: ${PLAYLIST_BRIDGE_UPDATE_CHANNEL:-beta}
+      PLAYLIST_BRIDGE_UPDATE_CHANNEL: ${PLAYLIST_BRIDGE_UPDATE_CHANNEL:-main}
     volumes:
       - ./data:/data
     stop_grace_period: 30s

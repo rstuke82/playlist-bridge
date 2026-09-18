@@ -39,6 +39,20 @@ class MusicBrainzTests(unittest.TestCase):
                 self.assertFalse(result['cached'])
                 get.assert_called_once()
 
+    def test_explicit_search_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo=Repository(Path(directory)/'bridge.sqlite')
+            for values, entity, query in [
+                ({'album':'Armageddon'}, 'release-group', 'releasegroup:"Armageddon"'),
+                ({'title':'Song','artist':'Artist','album':'Album'}, 'recording', 'recording:"Song" AND release:"Album" AND artist:"Artist"'),
+                ({'artist':'Artist'}, 'release-group', 'artist:"Artist"'),
+            ]:
+                with patch.object(lidarr.requests,'get') as get:
+                    get.return_value.json.return_value={}
+                    lidarr.musicbrainz_search(repo,{},lidarr.Lookup(**values, fields_search=True))
+                    self.assertTrue(get.call_args.args[0].endswith('/'+entity))
+                    self.assertEqual(get.call_args.kwargs['params']['query'],query)
+
     def test_settings_routes_precede_website_mount(self):
         from playlist_bridge.api import app, WEB_DIST
         from starlette.routing import Match

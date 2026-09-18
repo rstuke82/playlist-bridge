@@ -48,6 +48,7 @@ class Lookup(BaseModel):
     album: str = Field(default='', max_length=500)
     query: str = Field(default='', max_length=500)
     provider: Literal['lidarr', 'musicbrainz'] = 'lidarr'
+    fields_search: bool = False
     force_refresh: bool = False
     attempt: int = Field(default=1, ge=1, le=4)
     attempts: int = Field(default=1, ge=1, le=4)
@@ -198,6 +199,7 @@ def album_summary(album):
     artist = album.get('artist') or {}
     return {'album_id': album.get('foreignAlbumId'), 'title': album.get('title', ''),
             'artist': artist.get('artistName', ''), 'artist_id': artist.get('foreignArtistId'),
+            'artwork': next((i.get('remoteUrl') or i.get('url') for i in (album.get('images') or []) if i.get('coverType') == 'cover' and str(i.get('remoteUrl') or i.get('url') or '').startswith('https://')), ''),
             'year': str(album.get('releaseDate', ''))[:4], 'type': album.get('albumType', ''),
             'secondary_types': [x.get('name', '') if isinstance(x, dict) else str(x) for x in (album.get('secondaryTypes') or [])], 'exists': bool(album.get('id')), 'monitored': bool(album.get('monitored')) if album.get('id') else None, 'lidarr_id': album.get('id')}
 
@@ -214,13 +216,29 @@ def musicbrainz_search(repo, cfg, request, test=False):
     _record_log('INFO','MusicBrainz',f'Lookup {request.artist} — {request.title}; album={request.album or "unknown"}; attempt {request.attempt}/{request.attempts}; retry delay elapsed={request.retry_delay}s')
     if not preferences['enabled'] and not test:
         raise HTTPException(409, 'MusicBrainz lookup is disabled in Settings → MusicBrainz.')
-    if not request.artist.strip() or (not request.title.strip() and not request.album.strip()):
-        raise HTTPException(422, 'Enter a track title and artist for MusicBrainz lookup.')
     album = request.album.strip()
-    known = album and album.casefold() not in ('n/a', 'unknown')
-    entity = 'release-group' if known else 'recording'
-    term = f'releasegroup:{mb_quote(album)}' if known else f'recording:{mb_quote(request.title)}'
-    query = term + f' AND artist:{mb_quote(request.artist)}'
+    known = bool(album and album.casefold() not in ('n/a', 'unknown'))
+    if request.fields_search:
+        recording = request.title.strip()
+        artist = request.artist.strip()
+        if not (recording or artist or known):
+            raise HTTPException(422, 'Enter a recording, artist, or album for MusicBrainz lookup.')
+        entity = 'recording' if recording else 'release-group'
+        terms = []
+        if recording:
+            terms.append(f'recording:{mb_quote(recording)}')
+        if known:
+            terms.append(f'{"release" if recording else "releasegroup"}:{mb_quote(album)}')
+        if artist:
+            terms.append(f'artist:{mb_quote(artist)}')
+        query = ' AND '.join(terms)
+        known = entity == 'release-group'
+    else:
+        if not request.artist.strip() or (not request.title.strip() and not known):
+            raise HTTPException(422, 'Enter a track title and artist for MusicBrainz lookup.')
+        entity = 'release-group' if known else 'recording'
+        term = f'releasegroup:{mb_quote(album)}' if known else f'recording:{mb_quote(request.title)}'
+        query = term + f' AND artist:{mb_quote(request.artist)}'
     key = hashlib.sha256((entity + query).encode()).hexdigest()
     # A bounded shared lock also prevents duplicate identical requests.
     if not _mb_lock.acquire(timeout=2):
