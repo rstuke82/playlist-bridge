@@ -1,3 +1,14 @@
+# Beta 6 implemented
+
+- Apply saved release priority and studio preference consistently to both Lidarr and MusicBrainz results before limiting results.
+- Label MusicBrainz as Advanced Lookup and offer reviewed Apple Music album suggestions when source album metadata is unavailable; never overwrite source metadata or automatically accept cross-service matches.
+
+- Fix Track Details return navigation for every track entry point, not just previews: replace the hard-coded Back to Search link with the actual originating page (including the specific playlist). Restore that page's filters and scroll position. Preserve origin through preview/matching actions and refresh where possible, support browser Back, and use Search only as a fallback for direct links with no recorded origin.
+- Make Track Details actions consistent with Missing and Playlist Details: add Ignore with explicit selected-playlist/universal scope, Add Album to Lidarr using the shared dialog, and persistent request status. Album lookup/preview should not require playlist selection. Explain why matching actions are disabled (loading versus no selected playlists), place selection guidance beside the actions, and preselect the sole playlist when only one membership exists; keep multi-playlist scope explicit to prevent unintended global edits.
+- Simplify playlist-detail filtering to All and Needs Attention only, consistent with the other playlist views. Needs Attention includes actionable missing/LOST and applicable error or mismatch states; ignored tracks are not attention items merely because they are ignored.
+- Fix song-preview navigation: opening a preview must keep the user in their originating playlist/detail/match context instead of stranding them on Search. Preserve originating route, filters, scroll position and selected track; provide a reliable return action wherever navigation is necessary, including browser Back behavior.
+- Improve song preview placement: put a Preview action near the source track heading in match review instead of below the candidate list. Open catalog choices and the player in an inline expandable panel directly below that heading, with a compact mobile sheet if space requires it. Keep preview controls accessible without scrolling through candidates, preserve candidate selection and scroll position, and stop/unmount playback when closed or changing tracks. Avoid stacking another modal over the match dialog. No matching changes.
+
 # Beta 5 implemented
 
 - Prefill Lidarr album search with Artist - Album when album metadata is available; fall back to Artist - Track when it is unavailable.

@@ -514,7 +514,12 @@ def register(app):
         if not term or term.casefold() == 'n/a':
             raise HTTPException(422, 'Enter an album name, or use Find albums for this track with MusicBrainz.')
         rows = Client(cfg).call('GET', 'album/lookup', params={'term': term})
-        return {'rows': [album_summary(a) for a in rows[:50] if a.get('foreignAlbumId')], 'cached': False, 'provider': 'Lidarr'}
+        from .musicbrainz_settings import settings, ordered
+        preferences = settings(repo)
+        ranked = ordered([album_summary(a) for a in rows if a.get('foreignAlbumId')], preferences)
+        from .api import _record_log
+        _record_log('INFO', 'Album search', f"Lidarr returned {len(ranked)} albums; applied release priority {', '.join(preferences['release_priority'])}; prefer studio={preferences['prefer_studio']}")
+        return {'rows': ranked[:50], 'cached': False, 'provider': 'Lidarr'}
 
     @app.post('/api/lidarr/search-existing', status_code=202)
     def search_existing(request: ExistingSearch):

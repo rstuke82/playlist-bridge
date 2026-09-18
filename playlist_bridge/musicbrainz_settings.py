@@ -22,9 +22,9 @@ def settings(repo):
 def ordered(rows, preferences):
     priority = preferences['release_priority']
     def rank(row):
-        secondary = {s.lower() for s in row.get('secondary_types',[])}
+        secondary = {str(s).strip().casefold() for s in (row.get('secondary_types') or [])}
         special = bool(secondary & {'live','compilation','remix'})
-        kind = row.get('type')
+        kind = next((p for p in priority if p.casefold() == str(row.get('type','')).strip().casefold()), 'Other')
         return (int(preferences['prefer_studio'] and special), priority.index(kind if kind in priority else 'Other'))
     return sorted(rows, key=rank)
 

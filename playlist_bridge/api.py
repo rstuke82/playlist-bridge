@@ -305,7 +305,7 @@ def health():
     return {
         "status": "ok",
         "version": __version__,
-        "release_name": "Playlist Bridge 2.1 Beta 5",
+        "release_name": "Playlist Bridge 2.1 Beta 6",
         "update": stored_status(config.repository),
         "build": __build__,
         "playlists": len(playlists),

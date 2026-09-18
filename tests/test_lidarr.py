@@ -88,6 +88,17 @@ class LidarrTests(unittest.TestCase):
         self.assertEqual(writes, [('POST','command')])
         self.assertFalse(self.client.album['monitored'])
 
+    def test_lidarr_lookup_applies_saved_release_priority_before_limit(self):
+        app = FastAPI()
+        lidarr.register(app)
+        endpoint = next(r.endpoint for r in app.routes if r.path == '/api/lidarr/search')
+        rows = [{**self.client.album, 'title':f'Live {n}', 'albumType':'Album', 'secondaryTypes':['Live']} for n in range(50)]
+        rows.append({**self.client.album, 'title':'Studio', 'albumType':'album', 'secondaryTypes':[]})
+        with patch.object(self.client, 'call', return_value=rows):
+            result = endpoint(lidarr.Lookup(query='Artist - Album'))
+        self.assertEqual(result['rows'][0]['title'], 'Studio')
+        self.assertEqual(len(result['rows']), 50)
+
     def test_existing_search_rejects_absent_album(self):
         app = FastAPI()
         lidarr.register(app)

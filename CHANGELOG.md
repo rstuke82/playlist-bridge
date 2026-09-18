@@ -1,3 +1,12 @@
+# Playlist Bridge 2.1 Beta 6
+
+- Return from Track Details to the originating playlist/page, retaining filters and scroll position; preserve origin through refresh and browser Back.
+- Keep song previews inline near the track, with playback above a bounded recording list; closing the preview stops playback.
+- Add shared Ignore and Add Album to Lidarr actions to Track Details, with request status, single-playlist preselection and clear selection guidance.
+- Simplify playlist-detail filters to Needs Attention (or all tracks when cleared); retain per-playlist search/filter/sort state during navigation.
+- Apply release-type priority and studio preference to Lidarr results as well as MusicBrainz results, before the result limit.
+- Label MusicBrainz as Advanced Lookup; offer Apple Music album suggestions for tracks with unknown source albums, without changing source metadata or saved matches.
+
 # Playlist Bridge 2.1 Beta 5
 
 - Prefill album searches with Artist - Album, falling back to Artist - Track.
