@@ -4,17 +4,17 @@
 
 Playlist Bridge syncs public **Spotify** and **Apple Music** playlists to playlists in your local **Plex music library**.
 
-Version 2.0 adds a self-hosted **React + TypeScript** web interface with a **FastAPI** backend while retaining the existing matching engine, CLI, with SQLite runtime storage.
+Playlist Bridge provides a self-hosted **React + TypeScript** web interface with a **FastAPI** backend while retaining the existing matching engine, CLI, with SQLite runtime storage.
 
 > Back up the existing data directory before upgrading; keep its mount and connection settings.
 
 ## 2.1: Lidarr
 
-Stable release 2.1 is published to main and beta with Docker tags `latest`, `beta`, and `2.1.0`.
+Stable release 2.1 is published to main and beta with Docker tags `main`, `latest`, `beta`, and `2.1.0`.
 
 In Settings → Lidarr, enter the server URL (including any URL base) and API key. Test Connection loads root folders, quality profiles and metadata profiles from that instance. Choosing a root folder loads its quality, metadata, monitoring and tag defaults; Use Root Folder Defaults restores them after overrides. A metadata profile named None is supported and is distinct from monitoring None. Choose defaults, enable the integration and save. Blank API-key fields retain the existing key only when the server URL stays the same. Keys remain server-side in the persistent SQLite database; do not publish the data directory or backups.
 
-On Missing or playlist details, choose **Add Album to Lidarr**. Opening the dialog searches Lidarr using the source album, or track and artist when the album is unknown. Select a result, adjust options inline and click **Add to Lidarr**. Validation runs before the request is queued, then the dialog closes with confirmation on the same page. **Find Albums for This Track** provides MusicBrainz results as an alternative. Missing source albums are resolved through recording search; metadata results are candidates for review, not automatic identifications. MusicBrainz uses its public API without credentials, a descriptive User-Agent, throttling, and a SQLite cache (7 or 30 days, at most 500 lookups). Its availability and Lidarr's metadata catalog can differ.
+On Missing or playlist details, choose **Add Album to Lidarr**. Opening the dialog searches Lidarr using the source album, or track and artist when the album is unknown. Select a result, adjust options inline and click **Add to Lidarr**. Validation runs before the request is queued, then the dialog closes with confirmation on the same page. **Advanced Lookup · MusicBrainz** provides editable Recording, Artist and Album fields, prefilled where possible. Clear a field to omit it; clear Recording and Artist for an album-only search. Missing source albums are resolved through recording search; metadata results are candidates for review, not automatic identifications. MusicBrainz uses its public API without credentials, a descriptive User-Agent, throttling, and a SQLite cache (7 or 30 days, at most 500 lookups). Its availability and Lidarr's metadata catalog can differ.
 
 Defaults monitor only the selected album, do not monitor future discoveries, and do not search immediately. Broader monitoring choices apply only when adding a new artist. Existing artists retain their profiles, paths and other album flags. Paused artists must be enabled in Lidarr before requesting monitored/searching additions. Existing album entries are reused; an already monitored album is never silently unmonitored. Confirmation queues a persistent Activity job; changing settings invalidates an unexecuted preview. A timed-out external write is not automatically retried: inspect Lidarr before retrying.
 
@@ -22,9 +22,9 @@ Adding an album does not remove Bridge's missing entry or alter Plex. Once Lidar
 
 When searching a newly added album, Bridge waits for Lidarr’s own refresh and track data rather than starting another refresh. Request status is retained in SQLite and shared across playlists: **Requested in Lidarr**, **Album added; search pending**, or **Album added; search failed**. **Retry Search** only checks readiness and submits or resumes the album search; it does not add or refresh the album again. A pending command is observed, not resubmitted. A search submission that times out without a command ID requires inspection in Lidarr.
 
-Playlist filters now consolidate drift, health errors, missing and LOST under **Needs Attention**. Playlist details also support Ignore in the current playlist or universally. See [the roadmap](ROADMAP.md) for deferred Beta 5 improvements.
+Playlist filters now consolidate drift, health errors, missing and LOST under **Needs Attention**. Playlist details also support Ignore in the current playlist or universally. See [the roadmap](ROADMAP.md) for future plans.
 
-This beta also includes:
+Additional features:
 
 - Missing toolbar alignment and shorter match-search loading text.
 - Optional artist tags on album addition, including an opt-in merge into existing artists without replacing their other tags.
@@ -32,11 +32,11 @@ This beta also includes:
 - Ignore requests wait behind active jobs instead of contending with an active sync's write lock. They are saved when executed; Plex removal still happens on the next sync.
 - Add Playlist clears and unlocks its URL field as soon as the job is queued.
 - Settings → General → Console logging: debug off by default, with detailed terminal matching output and successful GET access lines only when enabled. Errors and job summaries remain visible; detailed Activity logs are always retained. CLI output is unchanged.
-- Optional Apple song discovery and preview in match review and Track Details. Select a catalog recording to load Apple's official embedded player and store link. No audio is downloaded or cached by Bridge; preview availability depends on region and Apple's catalog. Spotify preview URLs are deprecated, so this beta uses Apple for preview discovery even for Spotify-source tracks.
+- Optional Apple song discovery and preview in match review and Track Details. Select a catalog recording to load Apple's official embedded player and store link. No audio is downloaded or cached by Bridge; preview availability depends on region and Apple's catalog. Spotify preview URLs are deprecated, so Playlist Bridge uses Apple for preview discovery even for Spotify-source tracks.
 
 API references: [Lidarr](https://lidarr.audio/docs/api/), [MusicBrainz rate limits](https://musicbrainz.org/doc/MusicBrainz_API/Rate_Limiting).
 
-## 2.0.1 changes
+## Library review and safeguards
 
 - Activity, Settings and version stay at the bottom of the desktop sidebar across intermediate widths.
 - Unrequested live recordings require review instead of automatic acceptance. Existing saved selections are preserved.
@@ -45,17 +45,17 @@ API references: [Lidarr](https://lidarr.audio/docs/api/), [MusicBrainz rate limi
 
 ## Features
 
-Playlist Bridge 2.0 is the final release of the web application, with SQLite persistence, Docker deployment and the existing CLI and matching engine.
+Playlist Bridge 2.1 provides SQLite persistence, Docker deployment and the existing CLI and matching engine.
 
-- Dashboard cards open their corresponding pages. Playlist cards apply the exact matching filter, clear previous search/filter state and remember the resulting view. Health Drift and Health Errors use the same predicates as their dashboard counts.
+- Dashboard cards open their corresponding pages. Playlist cards apply the exact matching filter, clear previous search/filter state and remember the resulting view. Needs Attention uses the same criteria as its dashboard count.
 - Quick Actions has a pencil editor for up to five actions, including sync scopes, Health Check, Back Up Now and Check for Updates. Selection and display order are remembered in the browser.
 - Add Playlist is one action: paste a public Spotify or Apple Music URL, choose Favorite and Auto Sync, and add it. Invalid or already registered URLs are rejected inline before queuing. Fetching, matching and Plex creation run as a background job with Activity details. The analysis API remains compatible for existing clients.
 - All dialogs render above the application panels, centered in the visible viewport even after scrolling. Dialog content scrolls internally, controls remain reachable on mobile, keyboard focus stays within the dialog and returns to the trigger when closed. This includes Ignore, Fix Match, removal, backup restore, log clearing and Quick Actions.
 - Match labels are consistently Auto, Manual, Saved, Missing, LOST and Ignored. Saved means an older match whose origin is unknown; it is not relabeled as Auto or Manual. Existing mappings and internal field names are preserved. Sorting uses Last synced.
-- Activity has permanent desktop and mobile navigation, full job history and retained logs. Playlist filters, bulk Auto Sync, consistent Settings pages, daily backups, restore and midnight-aligned recurring tasks from Beta 8 are included.
-- Stable releases use main; this beta uses beta for both the Compose image and update channel.
+- Activity has permanent desktop and mobile navigation, full job history and retained logs. Playlist filters, bulk Auto Sync, consistent Settings pages, daily backups, restore and midnight-aligned recurring tasks are included.
+- Stable installations default to the latest image and main update channel.
 
-Storage remains SQLite schema 4. New activity snapshots use the existing generic state table; Beta 5 databases require no schema migration. Jobs and output survive restarts. The API keeps idle polling slow; live activity uses one completion-scheduled request at a time while expanded, then stops after final output. Lists and settings load on demand. Two bounded detail workers, request timeouts, read-only health concurrency, matching thresholds, Docker port 8173 and CLI support are preserved.
+Storage remains SQLite schema 4. New activity snapshots use the existing generic state table; existing schema 4 databases require no schema migration. Jobs and output survive restarts. The API keeps idle polling slow; live activity uses one completion-scheduled request at a time while expanded, then stops after final output. Lists and settings load on demand. Two bounded detail workers, request timeouts, read-only health concurrency, matching thresholds, Docker port 8173 and CLI support are preserved.
 
 - React + TypeScript web interface
 - FastAPI backend
@@ -69,7 +69,6 @@ Storage remains SQLite schema 4. New activity snapshots use the existing generic
 - Existing Playlist Bridge CLI remains available
 - Automatic legacy JSON import with preserved backups
 - Atomic state writes and process locking
-- Webhook notification foundation for later 2.0 betas
 
 ## Persistent storage and migration
 
@@ -117,7 +116,7 @@ Inside this Compose service it stays `/data`; change the left side of `./data:/d
 
 ### Updating a locally built image
 
-Replace the source files with the new build (or pull the beta branch), then:
+Replace the source files with the new build (or pull the main branch), then:
 
 ```bash
 docker compose up -d --build
@@ -209,17 +208,17 @@ Node.js should be version 22.12 or newer.
 
 ### 2. Clone Playlist Bridge
 
-For the beta branch:
+For the stable branch:
 
 ```bash
-git clone -b beta https://github.com/rstuke82/playlist-bridge.git
+git clone -b main https://github.com/rstuke82/playlist-bridge.git
 cd playlist-bridge
 ```
 
 For an existing checkout:
 
 ```bash
-git switch beta
+git switch main
 git pull
 ```
 
@@ -296,12 +295,12 @@ http://localhost:5173
 
 Development API requests are proxied to FastAPI on port `8173`. If you override the backend port, update the proxy target in `web/vite.config.ts` to match.
 
-## Updating an existing beta installation
+## Updating an existing installation
 
 Stop the app and back up the full data directory first, then:
 
 ```bash
-git switch beta
+git switch main
 git pull
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -396,16 +395,16 @@ Click a registered playlist name to view its full live source track list, saved 
 
 When a deduplicated missing track is matched from the web UI, Playlist Bridge saves the match as a manual mapping across the affected unresolved occurrences and then syncs the affected playlists so the correction is immediately reflected in Plex.
 
-## Beta notes
+## Compatibility
 
-The 2.0 web API uses the existing matching engine and SQLite repository. Earlier JSON state is imported automatically; CLI support remains available.
+The web API uses the existing matching engine and SQLite repository. Earlier JSON state is imported automatically; CLI support remains available.
 
 
 ## Settings logs
 
 Settings includes a Logs viewer with Refresh, level and action filters, and Clear logs. It shows recent web operations, health failures, and captured sync output, newest first. The latest 1,000 entries are stored in SQLite; the viewer shows up to 200. Plex tokens and recognized credentials are redacted. This is an application activity log, not a live Docker console or historical CLI log importer. Docker process/startup failures before the application opens its database remain available through `docker compose logs`.
 
-Beta 1 and beta 2 SQLite databases upgrade automatically to schema 3, retaining runtime state and health results and adding persistent jobs and schedules. Earlier betas cannot open schema 3; restore your backup to roll back.
+Older supported SQLite databases migrate automatically. Keep a backup before upgrading; restore the matching backup when rolling back to an older release.
 
 ## Background jobs and schedules
 
@@ -425,34 +424,34 @@ Cancellation is cooperative: queued jobs stop immediately; running jobs stop at 
 
 Dashboard shows statistics and Add Playlist, including analysis, queue status, stages, errors, and a link to the registered playlist. Playlists supports combined filters, local name search, and sorting by name or most recently synced. View preferences persist in the browser; added dates are not displayed. Each playlist shows last synced and last successful health check; expand Health to see named missing/extra destination tracks, unresolved tracks, and source additions/removals. Run a fresh check to populate detailed drift for old results.
 
-Global search finds playlist names and tracks from saved source snapshots, health previews, missing records, and mappings; it does not search external music services. Open a playlist for its live source list and track filtering.
+Search finds playlist names and tracks from saved source snapshots, health previews, missing records, and mappings. Its separate Search Lidarr albums form looks up albums for review and requests without requiring a missing track. Open a playlist for its live source list and track filtering.
 
-Missing sorts by name, last checked, occurrences, or playlist count. Occurrences counts repeated track entries; playlist count counts distinct registered playlists. Expand memberships to navigate to each playlist. Ignore can apply to selected playlists or universally to current and future matching occurrences. Ignore changes local matching rules; the next sync updates Plex. Restore ignored rules from Settings → Ignored Tracks.
+Missing sorts by track title, artist, album, last checked, occurrences, or playlist count. Occurrences counts repeated track entries; playlist count counts distinct registered playlists. Expand memberships to navigate to each playlist. Ignore can apply to selected playlists or universally to current and future matching occurrences. Ignore changes local matching rules; the next sync updates Plex. Use Stop Ignoring in Settings → Ignored Tracks to remove an ignore rule.
 
-### Beta 5 search and sync improvements
+### Album search and sync
 
 Album search starts with `Artist - Album` (or `Artist - Track` when the album is unknown). Bypass cache requests fresh MusicBrainz results while preserving rate limiting; Lidarr lookups already go directly to Lidarr. Upstream caches remain outside Bridge’s control. Existing results stay visible while retrying, and album options use saved defaults under Options.
 
 Existing Lidarr albums show their monitoring state and offer Search Album. This action queues a search without re-adding the album or changing monitoring settings. If match edits save but a subsequent Plex sync fails, Activity reports partial completion and retains the individual playlist errors. Plex verification reports missing titles/artists and occurrence counts, with sensitive response details redacted.
 
-### Beta 6 navigation and album discovery
+### Navigation and album discovery
 
 Track Details returns to the playlist or page it was opened from, with its filters and scroll position retained. Song previews expand inline, and closing them stops playback. Track Details also offers Ignore and Add Album to Lidarr; a sole playlist membership is selected automatically, while multiple playlists require an explicit selection for matching.
 
-Playlist detail offers Needs Attention as its single status filter; clearing it shows all tracks. Release priority and studio preference apply to both Lidarr and MusicBrainz album results. MusicBrainz is labeled Advanced Lookup. When source album metadata is missing, Find Album with Apple Music offers suggestions you can review and use for a Lidarr search without overwriting source metadata.
+Playlist Details offers Needs Attention, Ignored, Manual and Automatic filters; clearing filters shows all tracks. Release priority and studio preference apply to both Lidarr and MusicBrainz album results. MusicBrainz is labeled Advanced Lookup. When source album metadata is missing, Find Album with Apple Music offers suggestions you can review and use for a Lidarr search without overwriting source metadata.
 
-### Beta 7 downloads and logging
+### Requests, downloads and logging
 
-Activity → Downloads shows requested albums and Lidarr's download/import status. Progress percentages appear only when Lidarr reports a size. Imported into Lidarr does not confirm Plex has scanned the album. Status refreshes while relevant pages are visible; completed requests remain in SQLite.
+Requests shows album request history and status. Activity → Downloads focuses on active downloads and requests awaiting import. Progress percentages appear only when Lidarr reports a size. Imported into Lidarr does not confirm Plex has scanned the album. Status refreshes while relevant pages are visible; completed requests remain in SQLite.
 
 Cancel Download removes the selected download and its temporary files from the download client, without deleting imported library music or the album registration. Find Another Download also blocklists the release and asks Lidarr for a replacement. Both require confirmation; shared multi-album downloads must be managed in Lidarr. Cancel does not unmonitor an album. Import failures show the upstream reason and a link to Lidarr.
 
 MusicBrainz lookup starts, cache decisions, retry attempts and results are retained at INFO. Failures are ERROR; pending operations are WARNING. Successful HTTP access/polling and detailed candidate diagnostics require the console debugging option. Logs redact credentials. Preview album actions use the selected recording's artist and album, preserving source metadata and saved matches.
 
-### Beta 8 interface cleanup
+### Filters, sorting and bulk actions
 
 The sort menu lists each field once, with Reverse sort controlling direction. Saved sort preferences remain compatible. Track Details and Playlist Details share Needs Attention, Ignored, Manual, and Automatic filters.
 
 Select visible tracks on Missing and choose Ignore selected to queue a batch (up to 500 tracks), with explicit playlist or universal scope and per-track results in Jobs. Hidden selections are cleared when filters change. Ignored Tracks settings shows playlist names and Stop Ignoring actions.
 
-Activity separates Jobs from Album Downloads. Downloads supports In Progress, Needs Attention, Completed, and Cancelled filters plus artist/album text filtering; completed and cancelled entries remain in collapsible history. Error notices show a short service message, with technical detail expandable where present. Raw response bodies and stack traces require DEBUG logging.
+Activity separates Jobs from Album Downloads. Downloads supports In Progress and Needs Attention filters plus artist/album text filtering. Requests also supports Completed and Cancelled filters and retains their history. Error notices show a short service message, with technical detail expandable where present. Raw response bodies and stack traces require DEBUG logging.
