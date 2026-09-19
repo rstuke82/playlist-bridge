@@ -14,7 +14,9 @@ Planned future changes. Completed release details are documented in [CHANGELOG.m
 - Continue fetching source playlists to detect additions, removals, reordering, and duplicate occurrences. Skip Plex writes only when the desired contents and order already match, respecting existing duplicate handling.
 - Measure source fetching, Plex library loading, matching, and playlist writes before and after the changes. Use those measurements to confirm routine-sync improvements without promising a fixed speedup or sacrificing correctness.
 
-## 3.0 — Multi-user support
+## 3.0
+
+### Multi-user support
 
 - Support individual Plex accounts with access to the configured server; no managed Plex Home users.
 - Users authenticate through Plex sign-in (PIN/token flow); no user-entered MusicBrainz or Lidarr credentials/settings.
@@ -24,7 +26,7 @@ Planned future changes. Completed release details are documented in [CHANGELOG.m
 
 - Add admin-managed universal playlists available across users, using server-controlled sync. Decide automatic assignment versus opt-in before implementing distribution.
 
-## 3.0 — Last.fm discovery
+### Last.fm discovery
 
 - Import music from Last.fm to identify gaps in the user's Plex music library. Decide which Last.fm collections/history and import ranges to support during feature design.
 - Match imported tracks against the configured Plex library and existing saved matches before presenting missing music. Reuse track identity, version handling, and manual-match rules; distinguish confirmed Plex matches, uncertain candidates requiring review, and missing tracks. Do not treat incomplete Last.fm album metadata as proof that music is missing.
