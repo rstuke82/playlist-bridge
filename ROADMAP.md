@@ -2,12 +2,17 @@
 
 Planned future changes. Completed release details are documented in [CHANGELOG.md](CHANGELOG.md).
 
-## Planned — Media availability checks
+## Next version — Media availability checks and faster playlist updates
 
 - Add a scheduled Check Media Availability task to bridge the gap between Imported into Lidarr and Available in Plex. Default to hourly, aligned to midnight, with the existing task controls and manual Run Now action. Manual runs do not shift the schedule; skip overlapping runs.
 - Refresh statuses for requested albums and check missing tracks against the Plex library, reusing one library load across the run. Retry the existing automatic matcher without changing thresholds, preserve manual matches, and send uncertain candidates to review.
 - Batch newly matched tracks into one queued sync per affected Auto Sync playlist. Mark other affected playlists Ready to Sync rather than syncing them automatically.
 - Distinguish an imported album from an available requested track: imports may be incomplete or contain a different recording. Confirm track availability in Plex before marking it available.
+
+- Make playlist sync reuse availability results and a shared Plex library cache, with freshness checks and invalidation for deleted or changed Plex items. Scheduling availability checks alone must not be treated as a performance improvement without this reuse.
+- Reuse validated saved matches and match only new, changed, or previously missing tracks. Check each unique missing track once across playlists while preserving playlist-specific mappings and manual selections.
+- Continue fetching source playlists to detect additions, removals, reordering, and duplicate occurrences. Skip Plex writes only when the desired contents and order already match, respecting existing duplicate handling.
+- Measure source fetching, Plex library loading, matching, and playlist writes before and after the changes. Use those measurements to confirm routine-sync improvements without promising a fixed speedup or sacrificing correctness.
 
 ## 2.2 — Multi-user support
 
