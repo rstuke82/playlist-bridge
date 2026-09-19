@@ -363,7 +363,7 @@ Dry-run automated sync:
 python sync.py --sync-all --dry-run
 ```
 
-Show the 2.0 beta version:
+Show the installed version:
 
 ```bash
 python -m playlist_bridge version
