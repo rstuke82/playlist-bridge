@@ -14,7 +14,7 @@ Planned future changes. Completed release details are documented in [CHANGELOG.m
 - Continue fetching source playlists to detect additions, removals, reordering, and duplicate occurrences. Skip Plex writes only when the desired contents and order already match, respecting existing duplicate handling.
 - Measure source fetching, Plex library loading, matching, and playlist writes before and after the changes. Use those measurements to confirm routine-sync improvements without promising a fixed speedup or sacrificing correctness.
 
-## 2.2 — Multi-user support
+## 3.0 — Multi-user support
 
 - Support individual Plex accounts with access to the configured server; no managed Plex Home users.
 - Users authenticate through Plex sign-in (PIN/token flow); no user-entered MusicBrainz or Lidarr credentials/settings.
