@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from croniter import croniter
 
-ACTIONS = {'sync', 'health', 'analyze', 'add', 'fix_match', 'track_match', 'remove', 'backup', 'check_updates', 'restore_backup', 'lidarr_add', 'lidarr_search', 'match_batch', 'ignore', 'ignore_batch'}
+ACTIONS = {'availability','sync', 'health', 'analyze', 'add', 'fix_match', 'track_match', 'remove', 'backup', 'check_updates', 'restore_backup', 'lidarr_add', 'lidarr_search', 'match_batch', 'ignore', 'ignore_batch'}
 SCOPES = {'all', 'favorites', 'automatic', 'selected'}
 TERMINAL = {'completed', 'failed', 'cancelled', 'interrupted'}
 _local = threading.local()
@@ -131,7 +131,7 @@ class Store:
 
     def save_schedule(self, data, schedule_id=None):
         from .tasks import expression, DEFINITIONS
-        if data['action'] not in {'sync','health','backup','check_updates'}:
+        if data['action'] not in {'sync','health','backup','check_updates','availability'}:
             raise ValueError('Unsupported recurring task')
         hours = data['hours']
         if data['action']=='check_updates' and hours!=6:

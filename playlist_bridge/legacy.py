@@ -21,6 +21,7 @@ import sys
 import tempfile
 from collections import Counter
 import copy
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple
@@ -2593,6 +2594,10 @@ class PlexAPI:
         self, title: str = "", artist: str = ""
     ) -> List[dict]:
         """Load tracks only from the configured Plex music library."""
+        from .library_cache import load
+        return load(self, self._fetch_library)
+
+    def _fetch_library(self):
 
         try:
             resp = requests.get(
@@ -3088,6 +3093,11 @@ class PlexAPI:
         """Use an ordered play queue for repeats, retaining the playlist identity."""
         from . import jobs
         ids = [str(value) for value in track_ids]
+        existing = self.get_playlist_items(playlist_id)
+        current_ids = [str(t.get('plex_id') or t.get('ratingKey')) for t in existing]
+        if current_ids == ids:
+            jobs.output('Plex playlist contents and order unchanged; skipping track writes')
+            return True
         queue_id = None
         if len(set(ids)) < len(ids):
             jobs.progress('Preparing source duplicates in an ordered Plex play queue', check=False)
@@ -6492,6 +6502,7 @@ class Syncer:
 
         from . import jobs
         jobs.progress("Loading source playlist: " + playlist_name)
+        source_started = time.monotonic()
         try:
             source_tracks, metadata = api.get_playlist_tracks(
                 source_url,
@@ -6509,6 +6520,8 @@ class Syncer:
             f"  Found {len(source_tracks)} tracks"
         )
 
+        jobs.output(f'Source fetch completed in {time.monotonic()-source_started:.2f}s')
+        match_started = time.monotonic()
         mapping_key = (
             f"{source_type}:{playlist_id}"
         )
@@ -6625,6 +6638,7 @@ class Syncer:
                 ),
             )
 
+        jobs.output(f'Matching and library preparation completed in {time.monotonic()-match_started:.2f}s')
         self._store_unmatched(
             mapping_key,
             unmatched,
@@ -6692,6 +6706,7 @@ class Syncer:
                 print("Could not verify synced playlist:", exc)
         if not operation_error:
             playlist_entry["last_synced"] = datetime.now().isoformat()
+            playlist_entry['ready_to_sync'] = False
         self._save_source_snapshot(
             mapping_key,
             source_tracks,

@@ -6,7 +6,7 @@ export type Playlist = {
   source: string
   source_url: string
   favorite: boolean
-  auto_sync: boolean
+  ready_to_sync?: boolean; auto_sync: boolean
   added_at?: string | null
   last_synced?: string | null
   health?: PlaylistHealth
@@ -170,7 +170,7 @@ export const api = {
   analyzePlaylist: (url: string) => request<any>('/api/playlists/analyze', {
     method: 'POST', body: JSON.stringify({ url }),
   }),
-  addPlaylist: (body: { url: string; favorite: boolean; auto_sync: boolean }) =>
+  addPlaylist: (body: { url: string; favorite: boolean; ready_to_sync?: boolean; auto_sync: boolean }) =>
     request<Playlist>('/api/playlists', { method: 'POST', body: JSON.stringify(body) }),
   syncAll: () => request<any>('/api/sync/all', { method: 'POST' }),
   syncFavorites: () => request<any>('/api/sync/favorites', { method: 'POST' }),

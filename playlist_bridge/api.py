@@ -151,6 +151,7 @@ def _playlist_payload(config: Config, playlist: dict) -> dict:
         "favorite": playlist.get("favorite", False) is True,
         "auto_sync": playlist.get("auto_sync", True) is not False,
         "last_synced": playlist.get("last_synced"),
+        "ready_to_sync": bool(playlist.get("ready_to_sync")),
         "added_at": playlist.get("added_at"),
         "last_match_attempt": playlist.get("last_match_attempt"),
         "saved_matches": len(config.mapping.get(key, {})),
@@ -319,7 +320,7 @@ def health():
     return {
         "status": "ok",
         "version": __version__,
-        "release_name": "Playlist Bridge 2.1",
+        "release_name": "Playlist Bridge 2.2 Beta 1",
         "update": stored_status(config.repository),
         "build": __build__,
         "playlists": len(playlists),
@@ -1066,12 +1067,12 @@ class RemoveRequest(BaseModel):
 
 
 class JobRequest(BaseModel):
-    action: Literal['sync','health','analyze','add','fix_match','track_match','remove','backup','check_updates','ignore_batch']
+    action: Literal['sync','health','analyze','add','fix_match','track_match','remove','backup','check_updates','ignore_batch','availability']
     payload: dict = Field(default_factory=dict)
 
 
 class ScheduleRequest(BaseModel):
-    action: Literal['sync','health','backup','check_updates']
+    action: Literal['sync','health','backup','check_updates','availability']
     scope: Literal['all','favorites','automatic'] = 'all'
     hours: Literal[0,1,3,6,12,24]
 
@@ -1088,7 +1089,7 @@ def validated_payload(action, payload):
         if any(not t.universal and not t.playlist_keys for t in batch.tracks):
             raise ValueError('Select playlists or universal ignore for every track')
         return batch.model_dump()
-    if action in ('backup','check_updates'):return {}
+    if action in ('backup','check_updates','availability'):return {}
     if action == 'remove':
         return RemoveRequest(**payload).model_dump()
     if action == 'track_match':
@@ -1283,6 +1284,18 @@ def _health_batch(playlists, config):
 
 
 def execute_job(action, payload):
+    if action == 'availability':
+        from .availability import execute
+        return execute(payload)
+    if action == 'sync':
+        from .library_cache import reuse
+        from .availability import preferences
+        with reuse(preferences(job_store().repository).cache_minutes):
+            return _execute_job(action,payload)
+    return _execute_job(action,payload)
+
+
+def _execute_job(action, payload):
     if action=='ignore_batch':
         request=BulkIgnoreRequest(**payload)
         results=[]
@@ -1359,6 +1372,8 @@ def execute_job(action, payload):
         try:
             result=sync_one(_playlist_key(playlist)) if action=='sync' else playlist_health(_playlist_key(playlist))
             if action=='sync' and isinstance(result.get('summary'),dict) and result['summary'].get('errors'):
+                from .library_cache import invalidate
+                invalidate()
                 raise ValueError('Playlist sync reported errors; see the sync log')
             results.append({'key':_playlist_key(playlist),'name':playlist.get('plex_playlist_name'),'ok':True,'result':result})
             jobs.activity(mode='completed', stage='Playlist completed')
@@ -1625,6 +1640,9 @@ register_musicbrainz(app)
 
 from .lidarr_requests import register as register_lidarr_requests
 register_lidarr_requests(app)
+
+from .availability import register as register_availability
+register_availability(app)
 
 WEB_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"
 if WEB_DIST.exists():

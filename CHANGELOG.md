@@ -1,3 +1,10 @@
+# 2.2 Beta 1
+
+- Add configurable Media Availability scans and requested-track Plex status.
+- Reuse Plex library snapshots in sync jobs and batch discovered matches per Auto Sync playlist; preserve manual/ignored selections and show Ready to Sync elsewhere.
+- Skip unchanged Plex track-list writes and log source/library/matching timings.
+- Improve Requests navigation, album-result layout, and links to Lidarr albums and downloads.
+
 # 2.1 final
 
 - Requests navigation and download/import-only Activity view.

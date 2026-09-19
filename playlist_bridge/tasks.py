@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 INTERVALS = {0: 'Disabled', 1: 'Every hour', 3: 'Every 3 hours', 6: 'Every 6 hours', 12: 'Every 12 hours', 24: 'Daily'}
-DEFINITIONS = [('sync','all','Sync All',0),('sync','favorites','Sync Favorites',0),
+DEFINITIONS = [('availability','all','Check Media Availability',1),('sync','all','Sync All',0),('sync','favorites','Sync Favorites',0),
     ('sync','automatic','Sync Auto Sync Playlists',0),('health','all','Health Check',0),
     ('health','favorites','Health Check Favorites',0),('health','automatic','Health Check Auto Sync',0),
     ('backup','all','Backup',24),('check_updates','all','Check for Updates',6)]
@@ -44,6 +44,10 @@ def setup(store):
                     db.execute('UPDATE schedules SET timezone=?,next_run=? WHERE id=?',(zone,next_run(cron,zone),sid))
                 saved['timezone']=zone
                 db.execute("UPDATE state SET value=? WHERE namespace='tasks' AND key='initialized'",(json.dumps(saved),))
+            zone=saved.get('timezone','UTC')
+            for action,scope,name,interval in DEFINITIONS:
+                db.execute('INSERT INTO schedules(id,name,action,scope,cron,timezone,enabled,next_run) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(action,scope) DO NOTHING',
+                    (str(uuid.uuid4()),name,action,scope,expression(interval),zone,int(interval>0),next_run(expression(interval),zone)))
             return
         existing=db.execute('SELECT id,name,action,scope,cron,timezone,enabled,next_run FROM schedules').fetchall()
         zone=os.environ.get('TZ') or (existing[0][5] if existing else 'UTC')

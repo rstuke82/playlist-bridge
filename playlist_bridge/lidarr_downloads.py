@@ -41,12 +41,12 @@ def describe(item):
     percent = round(max(0,min(100,(1-left/size)*100)),1) if isinstance(size,(int,float)) and size>0 and isinstance(left,(int,float)) else None
     return {'queue_id':item['id'],'download_id':item.get('downloadId',''),'title':item.get('title',''), 'status':label,'percent':percent,'remaining':left,'error':'; '.join(messages)}
 
-def snapshot(repo, cfg):
+def snapshot(repo, cfg, force=False):
     from .lidarr import Client
     from .api import _record_log
     server = server_id(cfg)
     records = {k:v for k,v in repo.load('lidarr_requests').items() if v.get('server')==server and v.get('lidarr_id')}
-    if not cfg.get('enabled') or not records or time.monotonic()-_last.get(server,0)<15 or not _lock.acquire(False):
+    if not cfg.get('enabled') or not records or (not force and time.monotonic()-_last.get(server,0)<15) or not _lock.acquire(False):
         return
     try:
         _last[server]=time.monotonic()
@@ -54,7 +54,7 @@ def snapshot(repo, cfg):
         items=queue(client)
         # One catalog read supplies imported-file counts for all requested albums.
         cached=_catalog.get(server)
-        if not cached or time.monotonic()-cached[0]>60:
+        if force or not cached or time.monotonic()-cached[0]>60:
             cached=(time.monotonic(),{a['id']:a for a in client.call('GET','album',quiet=True)})
             _catalog.clear()
             _catalog[server]=cached

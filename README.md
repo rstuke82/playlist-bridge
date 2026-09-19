@@ -1,6 +1,6 @@
 # Playlist Bridge
 
-**Release:** Playlist Bridge 2.1
+**Release:** Playlist Bridge 2.2 Beta 1
 
 Playlist Bridge syncs public **Spotify** and **Apple Music** playlists to playlists in your local **Plex music library**.
 
@@ -8,9 +8,17 @@ Playlist Bridge provides a self-hosted **React + TypeScript** web interface with
 
 > Back up the existing data directory before upgrading; keep its mount and connection settings.
 
-## 2.1: Lidarr
+## Media availability
 
-Stable release 2.1 is published to main and beta with Docker tags `main`, `latest`, `beta`, and `2.1.0`.
+Settings → Media Availability controls an hourly, midnight-aligned scan. Choose whether to refresh Lidarr request status, retry automatic matching for missing tracks, and queue updates for affected Auto Sync playlists. Other affected playlists show Ready to Sync. Manual selections and ignore rules are preserved. Change the frequency or disable it here or in Settings → Tasks; Scan Now leaves the schedule unchanged.
+
+Each scan refreshes Plex. Routine playlist syncs can reuse the in-memory Plex snapshot for 5, 15, 30 or 60 minutes (15 by default), keyed to the server, library and credentials. Restarting clears the cache. Source playlists are still fetched on each sync. Identical destination track order skips track-list writes; metadata updates and verification still run. Failed sync verification invalidates the shared snapshot. Timing logs report source fetch, library load, and matching duration; actual speed gains depend on the library and source services.
+
+Requests distinguishes Lidarr imports from requested-track availability in Plex. Album-only requests without source tracks are not claimed as verified in Plex.
+
+## Lidarr
+
+This preview is published to the beta branch and Docker tags `beta` and `2.2.0-beta.1`. Stable main/latest remain on 2.1.0.
 
 In Settings → Lidarr, enter the server URL (including any URL base) and API key. Test Connection loads root folders, quality profiles and metadata profiles from that instance. Choosing a root folder loads its quality, metadata, monitoring and tag defaults; Use Root Folder Defaults restores them after overrides. A metadata profile named None is supported and is distinct from monitoring None. Choose defaults, enable the integration and save. Blank API-key fields retain the existing key only when the server URL stays the same. Keys remain server-side in the persistent SQLite database; do not publish the data directory or backups.
 
@@ -132,8 +140,8 @@ docker compose pull
 docker compose up -d --no-build
 ```
 
-The default image is `ghcr.io/rstuke82/playlist-bridge:latest`.
-To pin this build, set `PLAYLIST_BRIDGE_IMAGE=ghcr.io/rstuke82/playlist-bridge:2.1.0`
+The default image in this preview is `ghcr.io/rstuke82/playlist-bridge:beta`.
+To pin this build, set `PLAYLIST_BRIDGE_IMAGE=ghcr.io/rstuke82/playlist-bridge:2.2.0-beta.1`
 in `.env`. The `main` and `latest` tags follow stable releases.
 
 Maintainers can publish both server architectures with the existing buildx builder:
@@ -142,9 +150,7 @@ Maintainers can publish both server architectures with the existing buildx build
 docker buildx use playlist-bridge-builder
 docker buildx inspect --bootstrap
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -t ghcr.io/rstuke82/playlist-bridge:2.1.0 \
-  -t ghcr.io/rstuke82/playlist-bridge:main \
-  -t ghcr.io/rstuke82/playlist-bridge:latest \
+  -t ghcr.io/rstuke82/playlist-bridge:2.2.0-beta.1 \
   -t ghcr.io/rstuke82/playlist-bridge:beta --push .
 ```
 
