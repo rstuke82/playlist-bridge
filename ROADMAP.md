@@ -2,6 +2,13 @@
 
 Planned future changes. Completed release details are documented in [CHANGELOG.md](CHANGELOG.md).
 
+## Planned — Media availability checks
+
+- Add a scheduled Check Media Availability task to bridge the gap between Imported into Lidarr and Available in Plex. Default to hourly, aligned to midnight, with the existing task controls and manual Run Now action. Manual runs do not shift the schedule; skip overlapping runs.
+- Refresh statuses for requested albums and check missing tracks against the Plex library, reusing one library load across the run. Retry the existing automatic matcher without changing thresholds, preserve manual matches, and send uncertain candidates to review.
+- Batch newly matched tracks into one queued sync per affected Auto Sync playlist. Mark other affected playlists Ready to Sync rather than syncing them automatically.
+- Distinguish an imported album from an available requested track: imports may be incomplete or contain a different recording. Confirm track availability in Plex before marking it available.
+
 ## 2.2 — Multi-user support
 
 - Support individual Plex accounts with access to the configured server; no managed Plex Home users.
