@@ -21,6 +21,7 @@ import sys
 import tempfile
 from collections import Counter
 import copy
+import unicodedata
 import time
 from datetime import datetime
 from pathlib import Path
@@ -3820,7 +3821,9 @@ class Matcher:
         if not value:
             return ""
 
-        text = repair_text(value).casefold()
+        text = unicodedata.normalize('NFKD',repair_text(value)).casefold()
+        text = ''.join(c for c in text if not unicodedata.combining(c))
+        text = re.sub(r'(?<!\w)&(?!\w)', ' and ', text)
         text = (
             text.replace("’", "'")
             .replace("‘", "'")
@@ -3829,6 +3832,7 @@ class Matcher:
             .replace("–", "-")
             .replace("—", "-")
         )
+        text = text.replace("'", "").replace("’", "").replace("‘", "")
         return re.sub(r"\s+", " ", text).strip()
 
     @classmethod
@@ -4191,6 +4195,8 @@ class Matcher:
             return [""]
 
         variants = [value]
+        if value.startswith('the ') and len(value)>4:
+            variants.append(value[4:])
 
         # Artist-string feature syntax.
         primary = re.sub(
@@ -5300,6 +5306,10 @@ class Syncer:
             )
 
         bucket[search_key] = current
+        if provenance == 'manual' and not getattr(self.config,'read_only',False):
+            for playlist in self.config.config.get('playlists',[]):
+                if f"{playlist.get('source','')}:{playlist.get('source_id','')}" == mapping_key:
+                    playlist['ready_to_sync'] = True
 
     def _remove_match_provenance(
         self,

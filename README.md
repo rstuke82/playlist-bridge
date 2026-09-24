@@ -1,6 +1,6 @@
 # Playlist Bridge
 
-**Release:** Playlist Bridge 2.2 Beta 1
+**Release:** Playlist Bridge 2.2 Beta 2
 
 Playlist Bridge syncs public **Spotify** and **Apple Music** playlists to playlists in your local **Plex music library**.
 
@@ -10,15 +10,19 @@ Playlist Bridge provides a self-hosted **React + TypeScript** web interface with
 
 ## Media availability
 
-Settings → Media Availability controls an hourly, midnight-aligned scan. Choose whether to refresh Lidarr request status, retry automatic matching for missing tracks, and queue updates for affected Auto Sync playlists. Other affected playlists show Ready to Sync. Manual selections and ignore rules are preserved. Change the frequency or disable it here or in Settings → Tasks; Scan Now leaves the schedule unchanged.
+Settings → Tasks provides separate Plex Library Scan, Lidarr Library Scan, Reconcile Availability, and Retry Missing Matches tasks. Scan frequency follows midnight-aligned intervals; Run Now does not shift the schedule. Plex cache and matching options live in Settings → Plex; Lidarr inventory options live in Settings → Lidarr.
 
-Each scan refreshes Plex. Routine playlist syncs can reuse the in-memory Plex snapshot for 5, 15, 30 or 60 minutes (15 by default), keyed to the server, library and credentials. Restarting clears the cache. Source playlists are still fetched on each sync. Identical destination track order skips track-list writes; metadata updates and verification still run. Failed sync verification invalidates the shared snapshot. Timing logs report source fetch, library load, and matching duration; actual speed gains depend on the library and source services.
+Scans inventory the entire configured Plex music library and Lidarr catalog, including albums added outside Bridge. Successful snapshots persist in SQLite across restarts and are scoped to the configured service. Scans link saved source tracks and requests without changing playlist contents or manual mappings. Retry Missing Matches applies the automatic matcher separately and can queue affected Auto Sync playlists; custom or disabled playlist schedules are excluded from that automatic queue.
 
-Requests distinguishes Lidarr imports from requested-track availability in Plex. Album-only requests without source tracks are not claimed as verified in Plex.
+Routine syncs can reuse a fresh Plex snapshot for the configured lifetime. Source playlists are still fetched and destination contents verified. Failed verification invalidates the snapshot. Actual speed gains depend on library size and external services.
+
+Requests show In Progress only while present in the download queue. Added albums that are not downloading and not imported show Needs Attention. Plex availability is tracked separately from Lidarr import status. Album-only requests without source tracks are not claimed as verified in Plex.
+
+Playlist Details supports inherited, disabled, or custom weekly schedules using the server timezone. Custom schedules replace recurring global Auto Sync for that playlist. Overlapping scheduled syncs are skipped; manual runs do not move the next scheduled time. Filters cycle through include, exclude, and off. Ready to Sync includes pending match changes and newly matched missing tracks.
 
 ## Lidarr
 
-This preview is published to the beta branch and Docker tags `beta` and `2.2.0-beta.1`. Stable main/latest remain on 2.1.0.
+This preview is published to the beta branch and Docker tags `beta` and `2.2.0-beta.2`. Stable main/latest remain on 2.1.0.
 
 In Settings → Lidarr, enter the server URL (including any URL base) and API key. Test Connection loads root folders, quality profiles and metadata profiles from that instance. Choosing a root folder loads its quality, metadata, monitoring and tag defaults; Use Root Folder Defaults restores them after overrides. A metadata profile named None is supported and is distinct from monitoring None. Choose defaults, enable the integration and save. Blank API-key fields retain the existing key only when the server URL stays the same. Keys remain server-side in the persistent SQLite database; do not publish the data directory or backups.
 
@@ -141,7 +145,7 @@ docker compose up -d --no-build
 ```
 
 The default image in this preview is `ghcr.io/rstuke82/playlist-bridge:beta`.
-To pin this build, set `PLAYLIST_BRIDGE_IMAGE=ghcr.io/rstuke82/playlist-bridge:2.2.0-beta.1`
+To pin this build, set `PLAYLIST_BRIDGE_IMAGE=ghcr.io/rstuke82/playlist-bridge:2.2.0-beta.2`
 in `.env`. The `main` and `latest` tags follow stable releases.
 
 Maintainers can publish both server architectures with the existing buildx builder:
@@ -150,7 +154,7 @@ Maintainers can publish both server architectures with the existing buildx build
 docker buildx use playlist-bridge-builder
 docker buildx inspect --bootstrap
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -t ghcr.io/rstuke82/playlist-bridge:2.2.0-beta.1 \
+  -t ghcr.io/rstuke82/playlist-bridge:2.2.0-beta.2 \
   -t ghcr.io/rstuke82/playlist-bridge:beta --push .
 ```
 

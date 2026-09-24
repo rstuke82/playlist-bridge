@@ -9,7 +9,8 @@ from playlist_bridge.jobs import Store
 from playlist_bridge import availability,library_cache,tasks
 
 class AvailabilityTests(unittest.TestCase):
-    def test_cache_reuse_refresh_and_identity(self):
+    @patch('playlist_bridge.inventory.snapshot',return_value={})
+    def test_cache_reuse_refresh_and_identity(self,_snapshot):
         library_cache.invalidate()
         client=SimpleNamespace(base_url='plex',music_library_key='1',headers={'token':'a'})
         fetch=Mock(return_value=[{'plex_id':'1'}])
@@ -28,13 +29,13 @@ class AvailabilityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             repo=Repository(Path(directory)/'bridge.sqlite');store=Store(repo)
             tasks.setup(store)
-            with repo.connect() as db:db.execute("DELETE FROM schedules WHERE action='availability'")
+            with repo.connect() as db:db.execute("DELETE FROM schedules WHERE action='plex_scan'")
             tasks.setup(store);tasks.setup(store)
-            found=[s for s in store.schedules() if s['action']=='availability']
+            found=[s for s in store.schedules() if s['action']=='plex_scan']
             self.assertEqual(len(found),1);self.assertEqual(found[0]['cron'],'0 */1 * * *')
-            store.save_schedule({'action':'availability','scope':'all','hours':0})
+            store.save_schedule({'action':'plex_scan','scope':'all','hours':0})
             tasks.setup(store)
-            self.assertFalse(next(s for s in store.schedules() if s['action']=='availability')['enabled'])
+            self.assertFalse(next(s for s in store.schedules() if s['action']=='plex_scan')['enabled'])
 
     def test_scan_deduplicates_preserves_manual_and_scopes_sync(self):
         with tempfile.TemporaryDirectory() as directory:

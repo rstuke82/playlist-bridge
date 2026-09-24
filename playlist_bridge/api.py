@@ -137,6 +137,21 @@ def _playlist_key(playlist: dict) -> str:
 
 def _playlist_payload(config: Config, playlist: dict) -> dict:
     key = _playlist_key(playlist)
+    if not hasattr(config,'_pending_settings_view'):config._pending_settings_view=config.repository.load('pending_playlist_settings')
+    if not hasattr(config,'_match_drafts_view'):config._match_drafts_view=config.repository.load('match_drafts')
+    if not hasattr(config,'_inventory_ready_view'):
+        from .inventory import current
+        plex,_=current(config.repository,config)
+        links=config.repository.load('inventory_links').get('current',{})
+        config._inventory_ready_view={}
+        if plex and links.get('plex_identity')==plex.get('identity'):
+            for link in links.get('rows',[]):
+                if link.get('available') and not link.get('ignored'):
+                    t=link['source']
+                    config._inventory_ready_view.setdefault(link['playlist_key'],set()).add((t.get('title'),t.get('artist')))
+    pending=config._pending_settings_view.get(key,{})
+    playlist={**playlist,**{k:v for k,v in pending.items() if k in ('favorite','auto_sync')}}
+    drafts=config._match_drafts_view
     missing = config.missing.get(key, [])
     counts = Counter(Syncer(config)._get_match_provenance(key, search_key) for search_key in config.mapping.get(key, {}))
     return {
@@ -151,7 +166,8 @@ def _playlist_payload(config: Config, playlist: dict) -> dict:
         "favorite": playlist.get("favorite", False) is True,
         "auto_sync": playlist.get("auto_sync", True) is not False,
         "last_synced": playlist.get("last_synced"),
-        "ready_to_sync": bool(playlist.get("ready_to_sync")),
+        "ready_to_sync": bool(playlist.get("ready_to_sync")) or any((t.get("title"),t.get("artist")) in config._inventory_ready_view.get(key,set()) for t in missing) or any(v.get("playlist_key")==key for v in drafts.values()),
+        "settings_pending": bool(pending),
         "added_at": playlist.get("added_at"),
         "last_match_attempt": playlist.get("last_match_attempt"),
         "saved_matches": len(config.mapping.get(key, {})),
@@ -320,7 +336,7 @@ def health():
     return {
         "status": "ok",
         "version": __version__,
-        "release_name": "Playlist Bridge 2.2 Beta 1",
+        "release_name": "Playlist Bridge 2.2 Beta 2",
         "update": stored_status(config.repository),
         "build": __build__,
         "playlists": len(playlists),
@@ -343,23 +359,10 @@ def list_playlists():
     ]
 
 
-@app.patch("/api/playlists/{playlist_key:path}")
+@app.patch("/api/playlists/{playlist_key:path}",status_code=202)
 def update_playlist(playlist_key: str, request: PlaylistUpdateRequest):
-    with ProcessLock():
-        config = _config()
-        playlist = next(
-            (p for p in config.config.get("playlists", []) if _playlist_key(p) == playlist_key),
-            None,
-        )
-        if playlist is None:
-            raise HTTPException(status_code=404, detail="Playlist not found")
-
-        if request.favorite is not None:
-            playlist["favorite"] = request.favorite
-        if request.auto_sync is not None:
-            playlist["auto_sync"] = request.auto_sync
-        config.save()
-        return _playlist_payload(config, playlist)
+    from .queued_settings import enqueue
+    return enqueue([playlist_key],request.model_dump(exclude_none=True))
 
 
 def analyze_playlist(request: PlaylistAnalyzeRequest):
@@ -1067,12 +1070,12 @@ class RemoveRequest(BaseModel):
 
 
 class JobRequest(BaseModel):
-    action: Literal['sync','health','analyze','add','fix_match','track_match','remove','backup','check_updates','ignore_batch','availability']
+    action: Literal['sync','health','analyze','add','fix_match','track_match','remove','backup','check_updates','ignore_batch','availability','plex_scan','lidarr_scan','reconcile','retry_missing']
     payload: dict = Field(default_factory=dict)
 
 
 class ScheduleRequest(BaseModel):
-    action: Literal['sync','health','backup','check_updates','availability']
+    action: Literal['sync','health','backup','check_updates','availability','plex_scan','lidarr_scan','reconcile','retry_missing']
     scope: Literal['all','favorites','automatic'] = 'all'
     hours: Literal[0,1,3,6,12,24]
 
@@ -1089,7 +1092,7 @@ def validated_payload(action, payload):
         if any(not t.universal and not t.playlist_keys for t in batch.tracks):
             raise ValueError('Select playlists or universal ignore for every track')
         return batch.model_dump()
-    if action in ('backup','check_updates','availability'):return {}
+    if action in ('backup','check_updates','availability','plex_scan','lidarr_scan','reconcile','retry_missing'):return {}
     if action == 'remove':
         return RemoveRequest(**payload).model_dump()
     if action == 'track_match':
@@ -1284,6 +1287,19 @@ def _health_batch(playlists, config):
 
 
 def execute_job(action, payload):
+    if action in ('plex_scan','lidarr_scan'):
+        from .inventory import scan
+        return scan(action.split('_')[0])
+    if action == 'reconcile':
+        from .inventory import reconcile
+        return reconcile()
+    if action == 'playlist_settings':
+        from .queued_settings import execute
+        return execute()
+    if action == 'retry_missing':
+        from .availability import execute
+        return execute(payload)
+
     if action == 'availability':
         from .availability import execute
         return execute(payload)
@@ -1358,8 +1374,11 @@ def _execute_job(action, payload):
         playlists=[p for p in playlists if p.get('auto_sync',True) is not False]
     elif scope=='selected':
         playlists=[p for p in playlists if _playlist_key(p) in payload.get('playlist_keys',[])]
+    if scope=='automatic' and jobs.current() and jobs.current().store.get(jobs.current().id).get('schedule_id'):
+        schedules=config.repository.load('playlist_schedules')
+        playlists=[p for p in playlists if schedules.get(_playlist_key(p),{}).get('mode','inherit')=='inherit']
     if not playlists:
-        raise ValueError('No playlists match this job scope')
+        return {'summary':'No playlists match this job scope.','playlists':[],'total':0}
     ctx = jobs.current()
     if ctx:
         ctx.store.update(ctx.id, result={'playlists': [], 'total': len(playlists)})
@@ -1373,7 +1392,7 @@ def _execute_job(action, payload):
             result=sync_one(_playlist_key(playlist)) if action=='sync' else playlist_health(_playlist_key(playlist))
             if action=='sync' and isinstance(result.get('summary'),dict) and result['summary'].get('errors'):
                 from .library_cache import invalidate
-                invalidate()
+                invalidate(discard_persistent=True)
                 raise ValueError('Playlist sync reported errors; see the sync log')
             results.append({'key':_playlist_key(playlist),'name':playlist.get('plex_playlist_name'),'ok':True,'result':result})
             jobs.activity(mode='completed', stage='Playlist completed')
@@ -1545,7 +1564,10 @@ def search_library(q: str = Query(min_length=1,max_length=200)):
             seen.add(identity)
             if query in ' '.join(str(track.get(k,'')) for k in ('title','artist','album')).casefold():
                 tracks.append({**track,'playlist_key':key,'playlist_name':name})
-    return {'playlists':playlists[:100],'tracks':tracks[:200],'track_count':len(tracks),'cached':True}
+    from .inventory import current
+    plex,lidarr=current(config.repository,config)
+    def contains(t):return query in ' '.join(str(t.get(k,'')) for k in ('title','artist','album')).casefold()
+    return {'playlists':playlists[:100],'tracks':tracks[:200],'track_count':len(tracks),'cached':True,'plex_tracks':[t for t in plex.get('rows',[]) if contains(t)][:100],'lidarr_albums':[t for t in lidarr.get('rows',[]) if contains(t)][:100],'inventory_checked_at':{'plex':plex.get('checked_at'),'lidarr':lidarr.get('checked_at')}}
 
 
 def remove_selected(request):
@@ -1643,6 +1665,11 @@ register_lidarr_requests(app)
 
 from .availability import register as register_availability
 register_availability(app)
+
+from .inventory import register as register_inventory
+register_inventory(app)
+from .playlist_schedules import register as register_playlist_schedules
+register_playlist_schedules(app)
 
 WEB_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"
 if WEB_DIST.exists():

@@ -22,15 +22,9 @@ def execute(payload):
     from .library_cache import reuse
     started=time.monotonic();repo=job_store().repository;prefs=preferences(repo)
     warnings=[];matches={};affected=set();decisions={};checked=0
-    if prefs.refresh_lidarr:
-        jobs.progress('Refreshing Lidarr requests and import status')
-        cfg=lidarr_config(repo)
-        if cfg.get('enabled'):
-            snapshot(repo,cfg,force=True)
-            warnings=[r.get('download_poll_error') for r in repo.load('lidarr_requests').values() if r.get('download_poll_error')]
-    with ProcessLock(),reuse(prefs.cache_minutes,refresh=True):
+    with ProcessLock(),reuse(prefs.cache_minutes):
         config=_config();syncer=Syncer(config)
-        jobs.progress('Refreshing Plex music library')
+        jobs.progress('Loading Plex inventory for missing-match retry')
         library=_health_plex(config).search_library('');lookup={str(t['plex_id']):t for t in library}
         playlists={_playlist_key(p):p for p in config.config.get('playlists',[])}
         for key,playlist in playlists.items():
@@ -61,7 +55,7 @@ def execute(payload):
             # Preserve readiness from a previous scan until a successful sync clears it.
         jobs.progress('Saving availability matches')
         config.save()
-        targets=[key for key,p in playlists.items() if p.get('ready_to_sync') and p.get('auto_sync',True) is not False]
+        targets=[key for key,p in playlists.items() if p.get('ready_to_sync') and p.get('auto_sync',True) is not False and repo.load('playlist_schedules').get(key,{}).get('mode','inherit')=='inherit']
         job_id=None
         if prefs.sync_automatic and targets:
             jobs.progress(f'Queuing one sync for {len(targets)} Auto Sync playlists')

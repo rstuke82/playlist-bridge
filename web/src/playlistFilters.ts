@@ -1,6 +1,7 @@
 import { Playlist } from './api'
 export const FILTER_STORAGE='bridge-playlist-filters'
 export const playlistPredicates:Record<string,(p:Playlist)=>boolean>={
+ 'Ready to Sync':p=>!!p.ready_to_sync,
  'Favorites':p=>p.favorite,
  'Needs Attention':p=>!!p.health_attempt?.error||!!p.health&&!p.health.healthy||p.unresolved>0||p.lost>0,
  '100% Matched':p=>!!p.fully_matched,
@@ -15,4 +16,4 @@ export function openPlaylistView(filters:string[]=[]){
  location.hash=`playlists/view/${encodeURIComponent(JSON.stringify(view))}`
 }
 
-export function normalizePlaylistFilters(filters:string[]){return [...new Set(filters.map(f=>['Health Drift','Health Errors','Has Missing','Has LOST','Unhealthy'].includes(f)?'Needs Attention':f))].filter(f=>f in playlistPredicates)}
+export function normalizePlaylistFilters(filters:string[]){return [...new Set(filters.map(f=>['Health Drift','Health Errors','Has Missing','Has LOST','Unhealthy'].includes(f)?'Needs Attention':f))].filter(f=>f.replace(/^!/, '') in playlistPredicates)}

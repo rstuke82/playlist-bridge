@@ -21,6 +21,13 @@ def load(client, fetch):
     identity=hashlib.sha256(repr((client.base_url,client.music_library_key,sorted(client.headers.items()))).encode()).hexdigest()
     with _lock:
         cached=_entries.get(identity)
+        if not cached and not policy['refresh']:
+            from .api import job_store
+            from .inventory import snapshot
+            saved=snapshot(job_store().repository,'plex',identity)
+            if saved and time.time()-saved['checked_at']<policy['seconds']:
+                cached=(time.monotonic()-(time.time()-saved['checked_at']),saved['rows'])
+                _entries[identity]=cached
         fresh=policy['refresh'] and identity not in policy['seen']
         if cached and not fresh and time.monotonic()-cached[0]<policy['seconds']:
             policy['seen'].add(identity)
@@ -36,5 +43,10 @@ def load(client, fetch):
         jobs.output(f'Plex library loaded: {len(rows)} tracks in {time.monotonic()-started:.2f}s')
         return rows
 
-def invalidate():
-    with _lock:_entries.clear()
+def invalidate(discard_persistent=False):
+    with _lock:
+        _entries.clear()
+        if discard_persistent:
+            from .api import job_store
+            with job_store().repository.connect() as db:
+                db.execute("DELETE FROM state WHERE namespace='inventory' AND key='plex'")

@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from croniter import croniter
 
-ACTIONS = {'availability','sync', 'health', 'analyze', 'add', 'fix_match', 'track_match', 'remove', 'backup', 'check_updates', 'restore_backup', 'lidarr_add', 'lidarr_search', 'match_batch', 'ignore', 'ignore_batch'}
+ACTIONS = {'plex_scan','lidarr_scan','reconcile','retry_missing','playlist_settings','availability','sync', 'health', 'analyze', 'add', 'fix_match', 'track_match', 'remove', 'backup', 'check_updates', 'restore_backup', 'lidarr_add', 'lidarr_search', 'match_batch', 'ignore', 'ignore_batch'}
 SCOPES = {'all', 'favorites', 'automatic', 'selected'}
 TERMINAL = {'completed', 'failed', 'cancelled', 'interrupted'}
 _local = threading.local()
@@ -131,7 +131,7 @@ class Store:
 
     def save_schedule(self, data, schedule_id=None):
         from .tasks import expression, DEFINITIONS
-        if data['action'] not in {'sync','health','backup','check_updates','availability'}:
+        if data['action'] not in {'sync','health','backup','check_updates','availability','plex_scan','lidarr_scan','reconcile','retry_missing'}:
             raise ValueError('Unsupported recurring task')
         hours = data['hours']
         if data['action']=='check_updates' and hours!=6:
@@ -205,6 +205,10 @@ class Manager:
             while not self.stop.is_set():
                 try:
                     self.store.due()
+                    from .playlist_schedules import due as playlist_due
+                    playlist_due(self.store)
+                    if self.store.repository.load('pending_playlist_settings'):
+                        self.store.enqueue('playlist_settings',{})
                     if not self.worker or not self.worker.is_alive():
                         job = self.store.claim()
                         if job:
@@ -243,6 +247,10 @@ class Manager:
             api._record_log('INFO',job['action'],f"Job cancelled: {job['id']}")
         except Exception as exc:
             message = redact(getattr(exc,'detail',str(exc)),api._config())
+            if isinstance(exc,RuntimeError) and 'Another Playlist Bridge process is already running' in str(exc):
+                self.store.update(job['id'],status='queued',progress='Waiting for another operation to finish',error=None,started_at=None)
+                self.stop.wait(2)
+                return
             self.store.update(job['id'],status='failed',error=message,progress='Failed — ' + message,finished_at=now())
             api._record_log('ERROR',job['action'],f'{type(exc).__name__}: {message}')
             import traceback

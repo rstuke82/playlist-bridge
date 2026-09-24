@@ -32,15 +32,10 @@ def register(app):
         with store.repository.connect() as db:total=db.execute('SELECT COUNT(*) FROM jobs').fetchone()[0]
         return {'rows':store._rows('SELECT * FROM jobs ORDER BY created_at DESC LIMIT ? OFFSET ?',(limit,offset)),'total':total}
 
-    @app.post('/api/playlists/auto-sync')
+    @app.post('/api/playlists/auto-sync',status_code=202)
     def set_auto_sync(request:AutoSyncRequest):
-        with ProcessLock():
-            config=_config();keys=set(request.playlist_keys)
-            selected=[p for p in config.config['playlists'] if _playlist_key(p) in keys]
-            if len(selected)!=len(keys):raise HTTPException(409,'Playlist registrations changed. Refresh and select again.')
-            for playlist in selected:playlist['auto_sync']=request.auto_sync
-            config.save()
-        return {'updated':len(selected),'auto_sync':request.auto_sync}
+        from .queued_settings import enqueue
+        return enqueue(request.playlist_keys,{'auto_sync':request.auto_sync})
 
     @app.get('/api/backups')
     def get_backups():

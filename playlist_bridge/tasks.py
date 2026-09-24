@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 INTERVALS = {0: 'Disabled', 1: 'Every hour', 3: 'Every 3 hours', 6: 'Every 6 hours', 12: 'Every 12 hours', 24: 'Daily'}
-DEFINITIONS = [('availability','all','Check Media Availability',1),('sync','all','Sync All',0),('sync','favorites','Sync Favorites',0),
+DEFINITIONS = [('plex_scan','all','Scan Plex Library',1),('lidarr_scan','all','Scan Lidarr Library',1),('reconcile','all','Reconcile Availability',0),('retry_missing','all','Retry Missing Matches',0),('sync','all','Sync All',0),('sync','favorites','Sync Favorites',0),
     ('sync','automatic','Sync Auto Sync Playlists',0),('health','all','Health Check',0),
     ('health','favorites','Health Check Favorites',0),('health','automatic','Health Check Auto Sync',0),
     ('backup','all','Backup',24),('check_updates','all','Check for Updates',6)]
@@ -34,6 +34,7 @@ def setup(store):
     from .jobs import next_run
     with store.repository.connect() as db:
         db.execute('BEGIN IMMEDIATE')
+        db.execute("UPDATE schedules SET enabled=0,name='Previous availability task (replaced)' WHERE action='availability'")
         initialized=db.execute("SELECT value FROM state WHERE namespace='tasks' AND key='initialized'").fetchone()
         if initialized:
             saved=json.loads(initialized[0]); zone=os.environ.get('TZ')
@@ -71,6 +72,7 @@ def payload(task):
 def rows(store):
     result=[]
     for task in store.schedules():
+        if task['action']=='availability':continue
         predicate="(schedule_id=? OR (action=? AND COALESCE(json_extract(payload,'$.scope'),'all')=?))"
         params=(task['id'],task['action'],task['scope'])
         def latest(extra=''):
