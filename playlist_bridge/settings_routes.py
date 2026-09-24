@@ -24,7 +24,7 @@ def register(app):
     @app.get('/api/tasks')
     def list_tasks():
         store=job_store()
-        return {'tasks':tasks.rows(store),**store.repository.load('tasks').get('initialized',{'timezone':'UTC'})}
+        return {'tasks':tasks.rows(store),**store.repository.load('tasks').get('initialized',{'timezone':'UTC'}),'migration_notes':store.repository.load('tasks').get('sync_modes_v3',{}).get('notes',[])}
 
     @app.get('/api/job-history')
     def history(offset:int=Query(0,ge=0),limit:int=Query(50,ge=1,le=100)):
@@ -34,8 +34,7 @@ def register(app):
 
     @app.post('/api/playlists/auto-sync',status_code=202)
     def set_auto_sync(request:AutoSyncRequest):
-        from .queued_settings import enqueue
-        return enqueue(request.playlist_keys,{'auto_sync':request.auto_sync})
+        raise HTTPException(410,'Auto Sync flags have been replaced by playlist Sync mode')
 
     @app.get('/api/backups')
     def get_backups():

@@ -21,6 +21,11 @@ def zone(repo):return repo.load('tasks').get('initialized',{}).get('timezone','U
 def expression(value):return f"{value['minute']} {value['hour']} * * {','.join(map(str,value['days']))}"
 def read(repo,key):
     value=repo.load('playlist_schedules').get(key,Schedule().model_dump())
+    value=dict(value)
+    if value['mode']=='inherit':
+        with repo.connect() as db:
+            task=db.execute("SELECT next_run,enabled FROM schedules WHERE action='sync' AND scope='all'").fetchone()
+        value['next_run']=task[0] if task and task[1] else None
     return {**value,'timezone':zone(repo)}
 
 def due(store):
@@ -40,8 +45,9 @@ def due(store):
                 value.update(timezone=tz,next_run=next_run(expression(value),tz))
             elif value.get('next_run','9999')<=timestamp:
                 active=False
-                for rawjob, in db.execute("SELECT payload FROM jobs WHERE action='sync' AND status IN ('queued','running','cancelling')"):
+                for rawjob,schedule_id in db.execute("SELECT payload,schedule_id FROM jobs WHERE action='sync' AND status IN ('queued','running','cancelling')"):
                     payload=json.loads(rawjob)
+                    if schedule_id and payload.get('scope','all')!='selected':continue
                     if payload.get('scope','all')!='selected' or key in payload.get('playlist_keys',[]):active=True
                 if not active:
                     jid=store.enqueue('sync',{'scope':'selected','playlist_keys':[key],'playlist_schedule':key},db=db)

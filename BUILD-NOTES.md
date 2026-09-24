@@ -1,13 +1,17 @@
-# Playlist Bridge 2.2 Beta 2
+# Playlist Bridge 2.2 Beta 3
 
-Package/image version: `2.2.0-beta.2`. Default port: 8173. Beta channel only; main/latest remain on 2.1.0.
+Package/image version: `2.2.0-beta.3`. Beta channel only; default port 8173. Stable main/latest remain on 2.1.0.
 
-- Persistent full Plex and Lidarr inventories, service-scoped caching, and read-only availability reconciliation.
-- Separate scan and missing-match retry tasks; scan preferences live under their service settings.
-- Requests require a download queue entry for In Progress; added but unimported albums without downloads need attention.
-- Durable, latest-value-wins playlist setting changes avoid lock errors during active jobs.
-- Per-playlist weekly schedules, server timezone, overlap prevention, and unchanged schedules after manual runs.
-- Include/exclude/off filters and Ready to Sync for pending match changes.
-- Conservative matching normalization for standalone ampersands, leading artist “The”, apostrophes, and Unicode accents. Recording-version safeguards and thresholds remain intact.
+- One global Sync Playlists task and one all-playlist, read-only Health Check task.
+- Server schedule, Custom schedule, or Manual only per playlist. Custom runs remain independent when the global task is disabled.
+- Favorites and Auto Sync flags removed from the web interface. Explicit Sync Now, Sync Selected, and Sync Filtered actions retain manual control.
+- Retry Missing Matches marks Ready to Sync and follows the configured schedule instead of creating another automatic sync path.
+- Rename playlists in Bridge and Plex, preserve custom names across syncs, restore source names, and choose a destination name when adding. Duplicate titles remain separate by source and Plex IDs.
+- Plex descriptions retain source text and include one replaceable successful-sync summary with the source link, timestamp, and track counts.
+- Stale Lidarr album IDs are cleared or relinked by release-group identity. Missing albums offer Add Album Again instead of a stale Open/Retry link.
 
-SQLite schema 4 and existing data mounts remain compatible. CLI, port 8173, and Docker architecture are retained. Backups and runtime data are excluded from publishing. No live Plex or Lidarr writes are used in validation.
+Upgrade: custom schedules and disabled playlists are preserved. Use an enabled general sync frequency, otherwise an enabled Auto Sync frequency; favorites-only tasks do not enable the new global task. Retire scoped health tasks and retain an existing all-playlist health frequency. Conflicts appear as migration notes in Tasks. Job history and SQLite schema compatibility are preserved.
+
+No personal paths, backups, credentials, or runtime databases are included in release artifacts. No live Plex/Lidarr writes are used for validation.
+
+Validation: 54 focused backend tests, fresh-database startup and task/API checks, Python compilation, and the production frontend build passed.

@@ -54,8 +54,7 @@ class AvailabilityTests(unittest.TestCase):
             self.assertEqual(config.mapping['a']['Manual|Artist'],'gone')
             self.assertEqual([t['title'] for t in config.missing['a']],['Manual','Ignored'])
             self.assertTrue(config.config['playlists'][1]['ready_to_sync'])
-            queued=store.get(result['sync_job_id'])
-            self.assertEqual(queued['payload']['playlist_keys'],['a'])
+            self.assertIsNone(result['sync_job_id']) # readiness follows configured schedule, never a second automatic path
             self.assertEqual(result['matches_found'],1)
 
     def test_unchanged_tracks_do_not_write(self):

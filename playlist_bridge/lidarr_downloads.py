@@ -45,7 +45,7 @@ def snapshot(repo, cfg, force=False):
     from .lidarr import Client
     from .api import _record_log
     server = server_id(cfg)
-    records = {k:v for k,v in repo.load('lidarr_requests').items() if v.get('server')==server and v.get('lidarr_id')}
+    records = {k:v for k,v in repo.load('lidarr_requests').items() if v.get('server')==server and (v.get('lidarr_id') or v.get('status')=='not_in_lidarr')}
     if not cfg.get('enabled') or not records or (not force and time.monotonic()-_last.get(server,0)<15) or not _lock.acquire(False):
         return
     try:
@@ -60,6 +60,15 @@ def snapshot(repo, cfg, force=False):
             _catalog[server]=cached
         albums=cached[1]
         for key,record in records.items():
+            album=albums.get(record.get('lidarr_id'))
+            if not album or album.get('foreignAlbumId')!=key:
+                candidates=[a for a in albums.values() if a.get('foreignAlbumId')==key]
+                if len(candidates)==1:
+                    record={**record,'lidarr_id':candidates[0]['id'],'status':'added','search_command_id':None}
+                    save(repo,key,lidarr_id=record['lidarr_id'],status='added',search_command_id=None,error='')
+                else:
+                    save(repo,key,lidarr_id=None,lidarr_url='',status='not_in_lidarr',search_command_id=None,downloads=[],download_status='Not found in Lidarr',download_error='',error='',download_checked_at=time.time(),download_poll_error='')
+                    continue
             matches=[describe(q) for q in items if q.get('albumId')==record['lidarr_id']]
             if record.get('status')=='search_pending' and record.get('search_command_id'):
                 cmd=client.call('GET',f"command/{record['search_command_id']}",quiet=True)
@@ -110,7 +119,17 @@ def perform(repo,cfg,album,request):
             if active(db,record.get('job_id')):
                 raise HTTPException(409,'This album already has an active job.')
         client=Client(cfg)
-        actual=client.call('GET',f"album/{record['lidarr_id']}")
+        try:
+            actual=client.call('GET',f"album/{record['lidarr_id']}")
+        except HTTPException as exc:
+            if 'HTTP 404:' not in str(exc.detail):raise
+            candidates=[a for a in client.call('GET','album',quiet=True) if a.get('foreignAlbumId')==album]
+            if len(candidates)!=1:
+                save(repo,album,lidarr_id=None,lidarr_url='',status='not_in_lidarr',search_command_id=None,downloads=[],download_status='Not found in Lidarr',error='',download_error='')
+                raise HTTPException(409,'This album is no longer in Lidarr. Refresh and choose Add Album Again.') from None
+            actual=candidates[0];record={**record,'lidarr_id':actual['id'],'search_command_id':None,'status':'added'}
+            save(repo,album,lidarr_id=actual['id'],search_command_id=None,status='added',error='')
+
         if actual.get('foreignAlbumId')!=album:
             raise HTTPException(409,'Album identity changed. Refresh before acting.')
         items=queue(client)

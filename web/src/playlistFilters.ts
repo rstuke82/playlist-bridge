@@ -2,11 +2,10 @@ import { Playlist } from './api'
 export const FILTER_STORAGE='bridge-playlist-filters'
 export const playlistPredicates:Record<string,(p:Playlist)=>boolean>={
  'Ready to Sync':p=>!!p.ready_to_sync,
- 'Favorites':p=>p.favorite,
  'Needs Attention':p=>!!p.health_attempt?.error||!!p.health&&!p.health.healthy||p.unresolved>0||p.lost>0,
  '100% Matched':p=>!!p.fully_matched,
  'Has Manual Matches':p=>(p.match_counts?.manual||0)>0,
- 'Auto Sync On':p=>p.auto_sync,'Auto Sync Off':p=>!p.auto_sync,
+ 'Server Schedule':p=>!p.schedule||p.schedule.mode==='inherit','Custom Schedule':p=>p.schedule?.mode==='custom','Manual Only':p=>p.schedule?.mode==='disabled',
  'Never Synced':p=>!p.last_synced,
 }
 export function openPlaylistView(filters:string[]=[]){

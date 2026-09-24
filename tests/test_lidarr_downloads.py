@@ -16,7 +16,7 @@ class FakeClient:
         self.calls.append((method,path,kwargs))
         if path=='queue': return {'records':self.items,'totalRecords':len(self.items)}
         if path=='album/7': return {'id':7,'foreignAlbumId':'album'}
-        if path=='album': return [{'id':7,'statistics':{'trackCount':10,'trackFileCount':10}}]
+        if path=='album': return [{'id':7,'foreignAlbumId':'album','statistics':{'trackCount':10,'trackFileCount':10}}]
         if path=='command/8': return {'status':'completed'}
         if path=='command': return {'id':8}
         return None

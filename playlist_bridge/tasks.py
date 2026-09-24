@@ -6,10 +6,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 INTERVALS = {0: 'Disabled', 1: 'Every hour', 3: 'Every 3 hours', 6: 'Every 6 hours', 12: 'Every 12 hours', 24: 'Daily'}
-DEFINITIONS = [('plex_scan','all','Scan Plex Library',1),('lidarr_scan','all','Scan Lidarr Library',1),('reconcile','all','Reconcile Availability',0),('retry_missing','all','Retry Missing Matches',0),('sync','all','Sync All',0),('sync','favorites','Sync Favorites',0),
-    ('sync','automatic','Sync Auto Sync Playlists',0),('health','all','Health Check',0),
-    ('health','favorites','Health Check Favorites',0),('health','automatic','Health Check Auto Sync',0),
-    ('backup','all','Backup',24),('check_updates','all','Check for Updates',6)]
+DEFINITIONS = [('plex_scan','all','Scan Plex Library',1),('lidarr_scan','all','Scan Lidarr Library',1),('reconcile','all','Reconcile Availability',0),('retry_missing','all','Retry Missing Matches',0),('sync','all','Sync Playlists',0),('health','all','Health Check',0),('backup','all','Backup',24),('check_updates','all','Check for Updates',6)]
 
 
 def expression(hours):
@@ -72,7 +69,7 @@ def payload(task):
 def rows(store):
     result=[]
     for task in store.schedules():
-        if task['action']=='availability':continue
+        if task['action']=='availability' or (task['action'] in ('sync','health') and task['scope']!='all'):continue
         predicate="(schedule_id=? OR (action=? AND COALESCE(json_extract(payload,'$.scope'),'all')=?))"
         params=(task['id'],task['action'],task['scope'])
         def latest(extra=''):
@@ -85,4 +82,11 @@ def rows(store):
         result.append({**task,'hours':hours_for(task['cron']) if task['enabled'] else 0,
             'fixed':task['action']=='check_updates','last_job':last,'latest_event':latest(),
             'active_job':active,'duration':duration,'next_run':task['next_run'] if task['enabled'] else None})
+    from .api import _config
+    from .sync_policy import eligible
+    playlists=_config(read_only=True,namespaces=[]).config.get('playlists',[])
+    for task in result:
+        if task['action'] in ('sync','health'):
+            count=len(eligible(store.repository,playlists)) if task['action']=='sync' else len(playlists)
+            task.update(playlist_count=count,excluded_count=len(playlists)-count)
     return result

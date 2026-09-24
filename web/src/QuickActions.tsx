@@ -4,14 +4,12 @@ import { Job } from './api'
 import Modal from './Modal'
 import { Icon } from './Controls'
 const choices=[
- {id:'sync-all',name:'Sync All',action:'sync',payload:{scope:'all'}},
- {id:'sync-favorites',name:'Sync Favorites',action:'sync',payload:{scope:'favorites'}},
- {id:'sync-auto',name:'Sync Auto Sync Playlists',action:'sync',payload:{scope:'automatic'}},
+ {id:'sync-all',name:'Sync All Now',action:'sync',payload:{scope:'all'}},
  {id:'health',name:'Health Check',action:'health',payload:{scope:'all'}},
  {id:'backup',name:'Back Up Now',action:'backup',payload:{}},
  {id:'updates',name:'Check for Updates',action:'check_updates',payload:{}},
 ]
-const defaults=['sync-all','sync-favorites','sync-auto','health']
+const defaults=['sync-all','health','backup','updates']
 function read(){try{const saved=JSON.parse(localStorage.getItem('bridge-quick-actions')||'null');return Array.isArray(saved)?Array.from(new Set(saved.filter((id:string)=>choices.some(c=>c.id===id)))).slice(0,5) as string[]:defaults}catch{return defaults}}
 export default function QuickActions({enqueue}:{enqueue:(action:string,payload:any)=>Promise<Job>}){
  const [selected,setSelected]=useState<string[]>(read),[draft,setDraft]=useState<string[]>([]),[editing,setEditing]=useState(false),[error,setError]=useState(''),[pending,setPending]=useState('')

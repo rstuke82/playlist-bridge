@@ -6672,12 +6672,10 @@ class Syncer:
             print('⚠ No matched tracks; Plex playlist left unchanged.')
 
         jobs.progress("Updating playlist metadata and artwork", check=False)
-        plex.update_playlist_metadata(
-            plex_playlist_id,
-            metadata.get("name", ""),
-            metadata.get("description", ""),
-            metadata.get("image_url", ""),
-        )
+        playlist_entry['source_name']=repair_text(metadata.get('name','') or playlist_entry.get('source_name') or playlist_name)
+        playlist_entry['source_owner']=metadata.get('owner') or metadata.get('curator') or playlist_entry.get('source_owner','')
+        playlist_entry['plex_playlist_name']=playlist_entry.get('custom_name') or playlist_entry['source_name']
+
 
         image_url = metadata.get(
             "image_url",
@@ -6715,8 +6713,11 @@ class Syncer:
                 self.config.repository.record_health_attempt(mapping_key, "Sync verification failed: " + str(exc))
                 print("Could not verify synced playlist:", exc)
         if not operation_error:
-            playlist_entry["last_synced"] = datetime.now().isoformat()
+            playlist_entry["last_synced"] = datetime.now().astimezone().isoformat()
             playlist_entry['ready_to_sync'] = False
+            from .playlist_description import render
+            plex.update_playlist_metadata(plex_playlist_id,playlist_entry['plex_playlist_name'],
+                render(metadata.get('description',''),playlist_entry,len(source_tracks),len(matched_tracks),len(unmatched),len(match_stats.get('ignored_tracks',[]))),metadata.get('image_url',''))
         self._save_source_snapshot(
             mapping_key,
             source_tracks,
@@ -7130,6 +7131,10 @@ class Syncer:
                     or 0
                 )
 
+        if respect_auto_sync and self.config.repository.load('tasks').get('sync_modes_v3'):
+            from .sync_policy import eligible
+            playlists=eligible(self.config.repository,playlists)
+            respect_auto_sync=False
         for playlist in playlists:
             try:
                 if (

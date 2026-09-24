@@ -8,7 +8,6 @@ from . import jobs
 class Preferences(BaseModel):
     refresh_lidarr: bool = True
     retry_missing: bool = True
-    sync_automatic: bool = True
     cache_minutes: Literal[5,15,30,60] = 15
 
 def preferences(repo):
@@ -55,11 +54,7 @@ def execute(payload):
             # Preserve readiness from a previous scan until a successful sync clears it.
         jobs.progress('Saving availability matches')
         config.save()
-        targets=[key for key,p in playlists.items() if p.get('ready_to_sync') and p.get('auto_sync',True) is not False and repo.load('playlist_schedules').get(key,{}).get('mode','inherit')=='inherit']
         job_id=None
-        if prefs.sync_automatic and targets:
-            jobs.progress(f'Queuing one sync for {len(targets)} Auto Sync playlists')
-            job_id=job_store().enqueue('sync',{'scope':'selected','playlist_keys':sorted(targets)})
         # Persist availability per requested source, independently from album import status.
         from .lidarr_requests import save
         from .lidarr_requests import server_id

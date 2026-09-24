@@ -28,15 +28,11 @@ class Beta2(unittest.TestCase):
    library_cache.invalidate(discard_persistent=True)
    with library_cache.reuse():self.assertEqual(library_cache.load(client,fetch)[0]['plex_id'],'fresh')
   self.assertIn('lidarr',self.repo.load('inventory'))
- def test_latest_settings_merge_durable(self):
-  c=SimpleNamespace(config={'playlists':[{'source':'spotify','source_id':'1'}]},save=Mock())
-  with patch('playlist_bridge.api.job_store',return_value=self.store),patch('playlist_bridge.api._config',return_value=c),patch('playlist_bridge.legacy.ProcessLock',return_value=nullcontext()):
-   a=queued_settings.enqueue(['spotify:1'],{'auto_sync':True})
-   b=queued_settings.enqueue(['spotify:1'],{'auto_sync':False,'favorite':True})
-   self.assertEqual(a['job_id'],b['job_id'])
-   queued_settings.execute()
-  self.assertFalse(c.config['playlists'][0]['auto_sync']);self.assertTrue(c.config['playlists'][0]['favorite'])
-  self.assertFalse(self.repo.load('pending_playlist_settings'));c.save.assert_called_once()
+ def test_retired_flags_cannot_be_queued(self):
+  from fastapi import HTTPException
+  c=SimpleNamespace(config={'playlists':[{'source':'spotify','source_id':'1'}]})
+  with patch('playlist_bridge.api._config',return_value=c):
+   with self.assertRaises(HTTPException):queued_settings.enqueue(['spotify:1'],{'auto_sync':True})
  def test_schedule_time_and_overlap(self):
   v=playlist_schedules.Schedule(mode='custom',days=[0],hour=2,minute=0).model_dump()
   nxt=next_run(playlist_schedules.expression(v),'America/Chicago',datetime(2026,9,24,tzinfo=timezone.utc))

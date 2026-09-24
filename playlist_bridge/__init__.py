@@ -1,5 +1,5 @@
 """Playlist Bridge package."""
 
-__version__ = "2.2.0-beta.2"
+__version__ = "2.2.0-beta.3"
 
-__build__ = "20260924.1"
+__build__ = "20260924.2"

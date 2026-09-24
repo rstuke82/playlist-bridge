@@ -77,13 +77,13 @@ class PlaylistAnalyzeRequest(BaseModel):
 class PlaylistAddRequest(BaseModel):
     url: str
     analysis_id: Optional[str] = None
-    auto_sync: bool = True
-    favorite: bool = False
+    name: str = Field(default="",max_length=200)
+    sync_mode: Literal["inherit","disabled"] = "inherit"
 
 
 class PlaylistUpdateRequest(BaseModel):
-    favorite: Optional[bool] = None
-    auto_sync: Optional[bool] = None
+    name: Optional[str] = Field(default=None,max_length=200)
+    restore_source_name: bool = False
 
 
 
@@ -139,6 +139,11 @@ def _playlist_payload(config: Config, playlist: dict) -> dict:
     key = _playlist_key(playlist)
     if not hasattr(config,'_pending_settings_view'):config._pending_settings_view=config.repository.load('pending_playlist_settings')
     if not hasattr(config,'_match_drafts_view'):config._match_drafts_view=config.repository.load('match_drafts')
+    if not hasattr(config,'_schedules_view'):
+        config._schedules_view=config.repository.load('playlist_schedules')
+        with config.repository.connect() as db:
+            server=db.execute("SELECT next_run,enabled FROM schedules WHERE action='sync' AND scope='all'").fetchone()
+        config._server_next=server[0] if server and server[1] else None
     if not hasattr(config,'_inventory_ready_view'):
         from .inventory import current
         plex,_=current(config.repository,config)
@@ -168,6 +173,10 @@ def _playlist_payload(config: Config, playlist: dict) -> dict:
         "last_synced": playlist.get("last_synced"),
         "ready_to_sync": bool(playlist.get("ready_to_sync")) or any((t.get("title"),t.get("artist")) in config._inventory_ready_view.get(key,set()) for t in missing) or any(v.get("playlist_key")==key for v in drafts.values()),
         "settings_pending": bool(pending),
+        "source_name": playlist.get('source_name',''),
+        "source_owner": playlist.get('source_owner',''),
+        "custom_name": playlist.get('custom_name',''),
+        "schedule": ({'mode':'inherit','next_run':config._server_next} if config._schedules_view.get(key,{}).get('mode','inherit')=='inherit' else config._schedules_view[key]),
         "added_at": playlist.get("added_at"),
         "last_match_attempt": playlist.get("last_match_attempt"),
         "saved_matches": len(config.mapping.get(key, {})),
@@ -336,7 +345,7 @@ def health():
     return {
         "status": "ok",
         "version": __version__,
-        "release_name": "Playlist Bridge 2.2 Beta 2",
+        "release_name": "Playlist Bridge 2.2 Beta 3",
         "update": stored_status(config.repository),
         "build": __build__,
         "playlists": len(playlists),
@@ -475,9 +484,13 @@ def add_playlist(request: PlaylistAddRequest):
                     detail="No source tracks matched Plex, so the playlist was not created",
                 )
 
+            source_name=repair_text(metadata.get('name','Unknown Playlist'))
+            destination=request.name.strip() or source_name
+            if any(p.get('plex_playlist_name','').casefold()==destination.casefold() for p in config.config.get('playlists',[])):
+                jobs.output('Another playlist has this name. A separate Plex playlist will be created; rename it in Playlist Details if needed.')
             jobs.progress(f"Creating Plex playlist with {len(matched)} matched tracks; {len(unmatched)} unresolved")
             plex_playlist_id = syncer._build_new_plex_playlist(
-                metadata.get("name", "Unknown Playlist"),
+                destination,
                 metadata.get("description", ""),
                 matched,
                 metadata.get("image_url", ""),
@@ -489,11 +502,14 @@ def add_playlist(request: PlaylistAddRequest):
             playlist = config.add_playlist(
                 url,
                 source_type,
-                metadata.get("name", "Unknown Playlist"),
+                destination,
                 plex_playlist_id,
             )
-            playlist["auto_sync"] = request.auto_sync
-            playlist["favorite"] = request.favorite
+            playlist['source_name']=source_name
+            playlist['custom_name']=request.name.strip()
+            playlist['source_owner']=metadata.get('owner') or metadata.get('curator') or ''
+            from .lidarr import state_put
+            state_put(config.repository,'playlist_schedules',mapping_key,{'mode':request.sync_mode,'days':[0],'hour':2,'minute':0})
             from datetime import datetime
             playlist["added_at"] = datetime.now(timezone.utc).isoformat()
             # Preserve the registration even if Plex accepted only part of the update.
@@ -513,6 +529,8 @@ def add_playlist(request: PlaylistAddRequest):
                 verification_error = f"Could not verify the new Plex playlist: {exc}"
             if not verification_error:
                 playlist["last_synced"] = datetime.now(timezone.utc).isoformat()
+                from .playlist_description import render
+                plex.update_playlist_metadata(str(plex_playlist_id),destination,render(metadata.get('description',''),playlist,len(tracks),len(matched),len(unmatched),len(_stats.get('ignored_tracks',[]))))
             syncer._save_source_snapshot(mapping_key, tracks)
             config.save()
             if not verification_error:
@@ -1106,9 +1124,10 @@ def validated_payload(action, payload):
             if not Config._extract_id(url,source):raise ValueError('Enter a valid Spotify or Apple Music playlist URL')
             if _config(read_only=True,namespaces=[]).find_playlist(url):raise HTTPException(409,'Playlist is already registered')
         return data
-    scope = payload.get('scope', 'all')
+    scope = 'all' if action=='health' else payload.get('scope', 'all')
+    if scope in ('favorites','automatic'):raise ValueError('Use Sync Playlists or select playlists explicitly')
     if scope not in jobs.SCOPES:
-        raise ValueError('Choose all, favorites, automatic or selected playlists')
+        raise ValueError('Choose all or selected playlists')
     keys = payload.get('playlist_keys', [])
     if not isinstance(keys, list) or not all(isinstance(k,str) for k in keys):
         raise ValueError('playlist_keys must be a list of playlist ids')
@@ -1189,7 +1208,7 @@ def cancel_job(job_id: str):
 
 @app.get('/api/schedules')
 def list_schedules():
-    return job_store().schedules()
+    return [s for s in job_store().schedules() if not (s['action'] in ('sync','health') and s['scope']!='all')]
 
 
 @app.post('/api/schedules')
@@ -1227,8 +1246,15 @@ def run_schedule(schedule_id: str):
     schedule=next((s for s in store.schedules() if s['id']==schedule_id),None)
     if not schedule:
         raise HTTPException(404,'Schedule not found')
+    if schedule['action'] in ('sync','health') and schedule['scope']!='all':raise HTTPException(410,'This task has been retired')
     from .tasks import payload
-    return store.get(store.enqueue(schedule['action'],payload(schedule)))
+    data=payload(schedule)
+    if schedule['action']=='sync':
+        from .sync_policy import eligible
+        keys=[_playlist_key(p) for p in eligible(store.repository,_config(read_only=True,namespaces=[]).config.get('playlists',[]))]
+        if not keys:raise HTTPException(409,'No playlists follow the server schedule. Use Sync Now in a playlist or select playlists explicitly.')
+        data={'scope':'selected','playlist_keys':keys}
+    return store.get(store.enqueue(schedule['action'],data))
 
 
 def _health_batch(playlists, config):
@@ -1368,15 +1394,17 @@ def _execute_job(action, payload):
     config=_config(read_only=True, namespaces=[])
     scope=payload.get('scope','all')
     playlists=config.config.get('playlists',[])
-    if scope=='favorites':
-        playlists=[p for p in playlists if p.get('favorite') is True]
-    elif scope=='automatic':
-        playlists=[p for p in playlists if p.get('auto_sync',True) is not False]
+    if action=='health':
+        scope='all'  # Health always covers every registration, regardless of sync mode.
     elif scope=='selected':
         playlists=[p for p in playlists if _playlist_key(p) in payload.get('playlist_keys',[])]
-    if scope=='automatic' and jobs.current() and jobs.current().store.get(jobs.current().id).get('schedule_id'):
-        schedules=config.repository.load('playlist_schedules')
-        playlists=[p for p in playlists if schedules.get(_playlist_key(p),{}).get('mode','inherit')=='inherit']
+    elif scope in ('favorites','automatic'):
+        raise ValueError('Scoped sync tasks have been retired. Use Sync Playlists or select playlists explicitly.')
+    if action=='sync' and payload.get('playlist_schedule'):
+        if config.repository.load('playlist_schedules').get(payload['playlist_schedule'],{}).get('mode')!='custom':return {'summary':'Custom schedule was disabled before this run started.'}
+    if action=='sync' and jobs.current() and jobs.current().store.get(jobs.current().id).get('schedule_id'):
+        from .sync_policy import eligible
+        playlists=eligible(config.repository,playlists)
     if not playlists:
         return {'summary':'No playlists match this job scope.','playlists':[],'total':0}
     ctx = jobs.current()
@@ -1596,7 +1624,7 @@ def remove_selected(request):
                 with config.repository.connect() as db:
                     db.execute('BEGIN IMMEDIATE')
                     db.execute("UPDATE state SET value=? WHERE namespace='runtime' AND key='playlists'",(json.dumps(remaining),))
-                    for namespace in ('mapping','missing','match_metadata','source_snapshots','ignored_tracks','health','health_attempts'):
+                    for namespace in ('mapping','missing','match_metadata','source_snapshots','ignored_tracks','health','health_attempts','playlist_schedules','pending_playlist_settings'):
                         db.execute('DELETE FROM state WHERE namespace=? AND key=?',(namespace,key))
                 config.config['playlists']=remaining
                 results.append({'key':key,'name':playlist.get('plex_playlist_name'),'ok':True,'removed':True,'plex_deleted':bool(plex)})
@@ -1620,7 +1648,7 @@ def remove_playlist(playlist_key: str):
             db.execute('BEGIN IMMEDIATE')
             db.execute("UPDATE state SET value=? WHERE namespace='runtime' AND key='playlists'",
                 (json.dumps([p for p in playlists if _playlist_key(p) != playlist_key]),))
-            for namespace in ('mapping','missing','match_metadata','source_snapshots','ignored_tracks','health','health_attempts'):
+            for namespace in ('mapping','missing','match_metadata','source_snapshots','ignored_tracks','health','health_attempts','playlist_schedules','pending_playlist_settings'):
                 db.execute('DELETE FROM state WHERE namespace=? AND key=?', (namespace,playlist_key))
         return {'deleted': True, 'plex_playlist_untouched': True}
 

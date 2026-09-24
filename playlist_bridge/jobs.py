@@ -133,6 +133,7 @@ class Store:
         from .tasks import expression, DEFINITIONS
         if data['action'] not in {'sync','health','backup','check_updates','availability','plex_scan','lidarr_scan','reconcile','retry_missing'}:
             raise ValueError('Unsupported recurring task')
+        if data['action'] in ('sync','health') and data['scope']!='all':raise ValueError('This scoped task has been retired; use the consolidated task')
         hours = data['hours']
         if data['action']=='check_updates' and hours!=6:
             raise ValueError('Update checks run every six hours')
@@ -154,6 +155,18 @@ class Store:
             for sid,action,scope,cron,zone in db.execute('SELECT id,action,scope,cron,timezone FROM schedules WHERE enabled=1 AND next_run<=?', (timestamp,)).fetchall():
                 active = db.execute("SELECT 1 FROM jobs WHERE action=? AND COALESCE(json_extract(payload,'$.scope'),'all')=? AND status IN ('queued','running','cancelling')", (action,scope)).fetchone()
                 data=payload({'action':action,'scope':scope})
+                if action=='sync':
+                    from .api import _config,_playlist_key
+                    from .sync_policy import eligible
+                    keys=[_playlist_key(p) for p in eligible(self.repository,_config(read_only=True,namespaces=[]).config.get('playlists',[]))]
+                    busy=set()
+                    for encoded, in db.execute("SELECT payload FROM jobs WHERE action='sync' AND status IN ('queued','running','cancelling')"):
+                        other=json.loads(encoded)
+                        busy.update(other.get('playlist_keys',[]) if other.get('scope')=='selected' else keys)
+                    keys=[key for key in keys if key not in busy]
+                    data={'scope':'selected','playlist_keys':keys}
+                    active=active or not keys
+
                 if not active:
                     self.enqueue(action, data, sid, db)
                 else:
@@ -197,6 +210,8 @@ class Manager:
             db.execute("UPDATE jobs SET status='interrupted',error='Server restarted during execution. Review the playlist before running again.',finished_at=? WHERE status IN ('running','cancelling')", (now(),))
         from .tasks import setup
         setup(self.store)
+        from .sync_policy import migrate
+        migrate(self.store)
         self.thread = threading.Thread(target=self.loop, daemon=True, name='playlist-job-scheduler')
         self.thread.start()
 

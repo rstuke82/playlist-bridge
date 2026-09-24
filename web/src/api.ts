@@ -5,8 +5,7 @@ export type Playlist = {
   name: string
   source: string
   source_url: string
-  favorite: boolean
-  settings_pending?: boolean; ready_to_sync?: boolean; auto_sync: boolean
+  settings_pending?: boolean; ready_to_sync?: boolean; schedule?: {mode:string;next_run?:string}; source_name?:string; source_owner?:string; custom_name?:string
   added_at?: string | null
   last_synced?: string | null
   health?: PlaylistHealth
@@ -163,7 +162,7 @@ export const api = {
   health: () => request<any>('/api/health'),
   playlists: () => request<Playlist[]>('/api/playlists'),
   playlistHealth: (key: string) => request<PlaylistHealth>(`/api/playlists/${encodeURIComponent(key)}/health`),
-  updatePlaylist: (key: string, body: Partial<Pick<Playlist, 'favorite' | 'auto_sync'>>) =>
+  updatePlaylist: (key: string, body: {name?:string;restore_source_name?:boolean}) =>
     request<Playlist>(`/api/playlists/${encodeURIComponent(key)}`, {
       method: 'PATCH', body: JSON.stringify(body),
     }),
