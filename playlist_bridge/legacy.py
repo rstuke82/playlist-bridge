@@ -890,16 +890,20 @@ class Config:
 
     def __init__(self, *, read_only=False, namespaces=None):
         from .storage import get_repository, read_json
-        self.repository = get_repository(CONFIG_DIR)
+        from .accounts import personal_repository, root_repository, actor
+        self.repository = personal_repository()
+        self._account = actor()
         self.read_only = read_only
         self.config = read_json(CONFIG_FILE)
         self.config.update(self.repository.load("runtime"))
+        if self._account and not self._account.get("admin"):
+            self.config["plex"] = {**self.config.get("plex", {}), "token": self._account["plex_token"]}
         if not isinstance(self.config.get("plex"), dict):
             self.config["plex"] = {}
         self.config.setdefault("playlists", [])
         names = ("mapping", "missing", "match_metadata", "source_snapshots", "ignored_tracks", "artist_aliases")
         for name in (names if not read_only or namespaces is None else namespaces):
-            setattr(self, name, self.repository.load(name))
+            setattr(self, name, (root_repository() if name=="artist_aliases" else self.repository).load(name))
         self._baseline = None if read_only else copy.deepcopy(self._buckets())
         if "artist_aliases" in self.__dict__:
             Matcher.set_artist_aliases(self.artist_aliases)
@@ -954,7 +958,7 @@ class Config:
         self.repository.save(buckets, self._baseline)
         self._baseline = copy.deepcopy(buckets)
         startup = {k: v for k, v in self.config.items() if k in STARTUP_KEYS}
-        if read_json(CONFIG_FILE) != startup:
+        if not (self._account and not self._account.get("admin")) and read_json(CONFIG_FILE) != startup:
             self.repository.save_startup(startup)
 
     @staticmethod
@@ -2656,6 +2660,7 @@ class PlexAPI:
                         t.get("parentTitle", "")
                     ),
                     "plex_id": str(t.get("ratingKey")),
+                    "plex_album_id": str(t.get("parentRatingKey") or ""),
                     "key": t.get("key"),
                 }
                 for t in tracks
@@ -5555,6 +5560,7 @@ class Syncer:
                     "music_library_name",
                     "",
                 ),
+                strict_errors=True,
             )
 
         return self.plex
@@ -6498,6 +6504,31 @@ class Syncer:
             api = AppleMusicAPI()
 
         plex = self._get_plex()
+
+        # Plex destination preflight guard (Beta 4).
+        if not dry_run:
+            from . import jobs
+            jobs.progress("Checking destination Plex playlist")
+            try:
+                response = requests.get(
+                    f"{plex.base_url}/playlists/{plex_playlist_id}",
+                    headers=plex.headers, timeout=(5, 10),
+                )
+                if response.status_code == 404:
+                    raise ValueError(
+                        f"Plex playlist {plex_playlist_id} is missing or inaccessible (HTTP 404). "
+                        "Sync stopped before matching or changing Plex. Check the configured "
+                        "Plex account and destination playlist."
+                    )
+                response.raise_for_status()
+                metadata = response.json().get("MediaContainer", {}).get("Metadata", [])
+                if not metadata or str(metadata[0].get("ratingKey", "")) != str(plex_playlist_id):
+                    raise ValueError("Plex did not confirm the destination playlist. Sync stopped safely.")
+            except requests.RequestException as exc:
+                raise ValueError(
+                    f"Could not verify Plex playlist {plex_playlist_id} ({type(exc).__name__}). "
+                    "Check Plex connectivity and permissions; no playlist changes were attempted."
+                ) from None
 
         if dry_run:
             print(

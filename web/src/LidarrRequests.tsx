@@ -1,3 +1,4 @@
+import {getAccount} from './Auth'
 import {filterMatches,FilterMenu,FilterChips,Icon} from './Controls'
 import {usePageState} from './Navigation'
 import ErrorNotice from './ErrorNotice'
@@ -14,6 +15,7 @@ const listeners=new Set<()=>void>()
 const notify=()=>listeners.forEach(f=>f())
 export const useLidarrRequests=()=>useSyncExternalStore(f=>{listeners.add(f);return()=>{listeners.delete(f)}},()=>rows)
 export function refreshLidarrRequests(){
+ if(getAccount()&&!getAccount().admin)return Promise.resolve()
  if(inflight)return inflight
  const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),90000)
  inflight=fetch('/api/lidarr/requests',{signal:controller.signal}).then(async r=>{if(!r.ok)throw new Error('Could not load Lidarr request status');rows=await r.json();loaded=true;loadError='';notify()}).catch(e=>{loadError=e.name==='AbortError'?'Lidarr status refresh timed out':e.message;rows=[...rows];notify()}).finally(()=>{clearTimeout(timeout);inflight=null})

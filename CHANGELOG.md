@@ -1,3 +1,9 @@
+# Playlist Bridge changelog
+
+## 3.0 Beta 1 — 2026-09-25
+
+Plex account sign-in, isolated personal playlists and jobs, administrator-controlled shared scheduling and album requests, Last.fm Discover and top-album review, and an admin Plex/Lidarr Library comparison. Includes the pending structured Lidarr search, MusicBrainz year/review-link and missing Plex destination safeguards. See BUILD-NOTES.md for upgrade requirements and beta limitations.
+
 # 2.2 Beta 3
 
 Package/image version: `2.2.0-beta.3`. Beta channel only; default port 8173. Stable main/latest remain on 2.1.0.

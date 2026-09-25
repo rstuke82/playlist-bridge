@@ -11,6 +11,8 @@ class Preferences(BaseModel):
     cache_minutes: Literal[5,15,30,60] = 15
 
 def preferences(repo):
+    from .accounts import actor, root_repository
+    if actor() and not actor().get("admin"):repo=root_repository()
     return Preferences(**repo.load('availability_settings').get('preferences',{}))
 
 def execute(payload):

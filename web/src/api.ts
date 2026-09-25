@@ -81,7 +81,7 @@ export type Candidate = {
 const pending = new Map<string, Promise<any>>()
 async function send<T>(path:string, init?:RequestInit):Promise<T> {
   const controller = new AbortController()
-  const timer = setTimeout(()=>controller.abort(), path.includes('/detail?') ? 65000 : 30000)
+  const timer = setTimeout(()=>controller.abort(), path.startsWith('/api/discover')||path.startsWith('/api/requests-user/') ? 120000 : path.includes('/detail?') ? 65000 : 30000)
   try {
     const response = await fetch(path, {...init, signal:controller.signal,
       headers:{'Content-Type':'application/json', ...init?.headers}})
@@ -93,11 +93,11 @@ async function send<T>(path:string, init?:RequestInit):Promise<T> {
     if (init?.method && init.method !== 'GET') window.dispatchEvent(new Event('jobs-refresh'))
     return result
   } catch (error:any) {
-    if (error.name === 'AbortError') throw new Error('Request timed out. Check source/Plex connectivity and retry.')
+    if (error.name === 'AbortError') throw new Error(path==='/api/requests-user/add'?'Request timed out. Check Requests before trying again.':'Request timed out. Check service connectivity and retry.')
     throw error
   } finally { clearTimeout(timer) }
 }
-function request<T>(path:string, init?:RequestInit):Promise<T> {
+export function request<T>(path:string, init?:RequestInit):Promise<T> {
   if (init?.method && init.method !== 'GET') return send<T>(path,init)
   // Share in-flight reads, including React StrictMode's setup/cleanup/setup cycle.
   const existing = pending.get(path)

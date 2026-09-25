@@ -63,7 +63,7 @@ app = FastAPI(
 )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -141,7 +141,8 @@ def _playlist_payload(config: Config, playlist: dict) -> dict:
     if not hasattr(config,'_match_drafts_view'):config._match_drafts_view=config.repository.load('match_drafts')
     if not hasattr(config,'_schedules_view'):
         config._schedules_view=config.repository.load('playlist_schedules')
-        with config.repository.connect() as db:
+        from .accounts import root_repository
+        with root_repository().connect() as db:
             server=db.execute("SELECT next_run,enabled FROM schedules WHERE action='sync' AND scope='all'").fetchone()
         config._server_next=server[0] if server and server[1] else None
     if not hasattr(config,'_inventory_ready_view'):
@@ -345,7 +346,7 @@ def health():
     return {
         "status": "ok",
         "version": __version__,
-        "release_name": "Playlist Bridge 2.2 Beta 3",
+        "release_name": "Playlist Bridge 3.0 Beta 1",
         "update": stored_status(config.repository),
         "build": __build__,
         "playlists": len(playlists),
@@ -753,12 +754,16 @@ _detail_progress_lock = threading.Lock()
 
 @app.get('/api/detail-progress/{progress_id}')
 def detail_progress(progress_id: str):
+    from .accounts import owner_key
+    progress_id=owner_key()+':'+progress_id
     with _detail_progress_lock:
         return _detail_progress.get(progress_id, {'events': [], 'percent': 0})
 
 
 @app.get("/api/playlists/{playlist_key:path}/detail")
 async def playlist_detail_route(playlist_key: str, progress_id: str = Query(default='', max_length=100)):
+    from .accounts import owner_key
+    if progress_id:progress_id=owner_key()+':'+progress_id
     def report(message, percent):
         if not progress_id:
             return
@@ -779,7 +784,8 @@ async def playlist_detail_route(playlist_key: str, progress_id: str = Query(defa
     if not _detail_slots.acquire(blocking=False):
         raise HTTPException(503, "Playlist details are busy. Please retry shortly.")
     try:
-        future = _detail_pool.submit(playlist_detail, playlist_key, report)
+        from contextvars import copy_context
+        future = _detail_pool.submit(copy_context().run, playlist_detail, playlist_key, report)
     except BaseException:
         _detail_slots.release()
         raise
@@ -1101,10 +1107,15 @@ class ScheduleRequest(BaseModel):
 def job_store():
     from .storage import get_repository
     from .legacy import CONFIG_DIR
-    return jobs.Store(get_repository(CONFIG_DIR))
+    from .accounts import personal_repository
+    return jobs.Store(personal_repository())
 
 
 def validated_payload(action, payload):
+    from .accounts import actor
+    user=actor()
+    if user and not user.get("admin") and action not in ("sync","add","analyze","remove","track_match","fix_match","ignore_batch"):
+        raise HTTPException(403,"Administrator access required for this job")
     if action == 'ignore_batch':
         batch=BulkIgnoreRequest(**payload)
         if any(not t.universal and not t.playlist_keys for t in batch.tracks):
@@ -1119,6 +1130,7 @@ def validated_payload(action, payload):
     if action in ('add','analyze','fix_match'):
         model = {'add':PlaylistAddRequest,'analyze':PlaylistAnalyzeRequest,'fix_match':MissingMatchRequest}[action]
         data=model(**payload).model_dump()
+        if action=='add' and user and not user.get('admin'):data['sync_mode']='inherit'
         if action=='add':
             source,url,_source_api=_source_for_url(data['url'])
             if not Config._extract_id(url,source):raise ValueError('Enter a valid Spotify or Apple Music playlist URL')
@@ -1252,8 +1264,10 @@ def run_schedule(schedule_id: str):
     if schedule['action']=='sync':
         from .sync_policy import eligible
         keys=[_playlist_key(p) for p in eligible(store.repository,_config(read_only=True,namespaces=[]).config.get('playlists',[]))]
-        if not keys:raise HTTPException(409,'No playlists follow the server schedule. Use Sync Now in a playlist or select playlists explicitly.')
+        # The server task may still have work in other accounts.
         data={'scope':'selected','playlist_keys':keys}
+    from .accounts import scheduled_members
+    scheduled_members(schedule['action'],schedule_id)
     return store.get(store.enqueue(schedule['action'],data))
 
 
@@ -1293,7 +1307,8 @@ def _health_batch(playlists, config):
                 playlist = next(remaining, None)
                 if playlist is None:
                     break
-                pending.add(pool.submit(perform, playlist))
+                from contextvars import copy_context
+                pending.add(pool.submit(copy_context().run, perform, playlist))
             if not pending:
                 break
             done, pending = wait(pending, return_when=FIRST_COMPLETED)
@@ -1313,6 +1328,9 @@ def _health_batch(playlists, config):
 
 
 def execute_job(action, payload):
+    if action=="recreate":
+        from .recreate import execute
+        return execute(payload)
     if action in ('plex_scan','lidarr_scan'):
         from .inventory import scan
         return scan(action.split('_')[0])
@@ -1698,6 +1716,21 @@ from .inventory import register as register_inventory
 register_inventory(app)
 from .playlist_schedules import register as register_playlist_schedules
 register_playlist_schedules(app)
+
+from .library import register as register_library
+register_library(app)
+
+from .shared_playlists import register as register_shared
+register_shared(app)
+
+from .recreate import register as register_recreate
+register_recreate(app)
+
+from .discover import register as register_discover
+register_discover(app)
+
+from .accounts import install as install_accounts
+install_accounts(app)
 
 WEB_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"
 if WEB_DIST.exists():

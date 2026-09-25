@@ -130,7 +130,8 @@ def register(app):
         from .api import _config
         with track_routes._lock:
             cached = copy.deepcopy(track_routes._cache.get(request.preview_id))
-        if not cached or cached['expires'] < time.monotonic():
+        from .accounts import owner_key
+        if not cached or cached.get('owner')!=owner_key() or cached['expires'] < time.monotonic():
             raise HTTPException(409, 'The preview expired. Make a new preview.')
         config = _config(read_only=True)
         rows = [m for m in track_routes.inspect(config, cached['track'])['memberships'] if m['key'] in cached['keys']]

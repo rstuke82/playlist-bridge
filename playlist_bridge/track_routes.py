@@ -102,7 +102,8 @@ def preview(request):
         for old in list(_cache):
             if _cache[old]['expires']<time.monotonic():del _cache[old]
         while len(_cache)>=20:del _cache[next(iter(_cache))]
-        _cache[key]={'expires':time.monotonic()+600,'public':public,'rows':rows,'track':track,
+        from .accounts import owner_key
+        _cache[key]={'owner':owner_key(),'expires':time.monotonic()+600,'public':public,'rows':rows,'track':track,
                      'fingerprint':fingerprint(config,rows),'keys':request.playlist_keys}
     return public
 
@@ -113,7 +114,8 @@ def apply_preview(preview_id):
     from . import jobs
     with ProcessLock():
         with _lock:cached=copy.deepcopy(_cache.get(preview_id))
-        if not cached or cached['expires']<time.monotonic():raise ValueError('Match preview expired. Review a new preview.')
+        from .accounts import owner_key
+        if not cached or cached.get('owner')!=owner_key() or cached['expires']<time.monotonic():raise ValueError('Match preview expired. Review a new preview.')
         config=_config();syncer=Syncer(config)
         rows=[m for m in inspect(config,cached['track'])['memberships'] if m['key'] in cached['keys']]
         if fingerprint(config,rows)!=cached['fingerprint']:raise ValueError('Track state changed after preview. Reload and preview again.')

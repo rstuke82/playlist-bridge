@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from croniter import croniter
 
-ACTIONS = {'plex_scan','lidarr_scan','reconcile','retry_missing','playlist_settings','availability','sync', 'health', 'analyze', 'add', 'fix_match', 'track_match', 'remove', 'backup', 'check_updates', 'restore_backup', 'lidarr_add', 'lidarr_search', 'match_batch', 'ignore', 'ignore_batch'}
+ACTIONS = {'recreate','plex_scan','lidarr_scan','reconcile','retry_missing','playlist_settings','availability','sync', 'health', 'analyze', 'add', 'fix_match', 'track_match', 'remove', 'backup', 'check_updates', 'restore_backup', 'lidarr_add', 'lidarr_search', 'match_batch', 'ignore', 'ignore_batch'}
 SCOPES = {'all', 'favorites', 'automatic', 'selected'}
 TERMINAL = {'completed', 'failed', 'cancelled', 'interrupted'}
 _local = threading.local()
@@ -153,6 +153,8 @@ class Store:
             db.execute('BEGIN IMMEDIATE')
             if db.execute("SELECT 1 FROM jobs WHERE action='restore_backup' AND status IN ('running','cancelling')").fetchone():return
             for sid,action,scope,cron,zone in db.execute('SELECT id,action,scope,cron,timezone FROM schedules WHERE enabled=1 AND next_run<=?', (timestamp,)).fetchall():
+                from .accounts import scheduled_members
+                scheduled_members(action,sid)
                 active = db.execute("SELECT 1 FROM jobs WHERE action=? AND COALESCE(json_extract(payload,'$.scope'),'all')=? AND status IN ('queued','running','cancelling')", (action,scope)).fetchone()
                 data=payload({'action':action,'scope':scope})
                 if action=='sync':
@@ -208,6 +210,10 @@ class Manager:
             return  # Another web process owns the shared queue.
         with self.store.repository.connect() as db:
             db.execute("UPDATE jobs SET status='interrupted',error='Server restarted during execution. Review the playlist before running again.',finished_at=? WHERE status IN ('running','cancelling')", (now(),))
+        from .accounts import member_stores
+        for _user, member_store in member_stores():
+            with member_store.repository.connect() as db:
+                db.execute("UPDATE jobs SET status='interrupted',error='Server restarted; review before retrying',finished_at=? WHERE status IN ('running','cancelling')",(now(),))
         from .tasks import setup
         setup(self.store)
         from .sync_policy import migrate
@@ -222,12 +228,24 @@ class Manager:
                     self.store.due()
                     from .playlist_schedules import due as playlist_due
                     playlist_due(self.store)
+                    from .accounts import member_stores, as_user
+                    member_candidates=list(member_stores())
+                    for member, member_store in member_candidates:
+                        with as_user(member):
+                            playlist_due(member_store)
+                            if member_store.repository.load("pending_playlist_settings"):
+                                member_store.enqueue("playlist_settings",{})
                     if self.store.repository.load('pending_playlist_settings'):
                         self.store.enqueue('playlist_settings',{})
                     if not self.worker or not self.worker.is_alive():
-                        job = self.store.claim()
+                        candidates=[(None,self.store),*member_candidates]
+                        offset=getattr(self,"_turn",0)%len(candidates)
+                        for user,store in candidates[offset:]+candidates[:offset]:
+                            job=store.claim()
+                            if job:break
+                        self._turn=offset+1
                         if job:
-                            self.worker = threading.Thread(target=self.execute,args=(job,),daemon=True,name='playlist-job-worker')
+                            self.worker = threading.Thread(target=self.execute,args=(job,store,user),daemon=True,name='playlist-job-worker')
                             self.worker.start()
                 except Exception as exc:
                     self.store.repository.add_log('ERROR','jobs',f'Queue error: {type(exc).__name__}')
@@ -243,10 +261,15 @@ class Manager:
         if self.thread:
             self.thread.join(timeout=20)
 
-    def execute(self, job):
+    def execute(self, job, store=None, user=None):
+        from .accounts import as_user
+        with as_user(user):
+            return self._execute_account(job,store or self.store)
+
+    def _execute_account(self, job, store):
         from . import api
         from .diagnostics import redact
-        ctx = Context(self.store, job, self.stop)
+        ctx = Context(store, job, self.stop)
         _local.context = ctx
         _local.target = None
         result = None
@@ -255,18 +278,18 @@ class Manager:
             api._record_log('INFO',job['action'],f"Job started: {job['id']}")
             result = api.execute_job(job['action'], job['payload'])
             ctx.checkpoint()
-            self.store.update(job['id'],status='completed',progress=completion_message(result),result=result,finished_at=now())
+            store.update(job['id'],status='completed',progress=completion_message(result),result=result,finished_at=now())
             api._record_log('INFO',job['action'],f"Job completed: {job['id']}")
         except Cancelled:
-            self.store.update(job['id'],status='cancelled',progress='Cancelled at a safe checkpoint; completed changes are retained',finished_at=now(),**({'result':result} if result is not None else {}))
+            store.update(job['id'],status='cancelled',progress='Cancelled at a safe checkpoint; completed changes are retained',finished_at=now(),**({'result':result} if result is not None else {}))
             api._record_log('INFO',job['action'],f"Job cancelled: {job['id']}")
         except Exception as exc:
             message = redact(getattr(exc,'detail',str(exc)),api._config())
             if isinstance(exc,RuntimeError) and 'Another Playlist Bridge process is already running' in str(exc):
-                self.store.update(job['id'],status='queued',progress='Waiting for another operation to finish',error=None,started_at=None)
+                store.update(job['id'],status='queued',progress='Waiting for another operation to finish',error=None,started_at=None)
                 self.stop.wait(2)
                 return
-            self.store.update(job['id'],status='failed',error=message,progress='Failed — ' + message,finished_at=now())
+            store.update(job['id'],status='failed',error=message,progress='Failed — ' + message,finished_at=now())
             api._record_log('ERROR',job['action'],f'{type(exc).__name__}: {message}')
             import traceback
             api._record_log('DEBUG',job['action'],traceback.format_exc())

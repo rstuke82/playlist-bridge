@@ -28,7 +28,7 @@ def scan(service):
         client=_health_plex(_config(read_only=True,namespaces=[]));key=identity(client)
         rows=client.search_library('') # no cache scope: always fresh and strict
         jobs.progress(f'Saving {len(rows)} Plex tracks')
-        result=publish(repo,service,key,rows,started)
+        result=publish(repo,service,key,rows,started,machine_identifier=client.machine_identifier)
         from .library_cache import invalidate
         invalidate()
     else:
@@ -45,9 +45,25 @@ def scan(service):
         result=publish(repo,service,key,rows,started,artists=[{'id':a.get('id'),'name':a.get('artistName'),'mbid':a.get('foreignArtistId'),'monitored':a.get('monitored')} for a in artists],queue=downloads)
         refresh_requests(repo,cfg,force=True)
     reconciliation=reconcile()
+    from .accounts import member_stores,as_user,actor
+    if not actor() or actor().get('admin'):
+        for user,member_store in member_stores():
+            with as_user(user):
+                if service=='plex':
+                    # Shared accounts can have narrower music visibility. Never
+                    # reuse the owner's inventory as proof of user availability.
+                    try:
+                        member_client=_health_plex(_config(read_only=True,namespaces=[]))
+                        member_rows=member_client.search_library('')
+                        publish(member_store.repository,'plex',identity(member_client),member_rows,time.monotonic(),machine_identifier=member_client.machine_identifier)
+                    except Exception:
+                        jobs.output('A user library scan failed; its previous snapshot was retained.')
+                        continue
+                reconcile()
     return {'summary':f"Scanned {result['count']} {service} items; inventories linked to Bridge tracks.",'count':result['count'],'seconds':result['seconds'],'reconciliation':reconciliation}
 
 def current(repo,config):
+    from .accounts import actor, as_user, root_repository
     from .api import _health_plex
     from .lidarr import config as lidarr_config
     from .lidarr_requests import server_id
@@ -55,7 +71,8 @@ def current(repo,config):
     settings=config.config.get('plex',{})
     client=SimpleNamespace(base_url=settings.get('url','').rstrip('/'),music_library_key=str(settings.get('music_library_key','')).strip(),headers={'X-Plex-Token':settings.get('token',''),'Accept':'application/json'})
     plex=snapshot(repo,'plex',identity(client))
-    return plex,snapshot(repo,'lidarr',server_id(lidarr_config(repo)))
+    shared=root_repository() if actor() and not actor().get('admin') else repo
+    return plex,snapshot(shared,'lidarr',server_id(lidarr_config(shared)))
 
 def reconcile():
     """Link saved/manual selections or unique exact identities; never mutate matches."""

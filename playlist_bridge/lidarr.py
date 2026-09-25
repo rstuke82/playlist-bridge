@@ -239,7 +239,7 @@ def musicbrainz_search(repo, cfg, request, test=False):
         entity = 'release-group' if known else 'recording'
         term = f'releasegroup:{mb_quote(album)}' if known else f'recording:{mb_quote(request.title)}'
         query = term + f' AND artist:{mb_quote(request.artist)}'
-    key = hashlib.sha256((entity + query).encode()).hexdigest()
+    key = hashlib.sha256((('dates-v2:' if entity == 'recording' else '') + entity + query).encode()).hexdigest()
     # A bounded shared lock also prevents duplicate identical requests.
     if not _mb_lock.acquire(timeout=2):
         raise HTTPException(429, 'Another metadata lookup is running. Try again shortly.')
@@ -273,13 +273,16 @@ def musicbrainz_search(repo, cfg, request, test=False):
         rows = {}
         records = data.get('release-groups', []) if known else data.get('recordings', [])
         for record in records:
-            groups = [record] if known else [r.get('release-group', {}) for r in record.get('releases', [])]
+            groups = [(record, record.get('first-release-date', ''))] if known else [(r.get('release-group', {}), r.get('date', '')) for r in record.get('releases', [])]
             credit = ''.join(c.get('name', c.get('artist', {}).get('name', '')) + c.get('joinphrase', '') for c in record.get('artist-credit', []) if isinstance(c, dict))
-            for group in groups:
+            for group, release_date in groups:
                 if not group.get('id'):
                     continue
+                year = (group.get('first-release-date') or release_date or '')[:4]
+                previous = rows.get(group['id'], {}).get('year', '')
+                if previous and (not year or previous < year):year = previous
                 rows[group['id']] = {'album_id': group['id'], 'title': group.get('title', ''),
-                    'artist': credit, 'year': group.get('first-release-date', '')[:4],
+                    'artist': credit, 'year': year,
                     'type': group.get('primary-type', ''), 'secondary_types': group.get('secondary-types', []),
                     'exists': None}
         result = list(rows.values())
@@ -550,7 +553,7 @@ def register(app):
         cfg = enabled(repo)
         if request.provider == 'musicbrainz':
             return musicbrainz_search(repo, cfg, request)
-        term = request.query.strip() or request.album.strip()
+        term = (' - '.join(v.strip() for v in (request.artist, request.album or request.title) if v.strip()) if request.fields_search else request.query.strip() or request.album.strip())
         if not term or term.casefold() == 'n/a':
             raise HTTPException(422, 'Enter an album name, or use Find albums for this track with MusicBrainz.')
         rows = Client(cfg).call('GET', 'album/lookup', params={'term': term})

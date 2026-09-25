@@ -1,17 +1,20 @@
-# Playlist Bridge 2.2 Beta 3
+# Playlist Bridge 3.0 Beta 1
 
-Package/image version: `2.2.0-beta.3`. Beta channel only; default port 8173. Stable main/latest remain on 2.1.0.
+Package/image version: `3.0.0-beta.1`. Beta channel only. Default port: 8173.
 
-- One global Sync Playlists task and one all-playlist, read-only Health Check task.
-- Server schedule, Custom schedule, or Manual only per playlist. Custom runs remain independent when the global task is disabled.
-- Favorites and Auto Sync flags removed from the web interface. Explicit Sync Now, Sync Selected, and Sync Filtered actions retain manual control.
-- Retry Missing Matches marks Ready to Sync and follows the configured schedule instead of creating another automatic sync path.
-- Rename playlists in Bridge and Plex, preserve custom names across syncs, restore source names, and choose a destination name when adding. Duplicate titles remain separate by source and Plex IDs.
-- Plex descriptions retain source text and include one replaceable successful-sync summary with the source link, timestamp, and track counts.
-- Stale Lidarr album IDs are cleared or relinked by release-group identity. Missing albums offer Add Album Again instead of a stale Open/Retry link.
+- Plex PIN sign-in with server-owner bootstrap, individual-account access checks, opaque sessions and request forgery protection. Managed users are excluded.
+- Separate SQLite playlist, matching, blocklist and job state for each account. Existing 2.x data stays with the server owner. Server tasks include member accounts and use their Plex tokens.
+- Last.fm Discover, album search and top-album review, with shared metadata caching and saved-library availability checks. Add the server API key in Settings.
+- Admin-controlled users, request permissions and opt-in shared playlist sources. Ordinary requests use the server's Lidarr defaults; service settings and credentials are not exposed.
+- Admin Library comparison with scan times, album identity status, independent track counts and Plex/Lidarr links. Plex-only albums need attention once both scans exist.
+- Separate artist, album and song fields for Lidarr lookup; selected-album MusicBrainz review link; recording search falls back to release dates when release-group dates are absent.
+- Missing Plex destination preflight and strict read failures prevent destructive writes after a failed read. Explicit replacement preserves registration state and requires a confirmed missing destination and an available saved match.
+- Backups include personal databases; restored sessions are invalidated and unfinished restored jobs are interrupted.
 
-Upgrade: custom schedules and disabled playlists are preserved. Use an enabled general sync frequency, otherwise an enabled Auto Sync frequency; favorites-only tasks do not enable the new global task. Retire scoped health tasks and retain an existing all-playlist health frequency. Conflicts appear as migration notes in Tasks. Job history and SQLite schema compatibility are preserved.
+Upgrade: keep the existing data mount and configured Plex connection. The server owner signs in first. Last.fm requires an administrator-supplied API key. Personal user stores are under the same data mount. Back up the whole volume before upgrading or reverting to a 2.x image.
 
-No personal paths, backups, credentials, or runtime databases are included in release artifacts. No live Plex/Lidarr writes are used for validation.
+Scope: Last.fm review is album-based in this beta. Album identity and count checks are not proof of identical recordings. File deduplication/conversion is not implemented. External sign-in and services are mocked during automated validation and require a live smoke check on your server.
 
-Validation: 54 focused backend tests, fresh-database startup and task/API checks, Python compilation, and the production frontend build passed.
+No backup folders, runtime databases, credentials or personal paths are included in published source/image/archive artifacts.
+
+Validation: 69 focused backend tests cover account isolation, role/CSRF enforcement, cross-account job access, scheduled ownership, backups, year fallback and existing sync/Lidarr behavior. Production frontend build, Docker startup/authentication checks and admin/member browser smoke checks used temporary data. No live Plex/Lidarr writes were performed.

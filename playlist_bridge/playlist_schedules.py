@@ -17,13 +17,16 @@ class Schedule(BaseModel):
         if any(d<0 or d>6 for d in self.days) or (self.mode=='custom' and not self.days):raise ValueError('Select at least one valid day')
         self.days=sorted(set(self.days));return self
 
-def zone(repo):return repo.load('tasks').get('initialized',{}).get('timezone','UTC')
+def zone(repo):
+    from .accounts import root_repository
+    return root_repository().load('tasks').get('initialized',{}).get('timezone','UTC')
 def expression(value):return f"{value['minute']} {value['hour']} * * {','.join(map(str,value['days']))}"
 def read(repo,key):
     value=repo.load('playlist_schedules').get(key,Schedule().model_dump())
     value=dict(value)
     if value['mode']=='inherit':
-        with repo.connect() as db:
+        from .accounts import root_repository
+        with root_repository().connect() as db:
             task=db.execute("SELECT next_run,enabled FROM schedules WHERE action='sync' AND scope='all'").fetchone()
         value['next_run']=task[0] if task and task[1] else None
     return {**value,'timezone':zone(repo)}

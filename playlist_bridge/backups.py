@@ -1,5 +1,6 @@
 """Consistent SQLite snapshots and transactional restore of app-owned state."""
 import json
+import re
 import os
 import sqlite3
 import tempfile
@@ -7,6 +8,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from zipfile import ZipFile, ZIP_DEFLATED
+from contextlib import closing
 from . import __version__
 
 TABLES=('state','health_history','migration_backups','application_logs','jobs','schedules','job_events')
@@ -44,7 +46,7 @@ def create(repo,kind='manual'):
     dest=directory(repo)/name
     with tempfile.TemporaryDirectory(dir=directory(repo),prefix='.snapshot-') as tmp:
         dbpath=Path(tmp)/'playlist-bridge.db'
-        with repo.connect() as source, sqlite3.connect(dbpath) as target:
+        with repo.connect() as source, closing(sqlite3.connect(dbpath)) as target:
             source.backup(target)
             if target.execute('PRAGMA quick_check').fetchone()[0]!='ok':raise ValueError('Database snapshot verification failed')
         config=repo.directory/'config.json'
@@ -53,6 +55,13 @@ def create(repo,kind='manual'):
         pending=Path(tmp)/'backup.zip'
         with ZipFile(pending,'w',ZIP_DEFLATED) as z:
             z.write(dbpath,'playlist-bridge.db');z.writestr('config.json',startup);z.writestr('manifest.json',json.dumps(manifest))
+            for member in sorted((repo.directory/'users').glob('*/playlist-bridge.db')):
+                if not member.parent.name.isdigit() or member.is_symlink() or member.parent.is_symlink():continue
+                snapshot=Path(tmp)/('user-'+member.parent.name+'.db')
+                with closing(sqlite3.connect(member)) as source,closing(sqlite3.connect(snapshot)) as target:
+                    source.backup(target)
+                    if target.execute('PRAGMA quick_check').fetchone()[0]!='ok':raise ValueError('User database snapshot verification failed')
+                z.write(snapshot,'users/'+member.parent.name+'/playlist-bridge.db')
         pending.chmod(0o600);os.replace(pending,dest)
     # Daily retention is separate from manually requested and pre-restore copies.
     keep=int(repo.load('backup_settings').get('retention',14))
@@ -77,7 +86,15 @@ def restore(repo,name):
             startup=json.loads(z.read('config.json'))
             if not isinstance(startup,dict):raise ValueError('Invalid backup configuration')
             restored.write_bytes(z.read('playlist-bridge.db'))
-        with sqlite3.connect(restored) as check:
+            members={}
+            for member in z.namelist():
+                match=re.fullmatch(r'users/([0-9]+)/playlist-bridge\.db',member)
+                if not match:continue
+                path=Path(tmp)/('user-'+match[1]+'.db');path.write_bytes(z.read(member))
+                with closing(sqlite3.connect(path)) as check:
+                    if check.execute('PRAGMA quick_check').fetchone()[0]!='ok' or check.execute('PRAGMA user_version').fetchone()[0]!=4:raise ValueError('Invalid user database in backup')
+                members[match[1]]=path
+        with closing(sqlite3.connect(restored)) as check:
             if check.execute('PRAGMA quick_check').fetchone()[0]!='ok':raise ValueError('Backup database is damaged')
             for table in TABLES:
                 columns=[row[1] for row in check.execute(f'PRAGMA table_info({table})')]
@@ -104,11 +121,20 @@ def restore(repo,name):
                 db.execute("UPDATE jobs SET status='cancelled',finished_at=?,progress='Cancelled because app data was restored' WHERE status='queued'",(jobs.now(),))
                 for sid,cron,zone in db.execute('SELECT id,cron,timezone FROM schedules').fetchall():
                     db.execute('UPDATE schedules SET next_run=? WHERE id=?',(jobs.next_run(cron,zone),sid))
+                db.execute("DELETE FROM state WHERE namespace IN ('sessions','login_pins')")
                 _atomic_write_json(config_path,startup)
         except Exception:
             if original is not None:config_path.write_bytes(original)
             elif config_path.exists():config_path.unlink()
             raise
+        # Personal databases are retained in the safety backup and restored by SQLite,
+        # never by extracting arbitrary ZIP paths.
+        for user_id,path in members.items():
+            from .storage import get_repository
+            personal=get_repository(repo.directory/'users'/user_id)
+            with closing(sqlite3.connect(path)) as source,personal.connect() as target:
+                source.backup(target)
+                target.execute("UPDATE jobs SET status='interrupted',finished_at=?,error='Restored from backup; review before retrying' WHERE status IN ('queued','running','cancelling')",(jobs.now(),))
     from .tasks import setup
     setup(jobs.Store(repo))
     from . import api, track_routes
