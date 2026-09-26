@@ -11,6 +11,32 @@ def register(app):
         url: str = Field(max_length=1000)
         name: str = Field(min_length=1, max_length=200)
 
+    class Lookup(BaseModel):
+        url: str = Field(max_length=1000)
+
+    @app.post('/api/shared-playlists/metadata')
+    def metadata(body: Lookup):
+        if not actor() or not actor().get('admin'):raise HTTPException(403,'Administrator access required.')
+        import requests
+        from urllib.parse import urlsplit
+        from bs4 import BeautifulSoup
+        from .legacy import Config
+        url=Config._normalize_url_input(body.url)
+        parsed=urlsplit(url)
+        if parsed.scheme!='https' or parsed.hostname not in ('music.apple.com','open.spotify.com') or parsed.username or parsed.password:
+            raise HTTPException(422,'Enter a public Spotify or Apple Music HTTPS playlist URL.')
+        try:
+            response=requests.get(url,timeout=(5,15),allow_redirects=False)
+            response.raise_for_status()
+            page=BeautifulSoup(response.text,'html.parser')
+            tag=page.find('meta',property='og:title')
+            name=tag.get('content','').strip() if tag else ''
+            if not name:raise ValueError('No playlist name found')
+            name=name.removesuffix(' - Playlist - Apple Music')
+            return {'name':name}
+        except (requests.RequestException,ValueError):
+            raise HTTPException(502,'Could not fetch the source name. Enter a name manually.')
+
     @app.get('/api/shared-playlists')
     def listing():
         return [{'id': key, **value} for key, value in root_repository().load('shared_playlists').items()]

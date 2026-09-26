@@ -1,6 +1,6 @@
 import ErrorNotice from './ErrorNotice'
 import {useEffect,useState} from 'react'
-export type MBSettings={enabled:boolean;cache_days:number;release_priority:string[];prefer_studio:boolean;retries:number;cache_entries:number}
+export type MBSettings={server_url:string;enabled:boolean;cache_days:number;release_priority:string[];prefer_studio:boolean;retries:number;cache_entries:number}
 export async function mbCall<T>(path:string,method='GET',body?:unknown):Promise<T>{
  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),30000)
  try{const r=await fetch(path,{method,headers:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body),signal:controller.signal});const data=await r.json();if(!r.ok){const e=Object.assign(new Error(typeof data.detail==='string'?data.detail:'MusicBrainz request failed.'),{status:r.status,retryable:r.status===429||r.status===504||(r.status===502&&/HTTP 503|HTTP 429|Connection failed/.test(data.detail||''))});throw e}return data}finally{clearTimeout(timer)}
@@ -22,6 +22,7 @@ export default function MusicBrainzSettings(){
  function move(index:number,delta:number){if(!value)return;const order=[...value.release_priority];[order[index],order[index+delta]]=[order[index+delta],order[index]];setValue({...value,release_priority:order})}
  return <section className="panel settings-panel"><h2>MusicBrainz</h2><p className="muted">Find albums for missing tracks. No API key is required.</p>{!value&&!error&&<p>Loading settings…</p>}{value&&<fieldset className="lidarr-fields" disabled={busy}>
  <label className="playlist-choice"><input type="checkbox" checked={value.enabled} onChange={e=>setValue({...value,enabled:e.target.checked})}/> Enable MusicBrainz lookups</label>
+ <label>MusicBrainz server URL<input type="url" value={value.server_url} onChange={e=>setValue({...value,server_url:e.target.value})}/></label><button onClick={()=>setValue({...value,server_url:"https://musicbrainz.org"})}>Restore Default Server</button><p className="muted">Save changes before testing. This changes Bridge lookups, not Lidarr’s metadata provider.</p>
  <h3>Release priority</h3><p className="muted">Applies to both Lidarr and MusicBrainz album results. Every candidate remains available for review.</p>
  {value.release_priority.map((type,i)=><div className="alias-row" key={type}><span>{i+1}. {type}</span><div><button aria-label={`Move ${type} up`} disabled={i===0} onClick={()=>move(i,-1)}>↑</button> <button aria-label={`Move ${type} down`} disabled={i===3} onClick={()=>move(i,1)}>↓</button></div></div>)}
  <label className="playlist-choice"><input type="checkbox" checked={value.prefer_studio} onChange={e=>setValue({...value,prefer_studio:e.target.checked})}/> Prefer studio releases over live, compilation and remix releases</label><p className="muted">This uses MusicBrainz labels; missing labels cannot guarantee a studio recording.</p>

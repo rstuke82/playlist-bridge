@@ -1,6 +1,6 @@
 # Playlist Bridge
 
-**Release:** Playlist Bridge 3.0 Beta 1
+**Release:** Playlist Bridge 3.0 Beta 2
 
 Playlist Bridge syncs public **Spotify** and **Apple Music** playlists to playlists in your local **Plex music library**.
 
@@ -8,11 +8,11 @@ Playlist Bridge provides a self-hosted **React + TypeScript** web interface with
 
 > Back up the existing data directory before upgrading; keep its mount and connection settings.
 
-## 3.0 Beta 1: accounts, discovery and library review
+## 3.0 Beta 2: accounts, discovery and library review
 
 Sign in with Plex. The **configured Plex server owner must sign in first**; existing 2.x playlists and history remain in that owner's account. Individual users must have access to the selected music library. Managed Plex Home users are not supported. For a new installation, configure the Plex connection using the existing CLI before opening the web sign-in page. Serve remote access through HTTPS.
 
-Each other account gets a separate SQLite database under the existing data volume's `users/` directory. Its playlists, matches, blocklist and jobs stay separate, and sync uses that user's Plex access token. The administrator controls scheduled sync and health tasks across accounts, access, request permissions, and shared playlist sources. Shared sources are **opt-in**: each subscriber receives their own Plex copy. Disabled accounts do not run new scheduled work.
+Each other account gets a separate SQLite database under the existing data volume's `users/` directory. Its playlists, matches, blocklist and jobs stay separate, and sync uses that user's Plex access token. The administrator controls scheduled sync and health tasks across accounts, access, request permissions, and shared playlist sources. Shared-source management is visible only to administrators; existing subscribed copies remain separate. Disabled accounts do not run new scheduled work.
 
 **Discover** replaces the default Dashboard navigation. Add a Last.fm API key in Settings to show albums from trending artists, search albums, or review a Last.fm user's top albums. Responses are cached server-wide for six hours. Availability uses saved inventories; album-name links do not guarantee track completeness or identical editions. Reviewing Last.fm albums does not automatically request downloads.
 
@@ -22,9 +22,19 @@ Backups now include personal databases. A restore invalidates browser sessions a
 
 Beta validation uses mocked external services, isolated databases and container startup checks. Live Plex sign-in, Last.fm discovery with your API key, and real-user Plex writes still need validation on your server. Duplicate-file inspection and audio conversion are not included.
 
+## What changed in Beta 2
+
+- Two independent account jobs can run concurrently, with account and Plex-destination locks. Admin Activity lists all users, filters by owner and opens their retained logs. Settings → Users includes Plex user import and request/playlist permissions.
+- Sync Now applies queued edits for its selected playlists before syncing. Saved mappings and last-validated health counts are labeled separately. Source History records detected source additions/removals from the first observed baseline onward.
+- Account-scoped Plex library caches, bounded normalization caches and scan-triggered missing-match retries reduce repeated work. Queued edits validate against a fresh library and reuse it for the ensuing sync. Existing recording-version safeguards remain in place.
+- Save your Last.fm username in Account. Discover uses the server API key, spreads trending results across more artists, remembers Hide Available Albums, excludes blocked artists, and opens artist/album details. Album details show available Lidarr release-selection metadata and service links.
+- Availability distinguishes Available, Partially Available, Downloading, Importing, Awaiting Plex, Requested, Needs Attention, Not Available and Unknown. Plex-only entries need attention; stale scans do not claim availability. Query-match percentages describe artist/album text similarity, not recording identity.
+- Readable Plex description timestamps and next scheduled sync; schedule changes queue description-only updates. Custom MusicBrainz server, 1/3/7 scheduled-backup retention and backup deletion are in Settings.
+- Shared-source naming/layout, checkbox/radio labels, album review links and action-to-Activity banners are consistent. Transient polling failures retry quietly; an uncertain job submission is checked by its receipt before a retry is suggested.
+
 ## Media availability
 
-Settings → Tasks provides separate Plex Library Scan, Lidarr Library Scan, Reconcile Availability, and Retry Missing Matches tasks. Scan frequency follows midnight-aligned intervals; Run Now does not shift the schedule. Plex cache and matching options live in Settings → Plex; Lidarr inventory options live in Settings → Lidarr.
+Settings → Tasks provides separate Plex Library Scan, Lidarr Library Scan, Reconcile Availability, and Retry Missing Matches tasks. Each task has a frequency and editable start time in the server timezone; Run Now does not shift the schedule. Plex cache and matching options live in Settings → Plex; Lidarr inventory options live in Settings → Lidarr.
 
 Scans inventory the entire configured Plex music library and Lidarr catalog, including albums added outside Bridge. Successful snapshots persist in SQLite across restarts and are scoped to the configured service. Scans link saved source tracks and requests without changing playlist contents or manual mappings. Retry Missing Matches applies the automatic matcher separately and marks affected playlists Ready to Sync. Their configured schedule or a manual action handles syncing.
 
@@ -36,7 +46,7 @@ Playlist Details has one Sync mode: Server schedule, Custom schedule, or Manual 
 
 ## Lidarr
 
-This preview is published to the beta branch and Docker tags `beta` and `3.0.0-beta.1`. Stable main/latest remain on 2.1.0.
+This preview is published to the beta branch and Docker tags `beta` and `3.0.0-beta.2`. Stable main/latest remain on 2.1.0.
 
 In Settings → Lidarr, enter the server URL (including any URL base) and API key. Test Connection loads root folders, quality profiles and metadata profiles from that instance. Choosing a root folder loads its quality, metadata, monitoring and tag defaults; Use Root Folder Defaults restores them after overrides. A metadata profile named None is supported and is distinct from monitoring None. Choose defaults, enable the integration and save. Blank API-key fields retain the existing key only when the server URL stays the same. Keys remain server-side in the persistent SQLite database; do not publish the data directory or backups.
 
@@ -73,24 +83,22 @@ API references: [Lidarr](https://lidarr.audio/docs/api/), [MusicBrainz rate limi
 
 Playlist Bridge provides SQLite persistence, Docker deployment and the existing CLI and matching engine.
 
-- Dashboard cards open their corresponding pages. Playlist cards apply the exact matching filter, clear previous search/filter state and remember the resulting view. Needs Attention uses the same criteria as its dashboard count.
-- Quick Actions has a pencil editor for up to five actions, including sync scopes, Health Check, Back Up Now and Check for Updates. Selection and display order are remembered in the browser.
 - Add Playlist is one action: paste a public Spotify or Apple Music URL, optionally choose a destination name and sync mode, and add it. Invalid or already registered URLs are rejected inline before queuing. Fetching, matching and Plex creation run as a background job with Activity details. The analysis API remains compatible for existing clients.
 - All dialogs render above the application panels, centered in the visible viewport even after scrolling. Dialog content scrolls internally, controls remain reachable on mobile, keyboard focus stays within the dialog and returns to the trigger when closed. This includes Ignore, Fix Match, removal, backup restore, log clearing and Quick Actions.
 - Match labels are consistently Auto, Manual, Saved, Missing, LOST and Ignored. Saved means an older match whose origin is unknown; it is not relabeled as Auto or Manual. Existing mappings and internal field names are preserved. Sorting uses Last synced.
-- Activity has permanent desktop and mobile navigation, full job history and retained logs. Playlist filters, sync modes, consistent Settings pages, daily backups, restore and midnight-aligned recurring tasks are included.
+- Activity has permanent desktop and mobile navigation, full job history and retained logs. Playlist filters, sync modes, consistent Settings pages, daily backups, restore and configurable recurring tasks are included.
 - Stable installations default to the latest image and main update channel.
 
 Storage remains SQLite schema 4. New activity snapshots use the existing generic state table; existing schema 4 databases require no schema migration. Jobs and output survive restarts. The API keeps idle polling slow; live activity uses one completion-scheduled request at a time while expanded, then stops after final output. Lists and settings load on demand. Two bounded detail workers, request timeouts, read-only health concurrency, matching thresholds, Docker port 8173 and CLI support are preserved.
 
 - React + TypeScript web interface
 - FastAPI backend
-- Dashboard statistics and bulk actions; read-only health details on Playlists
+- Discover, playlist bulk actions and read-only health details
 - Add and analyze Spotify or Apple Music playlists from the web UI
 - Sync all, selected, filtered, or individual playlists manually
 - One sync mode per playlist; optional custom weekly schedules
 - Deduplicated missing-track review with Plex candidate matching
-- Saving a missing-track match syncs the affected playlists automatically
+- Reviewed matches wait in a durable queue; apply the batch or use Sync Now to apply the selected playlist’s edits and sync once
 - Plex configuration directly in the Settings page
 - Existing Playlist Bridge CLI remains available
 - Automatic legacy JSON import with preserved backups
@@ -159,7 +167,7 @@ docker compose up -d --no-build
 ```
 
 The default image in this preview is `ghcr.io/rstuke82/playlist-bridge:beta`.
-To pin this build, set `PLAYLIST_BRIDGE_IMAGE=ghcr.io/rstuke82/playlist-bridge:3.0.0-beta.1`
+To pin this build, set `PLAYLIST_BRIDGE_IMAGE=ghcr.io/rstuke82/playlist-bridge:3.0.0-beta.2`
 in `.env`. The `main` and `latest` tags follow stable releases.
 
 Maintainers can publish both server architectures with the existing buildx builder:
@@ -168,7 +176,7 @@ Maintainers can publish both server architectures with the existing buildx build
 docker buildx use playlist-bridge-builder
 docker buildx inspect --bootstrap
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -t ghcr.io/rstuke82/playlist-bridge:3.0.0-beta.1 \
+  -t ghcr.io/rstuke82/playlist-bridge:3.0.0-beta.2 \
   -t ghcr.io/rstuke82/playlist-bridge:beta --push .
 ```
 

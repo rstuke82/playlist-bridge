@@ -52,7 +52,7 @@ def personal_repository():
 
 
 def public(user):
-    return {k: user.get(k) for k in ('id', 'name', 'avatar', 'admin', 'can_request', 'disabled')}
+    return {k: user.get(k) for k in ('id', 'name', 'avatar', 'admin', 'can_request', 'can_playlists', 'disabled', 'pending_login')}
 
 
 def put(namespace, key, value):
@@ -116,10 +116,10 @@ def verify(token):
     # Only the server owner may inherit the pre-3.0 root library and settings.
     user = {'id': user_id, 'name': profile.get('username') or profile.get('title') or user_id,
             'avatar': profile.get('thumb', ''), 'admin': owner, 'can_request': existing.get('can_request', True),
-            'disabled': False, 'plex_token': server_token, 'verified_at': time.time()}
+            'can_playlists':existing.get('can_playlists',True), 'pending_login':False, 'disabled': False, 'plex_token': server_token, 'verified_at': time.time()}
     put('accounts', user_id, user)
     root.add_log('INFO','Plex sign-in',f'Account {user_id} signed in; server owner={owner}')
-    if not existing and not owner:
+    if (not existing or existing.get('pending_login')) and not owner:
         from .jobs import Store
         with as_user(user):
             Store(personal_repository()).enqueue('plex_scan',{})
@@ -143,6 +143,8 @@ def install(app):
             if not secrets.compare_digest(request.headers.get('X-Bridge-CSRF', ''), session.get('csrf', '') or 'invalid'):
                 return JSONResponse({'detail': 'Your session changed. Refresh and try again.'}, status_code=403)
         if not user.get('admin'):
+            if request.method not in ('GET','HEAD','OPTIONS') and user.get('can_playlists',True) is False and path.startswith(('/api/playlists','/api/missing','/api/matches','/api/match-queue','/api/tracks','/api/sync','/api/jobs')):
+                return JSONResponse({'detail':'Playlist changes are disabled for this account.'},status_code=403)
             allowed = path.startswith(('/api/playlists', '/api/missing', '/api/ignored', '/api/tracks', '/api/matches', '/api/match-queue', '/api/detail-progress', '/api/sync', '/api/jobs', '/api/auth/', '/api/discover', '/api/requests-user', '/api/shared-playlists', '/api/job-history', '/api/playlist-schedule/')) or path in ('/api/search', '/api/health')
             if not allowed or (path.startswith('/api/playlist-schedule') and request.method != 'GET'):
                 return JSONResponse({'detail': 'Administrator access required.'}, status_code=403)
@@ -218,6 +220,7 @@ def install(app):
     class Permissions(BaseModel):
         disabled: bool
         can_request: bool
+        can_playlists: bool = True
 
     @app.put('/api/users/{user_id}')
     def update(user_id: str, body: Permissions):
@@ -239,7 +242,7 @@ def owner_key():
 def member_stores():
     from .jobs import Store
     for user in users().values():
-        if not user.get('admin') and not user.get('disabled'):
+        if not user.get('admin') and not user.get('disabled') and user.get('plex_token'):
             with as_user(user):
                 yield user, Store(personal_repository())
 

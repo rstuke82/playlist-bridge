@@ -210,7 +210,7 @@ def mb_quote(value):
 
 def musicbrainz_search(repo, cfg, request, test=False):
     global _mb_last
-    from .musicbrainz_settings import settings, ordered
+    from .musicbrainz_settings import settings, ordered, search_scores
     preferences = settings(repo)
     from .api import _record_log
     _record_log('INFO','MusicBrainz',f'Lookup {request.artist} — {request.title}; album={request.album or "unknown"}; attempt {request.attempt}/{request.attempts}; retry delay elapsed={request.retry_delay}s')
@@ -239,7 +239,7 @@ def musicbrainz_search(repo, cfg, request, test=False):
         entity = 'release-group' if known else 'recording'
         term = f'releasegroup:{mb_quote(album)}' if known else f'recording:{mb_quote(request.title)}'
         query = term + f' AND artist:{mb_quote(request.artist)}'
-    key = hashlib.sha256((('dates-v2:' if entity == 'recording' else '') + entity + query).encode()).hexdigest()
+    key = hashlib.sha256((('' if preferences['server_url']=='https://musicbrainz.org' else preferences['server_url']+':') + ('dates-v2:' if entity == 'recording' else '') + entity + query).encode()).hexdigest()
     # A bounded shared lock also prevents duplicate identical requests.
     if not _mb_lock.acquire(timeout=2):
         raise HTTPException(429, 'Another metadata lookup is running. Try again shortly.')
@@ -248,13 +248,13 @@ def musicbrainz_search(repo, cfg, request, test=False):
         if not request.force_refresh and saved and time.time() - saved['at'] < preferences['cache_days'] * 86400:
             from .api import _record_log
             _record_log('INFO', 'MusicBrainz', f'Cache hit for {entity}: {query}; {len(saved["rows"])} candidates; priority={preferences["release_priority"]}; prefer studio={preferences["prefer_studio"]}')
-            return {'rows': ordered(saved['rows'], preferences)[:50], 'cached': True, 'provider': 'MusicBrainz'}
+            return {'rows': search_scores(ordered(saved['rows'], preferences),request)[:50], 'cached': True, 'provider': 'MusicBrainz'}
         _record_log('INFO','MusicBrainz',f'{entity} lookup: {query}; cache={"bypass" if request.force_refresh else "miss"}')
         time.sleep(max(0, 1.1 - (time.monotonic() - _mb_last)))
         started = time.monotonic()
         try:
             _mb_last = time.monotonic()
-            response = requests.get('https://musicbrainz.org/ws/2/' + entity,
+            response = requests.get(preferences['server_url'] + '/ws/2/' + entity,
                 params={'query': query, 'fmt': 'json', 'limit': 25},
                 headers={'User-Agent': f'PlaylistBridge/{__version__} (https://github.com/rstuke82/playlist-bridge)'},
                 timeout=(5, 20))
@@ -290,7 +290,7 @@ def musicbrainz_search(repo, cfg, request, test=False):
         state_put(repo, 'musicbrainz_cache', key, {'at': time.time(), 'rows': result})
         with repo.connect() as db:
             db.execute("DELETE FROM state WHERE namespace='musicbrainz_cache' AND key NOT IN (SELECT key FROM state WHERE namespace='musicbrainz_cache' ORDER BY json_extract(value,'$.at') DESC LIMIT 500)")
-        return {'rows': ordered(result, preferences)[:50], 'cached': False, 'provider': 'MusicBrainz'}
+        return {'rows': search_scores(ordered(result, preferences), request)[:50], 'cached': False, 'provider': 'MusicBrainz'}
     finally:
         _mb_lock.release()
 
@@ -557,12 +557,12 @@ def register(app):
         if not term or term.casefold() == 'n/a':
             raise HTTPException(422, 'Enter an album name, or use Find albums for this track with MusicBrainz.')
         rows = Client(cfg).call('GET', 'album/lookup', params={'term': term})
-        from .musicbrainz_settings import settings, ordered
+        from .musicbrainz_settings import settings, ordered, search_scores
         preferences = settings(repo)
         ranked = ordered([album_summary(a) for a in rows if a.get('foreignAlbumId')], preferences)
         from .api import _record_log
         _record_log('INFO', 'Album search', f"Lidarr returned {len(ranked)} albums; applied release priority {', '.join(preferences['release_priority'])}; prefer studio={preferences['prefer_studio']}")
-        return {'rows': ranked[:50], 'cached': False, 'provider': 'Lidarr'}
+        return {'rows': search_scores(ranked,request)[:50], 'cached': False, 'provider': 'Lidarr'}
 
     @app.post('/api/lidarr/search-existing', status_code=202)
     def search_existing(request: ExistingSearch):

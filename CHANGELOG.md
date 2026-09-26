@@ -1,5 +1,9 @@
 # Playlist Bridge changelog
 
+## 3.0 Beta 2 — 2026-09-26
+
+Account-scoped concurrent jobs and admin Activity, queued-edit-aware syncing, shared-cache improvements, source audit history, saved Last.fm usernames and artist blocks, richer Discover/album availability, Plex user imports and permissions, configurable task times, backup controls, custom MusicBrainz servers, and the pending layout/search/status fixes. See BUILD-NOTES.md for behavior and limitations.
+
 ## 3.0 Beta 1 — 2026-09-25
 
 Plex account sign-in, isolated personal playlists and jobs, administrator-controlled shared scheduling and album requests, Last.fm Discover and top-album review, and an admin Plex/Lidarr Library comparison. Includes the pending structured Lidarr search, MusicBrainz year/review-link and missing Plex destination safeguards. See BUILD-NOTES.md for upgrade requirements and beta limitations.

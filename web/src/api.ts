@@ -1,4 +1,5 @@
-export type Job = {activity?:any;id:string;action:string;status:string;progress:string;error?:string;payload:any;result:any;created_at:string;started_at?:string;finished_at?:string}
+export type Job = {
+  owner_id?:string; owner_name?:string;activity?:any;id:string;action:string;status:string;progress:string;error?:string;payload:any;result:any;created_at:string;started_at?:string;finished_at?:string}
 export const activeJob = (job:Job) => ['queued','running','cancelling'].includes(job.status)
 export type Playlist = {
   key: string
@@ -71,6 +72,7 @@ export type Candidate = {
   album: string
   score: number
   title_score: number
+  artist_credit_reason?: string
   artist_score: number
   album_score?: number | null
   album_penalty: number
@@ -135,7 +137,21 @@ export const api = {
   removePlaylist: (key:string) => request<any>(`/api/playlists/${encodeURIComponent(key)}`,{method:'DELETE'}),
   automatic: (track:any) => request<any>('/api/missing/automatic',{method:'POST',body:JSON.stringify(track)}),
   jobs: () => request<Job[]>('/api/jobs'),
-  enqueue: (action:string,payload:any={}) => request<Job>('/api/jobs',{method:'POST',body:JSON.stringify({action,payload})}),
+  enqueue: async(action:string,payload:any={}) => {
+    const bytes=crypto.getRandomValues(new Uint8Array(16));bytes[6]=(bytes[6]&15)|64;bytes[8]=(bytes[8]&63)|128
+    const hex=Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('')
+    const submission_id=[hex.slice(0,8),hex.slice(8,12),hex.slice(12,16),hex.slice(16,20),hex.slice(20)].join('-')
+    try{return await request<Job>('/api/jobs',{method:'POST',body:JSON.stringify({action,payload,submission_id})})}
+    catch(e:any){
+      if(!/timed out|Failed to fetch|NetworkError|Load failed/i.test(e.message))throw e
+      // Read only: a lost response must never trigger a second mutation.
+      for(let attempt=0;attempt<2;attempt++){
+        if(attempt)await new Promise(resolve=>setTimeout(resolve,1500))
+        try{return await request<Job>('/api/jobs/submission/'+submission_id)}catch{}
+      }
+      throw new Error('Could not confirm whether this activity was queued. Check Activity when the connection returns before submitting again.')
+    }
+  },
   cancel: (id:string) => request<Job>(`/api/jobs/${id}/cancel`,{method:'POST'}),
   schedules: () => request<any[]>('/api/schedules'),
   saveSchedule: (data:any,id?:string) => request<any>(`/api/schedules${id?`/${id}`:''}`,{method:id?'PUT':'POST',body:JSON.stringify(data)}),
@@ -163,7 +179,7 @@ export const api = {
   playlists: () => request<Playlist[]>('/api/playlists'),
   playlistHealth: (key: string) => request<PlaylistHealth>(`/api/playlists/${encodeURIComponent(key)}/health`),
   updatePlaylist: (key: string, body: {name?:string;restore_source_name?:boolean}) =>
-    request<Playlist>(`/api/playlists/${encodeURIComponent(key)}`, {
+    request<any>(`/api/playlists/${encodeURIComponent(key)}`, {
       method: 'PATCH', body: JSON.stringify(body),
     }),
   analyzePlaylist: (url: string) => request<any>('/api/playlists/analyze', {

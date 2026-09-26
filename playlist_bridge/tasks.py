@@ -1,4 +1,4 @@
-"""Midnight-aligned recurring tasks, including built-in maintenance jobs."""
+"""Anchored recurring tasks, including built-in maintenance jobs."""
 import json
 import os
 import uuid
@@ -9,9 +9,11 @@ INTERVALS = {0: 'Disabled', 1: 'Every hour', 3: 'Every 3 hours', 6: 'Every 6 hou
 DEFINITIONS = [('plex_scan','all','Scan Plex Library',1),('lidarr_scan','all','Scan Lidarr Library',1),('reconcile','all','Reconcile Availability',0),('retry_missing','all','Retry Missing Matches',0),('sync','all','Sync Playlists',0),('health','all','Health Check',0),('backup','all','Backup',24),('check_updates','all','Check for Updates',6)]
 
 
-def expression(hours):
+def expression(hours, start_time="00:00"):
+    hour,minute=map(int,start_time.split(":"))
+    if not 0<=hour<24 or not 0<=minute<60:raise ValueError("Choose a valid start time")
     if hours not in INTERVALS:raise ValueError('Choose an available interval')
-    return '0 0 * * *' if hours in (0,24) else f'0 */{hours} * * *'
+    return f'{minute} {hour} * * *' if hours in (0,24) else (f'0 */{hours} * * *' if start_time=='00:00' else f"{minute} {','.join(str(h) for h in sorted({(hour+n)%24 for n in range(0,24,hours)}))} * * *")
 
 
 def hours_for(cron):
@@ -24,6 +26,9 @@ def hours_for(cron):
             n=int(parts[1][2:])
             if n in INTERVALS:return n
         except ValueError:pass
+    if len(parts)==5 and ',' in parts[1]:
+        count=len(parts[1].split(','))
+        if count and 24//count in INTERVALS:return 24//count
     return 24
 
 
@@ -80,7 +85,7 @@ def rows(store):
         duration=None
         if last and last['finished_at']:duration=max(0,round((datetime.fromisoformat(last['finished_at'])-datetime.fromisoformat(last['started_at'])).total_seconds(),1))
         result.append({**task,'hours':hours_for(task['cron']) if task['enabled'] else 0,
-            'fixed':task['action']=='check_updates','last_job':last,'latest_event':latest(),
+            'start_time':store.repository.load('task_times').get(task['action'],'00:00'),'fixed':task['action']=='check_updates','last_job':last,'latest_event':latest(),
             'active_job':active,'duration':duration,'next_run':task['next_run'] if task['enabled'] else None})
     from .api import _config
     from .sync_policy import eligible

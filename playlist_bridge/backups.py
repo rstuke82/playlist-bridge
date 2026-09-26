@@ -64,7 +64,7 @@ def create(repo,kind='manual'):
                 z.write(snapshot,'users/'+member.parent.name+'/playlist-bridge.db')
         pending.chmod(0o600);os.replace(pending,dest)
     # Daily retention is separate from manually requested and pre-restore copies.
-    keep=int(repo.load('backup_settings').get('retention',14))
+    keep=min(7,int(repo.load('backup_settings').get('retention',7)))
     buckets={}
     for item in listing(repo):buckets.setdefault(item.get('kind','manual'),[]).append(item)
     for kind,items in buckets.items():

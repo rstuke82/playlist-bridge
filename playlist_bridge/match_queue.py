@@ -88,6 +88,9 @@ def execute(payload):
         with job_store().repository.connect() as db:
             for c in changes:
                 db.execute("DELETE FROM state WHERE namespace='match_drafts' AND key=? AND json_extract(value,'$.revision')=?", (c['id'], c['revision']))
+        if payload.get('save_only'):
+            jobs.output(f'Applied {len(changes)} reviewed match edits before sync')
+            return {'matches_saved':len(changes)}
         selected = list(dict.fromkeys(c['playlist_key'] for c in changes))
         results = []
         for index, key in enumerate(selected, 1):

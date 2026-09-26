@@ -6,7 +6,7 @@ import { Icon } from './Controls'
 import { displayText } from './labels'
 import { stamp } from './HealthCard'
 
-export const actionName=(value:string)=>({recreate:'Recreate Plex Playlist',plex_scan:'Scan Plex Library',lidarr_scan:'Scan Lidarr Library',reconcile:'Reconcile Availability',retry_missing:'Retry Missing Matches',playlist_settings:'Update Playlist Settings',availability:'Check Media Availability',ignore_batch:'Ignore tracks',match_batch:'Apply Match Queue',lidarr_add:'Add Album to Lidarr',lidarr_search:'Retry Lidarr Search',sync:'Sync',health:'Health Check',analyze:'Analyze playlist',add:'Add playlist',fix_match:'Fix Match',track_match:'Update track matches',remove:'Remove playlists',backup:'Backup',check_updates:'Check for Updates',restore_backup:'Restore Backup',ignore:'Ignore track',startup:'Startup',jobs:'Jobs'}[value]||value)
+export const actionName=(value:string)=>({recreate:'Recreate Plex Playlist',plex_scan:'Scan Plex Library',lidarr_scan:'Scan Lidarr Library',reconcile:'Reconcile Availability',retry_missing:'Retry Missing Matches',playlist_settings:'Update Playlist Settings',availability:'Check Media Availability',ignore_batch:'Ignore tracks',match_batch:'Apply Match Queue',lidarr_add:'Add Album to Lidarr',lidarr_search:'Retry Lidarr Search',playlist_description:'Update Playlist Description',sync:'Sync',health:'Health Check',analyze:'Analyze playlist',add:'Add playlist',fix_match:'Fix Match',track_match:'Update track matches',remove:'Remove playlists',backup:'Backup',check_updates:'Check for Updates',restore_backup:'Restore Backup',ignore:'Ignore track',startup:'Startup',jobs:'Jobs'}[value]||value)
 export function showActivity(id:string){location.hash=`activity/${encodeURIComponent(id)}`}
 const duration=(seconds:number)=>seconds<60?`${seconds}s`:`${Math.floor(seconds/60)}m ${seconds%60}s`
 const elapsed=(value?:string,end=Date.now())=>value?duration(Math.max(0,Math.floor((end-Date.parse(value))/1000))):'0s'
@@ -75,7 +75,7 @@ export default function Activity({jobs,jobId=''}:{jobs:Job[];jobId?:string}){
        terminalReads=activeJob(response.job)?0:terminalReads+1
        if(activeJob(response.job)||response.events.length===1000||terminalReads<2)timer=setTimeout(poll,response.events.length===1000?50:1000)
        if(!activeJob(response.job))window.dispatchEvent(new Event('jobs-refresh'))
-     }catch(e:any){if(alive){setError(e.message);timer=setTimeout(poll,10000)}}
+     }catch(e:any){if(alive){if(!/timed out/i.test(e.message))setError(e.message);timer=setTimeout(poll,10000)}}
    }
    void poll()
    return()=>{alive=false;if(timer)clearTimeout(timer)}
@@ -91,7 +91,7 @@ export default function Activity({jobs,jobId=''}:{jobs:Job[];jobId?:string}){
  const stage=active&&current[0]?.mode==='waiting'?`Waiting for ${current[0].service}`:displayText(job.progress)
  async function cancel(){try{await api.cancel(id);window.dispatchEvent(new Event('jobs-refresh'))}catch(e:any){setError(e.message)}}
  return <section className={`activity-panel ${open?'is-open':'is-collapsed'}`} ref={panel} aria-label="Current activity"><div className="activity-bar"><button className="activity-toggle" aria-expanded={open} onClick={()=>setOpen(v=>!v)}><span className={`activity-light ${job.status}`} aria-hidden="true"/><span><strong>{actionName(job.action)} · {active?target:job.result?.partial_success?'Partially completed':job.status}</strong><small>{stage} · {elapsed(job.started_at,active?clock:Date.parse(job.finished_at||job.started_at||''))}</small></span><span aria-hidden="true">{open?'⌃':'⌄'}</span></button>{!active&&<button className="small-button" onClick={()=>{location.hash='activity';setId('');setDetail(null)}}>Dismiss</button>}</div>
- {open&&<div className="activity-body"><div className="panel-head"><h2>{actionName(job.action)} <small className="muted">{job.result?.partial_success?'Partially completed':job.status}</small></h2>{active&&<button disabled={job.status==='cancelling'} onClick={cancel}>{job.status==='cancelling'?'Stopping…':'Stop job'}</button>}</div>
+ {open&&<div className="activity-body"><div className="panel-head"><h2>{(job as any).owner_name&&`${(job as any).owner_name} · `}{actionName(job.action)} <small className="muted">{job.result?.partial_success?'Partially completed':job.status}</small></h2>{active&&<button disabled={job.status==='cancelling'} onClick={cancel}>{job.status==='cancelling'?'Stopping…':'Stop job'}</button>}</div>
  <small className="muted">Started {stamp(job.started_at)}{job.finished_at&&` · Finished ${stamp(job.finished_at)}`}</small>
  {active&&current.map(l=><div className="activity-stage" key={l.key}><strong>{l.name}{l.playlist_index&&l.playlist_total?` · playlist ${l.playlist_index} of ${l.playlist_total}`:''}</strong><p role="status">{l.mode==='waiting'?`Waiting for ${l.service} · ${elapsed(l.since,clock)}`:displayText(l.stage)}</p>{l.mode==='waiting'&&<small className="muted">{displayText(l.stage)} · request pending</small>}{l.total>0&&l.completed!=null&&<progress max={l.total} value={l.completed}/>}</div>)}
  {job.status==='queued'&&<p>Queued — waiting for the current job to finish.</p>}{job.status==='cancelling'&&<p>Stopping at the next safe checkpoint. If a Plex update has begun, that playlist update finishes first. Completed changes are kept.</p>}

@@ -9,6 +9,8 @@ successfully matched to a Plex library track.
 """
 
 import argparse
+import contextvars
+from functools import lru_cache
 import json
 import importlib.metadata as importlib_metadata
 from io import BytesIO
@@ -805,7 +807,8 @@ class ProcessLock:
     """
 
     def __init__(self, path: Path = None):
-        self.path = Path(path) if path is not None else _process_lock_path()
+        from .accounts import personal_repository, actor
+        self.path = Path(path) if path is not None else (personal_repository().directory / '.process.lock' if actor() and not actor().get('admin') else _process_lock_path())
         self._handle = None
 
     def __enter__(self):
@@ -1821,6 +1824,7 @@ class SpotifyAPI:
                     {
                         "title": repair_text(title),
                         "artist": repair_text(artist_names),
+                        "artists": [{"name":repair_text(a.get("name", ""))} for a in track.get("artists",[]) if isinstance(a,dict) and a.get("name")],
                         "album": repair_text(album_name),
                         "source_id": source_track_id,
                         "uri": track_uri,
@@ -3792,6 +3796,7 @@ class Matcher:
 
     # Normalized artist -> every normalized name in the same global alias group.
     ARTIST_ALIAS_LOOKUP = {}
+    _alias_context = contextvars.ContextVar("matcher_aliases",default=None)
 
     MATCH_THRESHOLD = 90
     PROMPT_THRESHOLD = 70
@@ -3821,6 +3826,7 @@ class Matcher:
     }
 
     @staticmethod
+    @lru_cache(maxsize=65536)
     def _normalize_match_text(value: str) -> str:
         """Normalize punctuation/whitespace used in title and artist scoring."""
         if not value:
@@ -3841,6 +3847,7 @@ class Matcher:
         return re.sub(r"\s+", " ", text).strip()
 
     @classmethod
+    @lru_cache(maxsize=65536)
     def _strip_title_metadata(cls, title: str) -> str:
         """
         Remove common release/credit qualifiers that are usually metadata,
@@ -3909,6 +3916,7 @@ class Matcher:
         return re.sub(r"\s+", " ", value).strip(" -:")
 
     @classmethod
+    @lru_cache(maxsize=65536)
     def _strip_trailing_parenthetical(cls, title: str) -> Tuple[str, bool]:
         """
         Return title without one arbitrary trailing (...) or [...] qualifier.
@@ -3933,6 +3941,7 @@ class Matcher:
         return stripped, stripped != value
 
     @classmethod
+    @lru_cache(maxsize=65536)
     def _title_score(cls, source_title: str, plex_title: str) -> Tuple[int, int]:
         """
         Return (best_title_score, raw_title_score).
@@ -4069,6 +4078,7 @@ class Matcher:
         return credit
 
     @classmethod
+    @lru_cache(maxsize=65536)
     def _title_has_feature_credit(cls, title: str) -> bool:
         """Return True when a title explicitly identifies a featured guest."""
         value = cls._normalize_match_text(title)
@@ -4095,7 +4105,7 @@ class Matcher:
         graph = {}
 
         if not isinstance(alias_groups, dict):
-            cls.ARTIST_ALIAS_LOOKUP = {}
+            cls._alias_context.set({})
             return
 
         for canonical, aliases in alias_groups.items():
@@ -4151,7 +4161,7 @@ class Matcher:
             for member in component:
                 lookup[member] = ordered
 
-        cls.ARTIST_ALIAS_LOOKUP = lookup
+        cls._alias_context.set(lookup)
 
     @classmethod
     def _expand_artist_aliases(
@@ -4165,7 +4175,7 @@ class Matcher:
             if variant and variant not in expanded:
                 expanded.append(variant)
 
-            for alias in cls.ARTIST_ALIAS_LOOKUP.get(
+            for alias in (cls._alias_context.get() if cls._alias_context.get() is not None else cls.ARTIST_ALIAS_LOOKUP).get(
                 variant,
                 [],
             ):
@@ -4276,6 +4286,7 @@ class Matcher:
 
 
     @classmethod
+    @lru_cache(maxsize=65536)
     def _title_release_types(cls, title: str) -> set:
         """
         Detect explicit recording/version intent in a track title.
@@ -4379,6 +4390,7 @@ class Matcher:
         return kinds
 
     @staticmethod
+    @lru_cache(maxsize=65536)
     def _normalize_album(album: str) -> str:
         """Normalize an album title for fuzzy album comparison."""
         if not album:
@@ -4402,6 +4414,7 @@ class Matcher:
         return re.sub(r"\s+", " ", value).strip()
 
     @classmethod
+    @lru_cache(maxsize=65536)
     def _source_requires_album_provenance(
         cls,
         album: str,
@@ -4439,6 +4452,7 @@ class Matcher:
         )
 
     @staticmethod
+    @lru_cache(maxsize=65536)
     def _album_types(album: str) -> set:
         """
         Classify release types we normally want to rank below a studio album.
@@ -4548,6 +4562,24 @@ class Matcher:
             source_title=source_title,
             plex_title=plex_title,
         )
+
+        # A source may carry structured credits while Plex stores only the lead.
+        # For unstructured text, accept a comma-separated lead only when the
+        # remaining credit explicitly contains a collaboration separator. A
+        # lone ampersand in a band name is never sufficient evidence.
+        credit_reason = ''
+        credits = source_track.get('artists') or []
+        lead = ''
+        if credits and isinstance(credits, list):
+            lead = credits[0].get('name','') if isinstance(credits[0],dict) else str(credits[0])
+        elif source_album.lower().endswith(' - single') and cls._normalize_album(source_album[:-9]) == cls._normalize_album(source_title) and ',' in source_artist and re.search(r'\s(?:&|and)\s', source_artist.split(',',1)[1], re.I):
+            lead = source_artist.split(',',1)[0].strip()
+        if lead and title_score >= 95 and cls._normalize_match_text(lead) == cls._normalize_match_text(plex_artist):
+            left = re.sub(r'\s*-\s*(single|ep)$','',source_album,flags=re.I)
+            right = re.sub(r'\s*-\s*(single|ep)$','',plex_album,flags=re.I)
+            if left and cls._normalize_album(left) == cls._normalize_album(right):
+                artist_score = max(artist_score, 95)
+                credit_reason = 'Primary artist matches; source includes additional collaborators; album agrees'
 
         # Preserve the existing strong artist penalty.
         weighted_artist = artist_score
@@ -4716,6 +4748,7 @@ class Matcher:
         return {
             "adjusted_score": adjusted_score,
             "identity_score": identity_score,
+            "artist_credit_reason": credit_reason,
             "title_score": title_score,
             "raw_title_score": raw_title_score,
             "artist_score": artist_score,
@@ -5641,6 +5674,10 @@ class Syncer:
             if track.get("plex_id") is not None
         }
 
+        source_keys={f"{t.get('title','')}|{t.get('artist','')}" for t in source_tracks}
+        unused=set(original_mapping)-source_keys
+        if unused:
+            jobs.output(f'{len(unused)} stored mappings do not belong to the current source track list; not counted as matched')
         print("→ Matching tracks...")
 
         matched_tracks = []
@@ -6567,6 +6604,9 @@ class Syncer:
             f"{source_type}:{playlist_id}"
         )
 
+        if not dry_run:
+            from .source_history import record
+            record(self.config.repository,mapping_key,source_tracks)
         source_changes = self._source_change_report(
             mapping_key,
             source_tracks,

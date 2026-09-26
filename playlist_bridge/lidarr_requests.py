@@ -47,6 +47,12 @@ def register(app):
                 if not value['active'] and value['status'] in ('queued','adding'):
                     value['status'] = 'add_failed'
                 rows.append(value)
+        from .discover import availability
+        linked=availability([{'artist':r.get('artist',''),'album':r.get('title',''),'mbid':r['key']} for r in rows],apply_preferences=False)
+        by_id={r['mbid']:r for r in linked}
+        for r in rows:
+            info=by_id.get(r['key'],{})
+            r.update(availability=info.get('availability','Unknown'),availability_detail=info.get('availability_detail','Waiting for a library scan.'))
         return rows
 
     @app.post('/api/lidarr/requests/{album}/retry-search', status_code=202)

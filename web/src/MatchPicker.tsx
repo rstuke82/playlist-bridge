@@ -69,7 +69,7 @@ export default function MatchPicker({track,playlistKey,onClose,onSave}:{
         {error&&<ErrorNotice error={error}/>}
         {loading?<p role="status"><span className="spinner"/> Retrying automatic matching / finding candidates…</p>:<>
           {!candidates.length&&!automatic&&<p>No candidates found. Try another search.</p>}
-          {candidates.map(c=><button type="button" className={`candidate ${choice?.plex_id===c.plex_id?'chosen':''}`} aria-pressed={choice?.plex_id===c.plex_id} disabled={saving} key={c.plex_id} onClick={()=>{setChoice(c);setProvenance('manual')}}><span><strong>{c.title}</strong><small>{c.artist} · {c.album||'N/A'}</small></span><b>{c.score}%</b></button>)}
+          {candidates.map(c=><button type="button" className={`candidate ${choice?.plex_id===c.plex_id?'chosen':''}`} aria-pressed={choice?.plex_id===c.plex_id} disabled={saving} key={c.plex_id} onClick={()=>{setChoice(c);setProvenance('manual')}}><span><strong>{c.title}</strong><small>{c.artist} · {c.album||'N/A'}</small>{c.artist_credit_reason&&<small>{c.artist_credit_reason}</small>}</span><b>{c.score}%</b></button>)}
         </>}
       </div>
       <div className="modal-footer"><button disabled={saving} onClick={onClose}>Cancel</button><span role="status">{saving?'Saving to match queue…':choice?`Selected: ${choice.title}`:'No changes saved'}</span><button className="primary" disabled={saving||loading||!choice||(!all&&!keys.length)} onClick={save}>{saving?'Queuing…':`Queue ${provenance==='automatic'?'Auto':'Manual'} Match`}</button></div>

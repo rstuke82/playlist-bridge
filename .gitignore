@@ -62,3 +62,5 @@ backups/
 !tests/test_lidarr_downloads.py
 
 !tests/test_beta8.py
+
+!tests/test_30_beta2.py

@@ -346,7 +346,7 @@ def health():
     return {
         "status": "ok",
         "version": __version__,
-        "release_name": "Playlist Bridge 3.0 Beta 1",
+        "release_name": "Playlist Bridge 3.0 Beta 2",
         "update": stored_status(config.repository),
         "build": __build__,
         "playlists": len(playlists),
@@ -476,6 +476,8 @@ def add_playlist(request: PlaylistAddRequest):
                     tracks, mapping_key, mark_new_matches=False)
             if not tracks:
                 raise HTTPException(422, "Source returned no tracks. Check that the playlist is public and its URL is correct.")
+            from .source_history import record
+            record(config.repository,mapping_key,tracks)
             syncer._store_unmatched(mapping_key, unmatched)
             config.mapping[mapping_key] = mapping
 
@@ -922,6 +924,7 @@ def missing_candidates(request: MissingCandidateRequest):
                 "identity_score": round(details["identity_score"], 1),
                 "title_score": details["title_score"],
                 "artist_score": details["artist_score"],
+                "artist_credit_reason": details.get("artist_credit_reason", ""),
                 "album_score": details["album_score"],
                 "album_penalty": details["album_penalty"],
                 "title_variant_penalty": details["title_variant_penalty"],
@@ -1094,6 +1097,7 @@ class RemoveRequest(BaseModel):
 
 
 class JobRequest(BaseModel):
+    submission_id: str = Field(default="", pattern=r"^(|[0-9a-f-]{36})$")
     action: Literal['sync','health','analyze','add','fix_match','track_match','remove','backup','check_updates','ignore_batch','availability','plex_scan','lidarr_scan','reconcile','retry_missing']
     payload: dict = Field(default_factory=dict)
 
@@ -1102,6 +1106,7 @@ class ScheduleRequest(BaseModel):
     action: Literal['sync','health','backup','check_updates','availability','plex_scan','lidarr_scan','reconcile','retry_missing']
     scope: Literal['all','favorites','automatic'] = 'all'
     hours: Literal[0,1,3,6,12,24]
+    start_time: str = Field(default='00:00',pattern=r'^([01][0-9]|2[0-3]):[0-5][0-9]$')
 
 
 def job_store():
@@ -1114,6 +1119,8 @@ def job_store():
 def validated_payload(action, payload):
     from .accounts import actor
     user=actor()
+    if user and not user.get("admin") and user.get("can_playlists",True) is False:
+        raise HTTPException(403,"Playlist changes are disabled for this account.")
     if user and not user.get("admin") and action not in ("sync","add","analyze","remove","track_match","fix_match","ignore_batch"):
         raise HTTPException(403,"Administrator access required for this job")
     if action == 'ignore_batch':
@@ -1155,17 +1162,43 @@ def queue_job(request: JobRequest):
     except (ValueError, TypeError) as exc:
         raise HTTPException(422, str(exc)) from exc
     store = job_store()
-    return store.get(store.enqueue(request.action,payload))
+    if not request.submission_id:
+        return store.get(store.enqueue(request.action,payload))
+    with store.repository.connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        saved=db.execute("SELECT value FROM state WHERE namespace='job_submissions' AND key=?",(request.submission_id,)).fetchone()
+        if saved:
+            job_id=json.loads(saved[0])['job_id']
+        else:
+            job_id=store.enqueue(request.action,payload,db=db)
+            db.execute("INSERT INTO state VALUES('job_submissions',?,?)",(request.submission_id,json.dumps({'job_id':job_id})))
+    return store.get(job_id)
 
 
 @app.get('/api/jobs')
 def list_jobs():
-    return job_store().list()
+    from .accounts import actor
+    from .admin_activity import listing
+    return listing() if actor() and actor().get('admin') else job_store().list()
+
+
+def activity_store(job_id):
+    from .admin_activity import resolve
+    return resolve(job_id)
+
+
+@app.get('/api/jobs/submission/{submission_id}')
+def submitted_job(submission_id: str):
+    store=job_store()
+    reference=store.repository.load('job_submissions').get(submission_id,{})
+    row=store.get(reference.get('job_id',''))
+    if not row:raise HTTPException(404,'Submission not found yet. Check Activity before submitting again.')
+    return row
 
 
 @app.get('/api/jobs/{job_id}')
 def get_job(job_id: str):
-    row = job_store().get(job_id)
+    row = activity_store(job_id).get(job_id)
     if not row:
         raise HTTPException(404,'Job not found')
     return row
@@ -1173,24 +1206,25 @@ def get_job(job_id: str):
 
 @app.get('/api/jobs/{job_id}/events')
 def job_events(job_id: str, after: int = Query(default=0, ge=0)):
-    if not job_store().get(job_id):
+    if not activity_store(job_id).get(job_id):
         raise HTTPException(404, 'Job not found')
-    return job_store().events(job_id, after)
+    return activity_store(job_id).events(job_id, after)
 
 
 @app.get('/api/jobs/{job_id}/live')
 def live_job(job_id: str, after: int = Query(default=0, ge=0)):
-    store = job_store()
+    store = activity_store(job_id)
     job = store.get(job_id)
     if not job:
         raise HTTPException(404, 'Job not found')
-    return {'job': job, 'events': store.events(job_id, after)}
+    from .admin_activity import job as described
+    return {'job': described(job_id), 'events': store.events(job_id, after)}
 
 
 @app.get('/api/jobs/{job_id}/log')
 def download_job_log(job_id: str):
     from starlette.responses import StreamingResponse
-    store = job_store()
+    store = activity_store(job_id)
     job = store.get(job_id)
     if not job:
         raise HTTPException(404, 'Job not found')
@@ -1212,7 +1246,10 @@ def download_job_log(job_id: str):
 
 @app.post('/api/jobs/{job_id}/cancel')
 def cancel_job(job_id: str):
-    row = job_store().cancel(job_id)
+    row = activity_store(job_id).cancel(job_id)
+    from .accounts import actor,root_repository
+    if actor() and actor().get('admin'):
+        root_repository().add_log('INFO','Admin cancellation',f"{actor()['id']} requested cancellation of job {job_id}")
     if not row:
         raise HTTPException(404,'Job not found')
     return row
@@ -1328,6 +1365,9 @@ def _health_batch(playlists, config):
 
 
 def execute_job(action, payload):
+    if action=="playlist_description":
+        from .description_refresh import execute
+        return execute(payload)
     if action=="recreate":
         from .recreate import execute
         return execute(payload)
@@ -1348,9 +1388,20 @@ def execute_job(action, payload):
         from .availability import execute
         return execute(payload)
     if action == 'sync':
+        from .match_queue import available, execute as apply_edits
+        from .sync_policy import eligible
+        config=_config(read_only=True,namespaces=[])
+        selected=config.config.get('playlists',[])
+        if payload.get('scope')=='selected':
+            selected=[p for p in selected if _playlist_key(p) in payload.get('playlist_keys',[])]
+        elif jobs.current() and jobs.current().store.get(jobs.current().id).get('schedule_id'):
+            selected=eligible(config.repository,selected)
+        keys={_playlist_key(p) for p in selected}
+        drafts=[r for r in available(job_store().repository) if r['playlist_key'] in keys]
         from .library_cache import reuse
         from .availability import preferences
-        with reuse(preferences(job_store().repository).cache_minutes):
+        with reuse(preferences(job_store().repository).cache_minutes,refresh=bool(drafts)):
+            if drafts:apply_edits({'changes':drafts,'save_only':True})
             return _execute_job(action,payload)
     return _execute_job(action,payload)
 
@@ -1374,7 +1425,9 @@ def _execute_job(action, payload):
         return ignore_missing(IgnoreRequest(**payload))
     if action=='match_batch':
         from .match_queue import execute
-        return execute(payload)
+        from .library_cache import reuse
+        with reuse(refresh=True):
+            return execute(payload)
     if action=='lidarr_search':
         from .lidarr import retry_search
         return retry_search(payload)
@@ -1731,6 +1784,15 @@ register_discover(app)
 
 from .accounts import install as install_accounts
 install_accounts(app)
+
+from .user_preferences import register as register_user_preferences
+register_user_preferences(app)
+
+from .source_history import register as register_source_history
+register_source_history(app)
+
+from .import_users import register as register_import_users
+register_import_users(app)
 
 WEB_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"
 if WEB_DIST.exists():

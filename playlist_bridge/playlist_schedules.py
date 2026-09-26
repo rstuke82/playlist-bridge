@@ -75,4 +75,6 @@ def register(app):
         value['next_run']=next_run(expression(value),tz) if value['mode']=='custom' else None
         from .lidarr import state_put
         state_put(repo,'playlist_schedules',key,value)
+        from .description_refresh import queue
+        value['job_id']=queue([key])
         return value

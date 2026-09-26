@@ -2,8 +2,10 @@
 
 Future work only. Shipped changes and upgrade notes are in CHANGELOG.md and BUILD-NOTES.md.
 
-- Expand Last.fm review to track history and collections, retaining import origins and using existing track identity, recording-version and manual-match rules.
-- Add reviewed manual album associations and stronger release identifiers to library reconciliation; distinguish different editions without relying on counts alone.
-- Improve library diagnostics for partial imports, stale inventory and source metadata differences.
-- Measure routine sync performance and further reuse validated saved matches without skipping source changes, ordering or duplicate occurrences.
-- Explore administrator-only duplicate-file review and optional audio conversion workflows, with explicit review before any file change.
+- Expand Last.fm review beyond top albums to track history and collections, retaining import origins and existing recording-version/manual-match safeguards.
+- Add reviewed manual album associations and stronger release identifiers to Plex/Lidarr reconciliation. Distinguish editions without relying on artist/album names and counts alone.
+- Improve library diagnostics for partial imports, stale inventories and source metadata differences.
+- Further optimize candidate indexing and reuse validated matches for unchanged tracks, while preserving source changes, ordering, duplicates and matching safeguards. Measure against real large libraries.
+- Strengthen source completeness detection so audit history can safely distinguish a genuinely empty playlist from a partial provider response.
+- Expand artist identity/alias and contributor metadata so blocked artists remain excluded when upstream services provide incomplete collaboration credits.
+- Explore administrator-only duplicate-file review and optional FLAC-to-AAC conversion, with explicit review before changing music files.

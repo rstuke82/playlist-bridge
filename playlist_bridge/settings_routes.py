@@ -8,7 +8,7 @@ class AutoSyncRequest(BaseModel):
     playlist_keys:list[str]=Field(min_length=1)
     auto_sync:bool
 class BackupSettings(BaseModel):
-    retention:Literal[7,14,30]=14
+    retention:Literal[1,3,7]=7
 class RestoreRequest(BaseModel):
     name:str
 class AliasRequest(BaseModel):
@@ -27,7 +27,11 @@ def register(app):
         return {'tasks':tasks.rows(store),**store.repository.load('tasks').get('initialized',{'timezone':'UTC'}),'migration_notes':store.repository.load('tasks').get('sync_modes_v3',{}).get('notes',[])}
 
     @app.get('/api/job-history')
-    def history(offset:int=Query(0,ge=0),limit:int=Query(50,ge=1,le=100)):
+    def history(offset:int=Query(0,ge=0),limit:int=Query(50,ge=1,le=100),owner:str=''):
+        from .accounts import actor
+        if actor() and actor().get('admin'):
+            from .admin_activity import history as all_history
+            return all_history(offset,limit,owner)
         store=job_store()
         with store.repository.connect() as db:total=db.execute('SELECT COUNT(*) FROM jobs').fetchone()[0]
         return {'rows':store._rows('SELECT * FROM jobs ORDER BY created_at DESC LIMIT ? OFFSET ?',(limit,offset)),'total':total}
@@ -39,12 +43,28 @@ def register(app):
     @app.get('/api/backups')
     def get_backups():
         repo=job_store().repository
-        return {'backups':backups.listing(repo),'retention':repo.load('backup_settings').get('retention',14)}
+        return {'backups':backups.listing(repo),'retention':min(7,repo.load('backup_settings').get('retention',7))}
 
     @app.put('/api/backups/settings')
     def backup_settings(request:BackupSettings):
         job_store().repository.save({'backup_settings':request.model_dump()})
         return request.model_dump()
+
+    @app.delete('/api/backups/{name}')
+    def delete_backup(name: str):
+        store=job_store()
+        if any(j['action'] in ('backup','restore_backup') and j['status'] in ('queued','running','cancelling') for j in store.list()):
+            raise HTTPException(409,'Wait for backup or restore to finish before deleting a backup.')
+        try:
+            with ProcessLock():
+                path=backups.path_for(store.repository,name)
+                if name not in {b['name'] for b in backups.listing(store.repository)}:
+                    raise ValueError('Backup not recognized')
+                path.unlink()
+        except ValueError as exc:raise HTTPException(404,str(exc))
+        except RuntimeError as exc:raise HTTPException(409,'A Bridge operation is using the data store. Try deleting the backup after it finishes.') from exc
+        store.repository.add_log('INFO','Backup',f'Deleted backup {name}')
+        return {'deleted':name}
 
     @app.get('/api/backups/{name}/download')
     def download(name:str):

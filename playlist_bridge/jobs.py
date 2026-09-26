@@ -1,4 +1,4 @@
-"""Durable, single-worker jobs with midnight-aligned interval scheduling."""
+"""Durable account-scoped jobs with bounded concurrency and anchored interval schedules."""
 import contextlib
 import json
 import threading
@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from croniter import croniter
 
-ACTIONS = {'recreate','plex_scan','lidarr_scan','reconcile','retry_missing','playlist_settings','availability','sync', 'health', 'analyze', 'add', 'fix_match', 'track_match', 'remove', 'backup', 'check_updates', 'restore_backup', 'lidarr_add', 'lidarr_search', 'match_batch', 'ignore', 'ignore_batch'}
+ACTIONS = {'playlist_description','recreate','plex_scan','lidarr_scan','reconcile','retry_missing','playlist_settings','availability','sync', 'health', 'analyze', 'add', 'fix_match', 'track_match', 'remove', 'backup', 'check_updates', 'restore_backup', 'lidarr_add', 'lidarr_search', 'match_batch', 'ignore', 'ignore_batch'}
 SCOPES = {'all', 'favorites', 'automatic', 'selected'}
 TERMINAL = {'completed', 'failed', 'cancelled', 'interrupted'}
 _local = threading.local()
@@ -137,13 +137,17 @@ class Store:
         hours = data['hours']
         if data['action']=='check_updates' and hours!=6:
             raise ValueError('Update checks run every six hours')
-        cron=expression(hours)
+        cron=expression(hours,data.get("start_time","00:00"))
         with self.repository.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             existing=db.execute('SELECT id,timezone FROM schedules WHERE action=? AND scope=?',(data['action'],data['scope'])).fetchone()
             if not existing:raise ValueError('Unknown task')
             sid,zone=existing
+            db.execute("INSERT OR REPLACE INTO state VALUES('task_times',?,?)",(data['action'],json.dumps(data.get('start_time','00:00'))))
             db.execute('UPDATE schedules SET cron=?,enabled=?,next_run=? WHERE id=?',(cron,int(hours>0),next_run(cron,zone),sid))
+        if data['action']=='sync':
+            from .description_refresh import queue_server_schedule
+            queue_server_schedule()
         return next(s for s in self.schedules() if s['id']==sid)
 
     def due(self, timestamp=None):
@@ -198,6 +202,7 @@ class Manager:
         self.stop = threading.Event()
         self.thread = None
         self.worker = None
+        self.workers = []
         self.lock = None
 
     def start(self):
@@ -237,22 +242,42 @@ class Manager:
                                 member_store.enqueue("playlist_settings",{})
                     if self.store.repository.load('pending_playlist_settings'):
                         self.store.enqueue('playlist_settings',{})
-                    if not self.worker or not self.worker.is_alive():
-                        candidates=[(None,self.store),*member_candidates]
-                        offset=getattr(self,"_turn",0)%len(candidates)
-                        for user,store in candidates[offset:]+candidates[:offset]:
-                            job=store.claim()
-                            if job:break
-                        self._turn=offset+1
-                        if job:
-                            self.worker = threading.Thread(target=self.execute,args=(job,store,user),daemon=True,name='playlist-job-worker')
-                            self.worker.start()
+                    self.workers=[w for w in self.workers if w['thread'].is_alive()]
+                    candidates=[(None,self.store),*member_candidates]
+                    offset=getattr(self,"_turn",0)%len(candidates)
+                    concurrent={'playlist_description','sync','add','match_batch','track_match','fix_match','remove','ignore','ignore_batch','playlist_settings'}
+                    planned=[]
+                    for user,store in candidates[offset:]+candidates[:offset]:
+                        pending=store._rows("SELECT * FROM jobs WHERE status='queued' ORDER BY created_at LIMIT 1")
+                        if pending:planned.append((user,store,pending[0]))
+                    exclusive_waiting=any(job['action'] not in concurrent for _,_,job in planned)
+                    # Drain running jobs before maintenance rather than starving
+                    # backups/restores behind continuously arriving syncs.
+                    planned.sort(key=lambda item:item[2]['action'] in concurrent)
+                    for user,store,pending in planned:
+                        account=str(store.repository.directory)
+                        action=pending['action']
+                        reason=None
+                        if any(w['account']==account for w in self.workers):reason='Queued — another job for this account is running'
+                        elif self.workers and (exclusive_waiting or action not in concurrent or any(w['action'] not in concurrent for w in self.workers)):reason='Queued — waiting for exclusive maintenance work'
+                        elif len(self.workers)>=2:reason='Queued — both worker slots are busy'
+                        if reason:
+                            if pending['progress']!=reason:store.update(pending['id'],progress=reason)
+                            continue
+                        job=store.claim()
+                        if not job:continue
+                        thread=threading.Thread(target=self.execute,args=(job,store,user),daemon=True,name='playlist-job-worker')
+                        self.workers.append({'thread':thread,'account':account,'action':action})
+                        self.worker=thread
+                        thread.start()
+                        self._turn=(offset+1)%len(candidates)
+                        if action not in concurrent:break
                 except Exception as exc:
                     self.store.repository.add_log('ERROR','jobs',f'Queue error: {type(exc).__name__}')
                 self.stop.wait(1)
         finally:
-            if self.worker:
-                self.worker.join()  # Complete the current safe unit before releasing ownership.
+            for worker in self.workers:
+                worker['thread'].join()  # Finish safe units before releasing ownership.
             if self.lock:
                 self.lock.__exit__(None,None,None)
 
@@ -276,7 +301,9 @@ class Manager:
         try:
             ctx.checkpoint()
             api._record_log('INFO',job['action'],f"Job started: {job['id']}")
-            result = api.execute_job(job['action'], job['payload'])
+            from .job_locks import destinations
+            with destinations(store,job['payload']):
+                result = api.execute_job(job['action'], job['payload'])
             ctx.checkpoint()
             store.update(job['id'],status='completed',progress=completion_message(result),result=result,finished_at=now())
             api._record_log('INFO',job['action'],f"Job completed: {job['id']}")
@@ -286,7 +313,7 @@ class Manager:
         except Exception as exc:
             message = redact(getattr(exc,'detail',str(exc)),api._config())
             if isinstance(exc,RuntimeError) and 'Another Playlist Bridge process is already running' in str(exc):
-                store.update(job['id'],status='queued',progress='Waiting for another operation to finish',error=None,started_at=None)
+                store.update(job['id'],status='queued',progress='Queued — waiting for this playlist or account to become available',error=None,started_at=None)
                 self.stop.wait(2)
                 return
             store.update(job['id'],status='failed',error=message,progress='Failed — ' + message,finished_at=now())

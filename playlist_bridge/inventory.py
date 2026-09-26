@@ -26,11 +26,13 @@ def scan(service):
     jobs.progress(f'Scanning {service} library inventory')
     if service=='plex':
         client=_health_plex(_config(read_only=True,namespaces=[]));key=identity(client)
+        previous=snapshot(repo,service,key)
         rows=client.search_library('') # no cache scope: always fresh and strict
         jobs.progress(f'Saving {len(rows)} Plex tracks')
         result=publish(repo,service,key,rows,started,machine_identifier=client.machine_identifier)
         from .library_cache import invalidate
         invalidate()
+        queue_changed_matches(repo,previous,rows)
     else:
         cfg=lidarr_config(repo)
         from .availability import preferences
@@ -40,7 +42,7 @@ def scan(service):
         artists=client.call('GET','artist');albums=client.call('GET','album');downloads=queue(client)
         if not isinstance(artists,list) or not isinstance(albums,list):raise ValueError('Invalid Lidarr catalog; previous inventory retained')
         artist_lookup={a.get('id'):a for a in artists}
-        rows=[{'id':a.get('id'),'album_id':a.get('foreignAlbumId'),'title':a.get('title',''),'artist':artist_lookup.get(a.get('artistId'),{}).get('artistName',a.get('artist',{}).get('artistName','')),'artist_id':a.get('artistId'),'monitored':a.get('monitored',False),'statistics':a.get('statistics',{})} for a in albums]
+        rows=[{'id':a.get('id'),'album_id':a.get('foreignAlbumId'),'title':a.get('title',''),'artist':artist_lookup.get(a.get('artistId'),{}).get('artistName',a.get('artist',{}).get('artistName','')),'artist_id':a.get('artistId'),'monitored':a.get('monitored',False),'statistics':a.get('statistics',{}),'releases':[{k:r.get(k) for k in ('id','foreignReleaseId','title','releaseDate','country','format','label','catalogNumber','trackCount','monitored')} for r in a.get('releases',[])],'anyReleaseOk':a.get('anyReleaseOk')} for a in albums]
         jobs.progress(f'Saving {len(rows)} Lidarr albums and {len(artists)} artists')
         result=publish(repo,service,key,rows,started,artists=[{'id':a.get('id'),'name':a.get('artistName'),'mbid':a.get('foreignArtistId'),'monitored':a.get('monitored')} for a in artists],queue=downloads)
         refresh_requests(repo,cfg,force=True)
@@ -54,8 +56,10 @@ def scan(service):
                     # reuse the owner's inventory as proof of user availability.
                     try:
                         member_client=_health_plex(_config(read_only=True,namespaces=[]))
+                        previous_member=snapshot(member_store.repository,'plex',identity(member_client))
                         member_rows=member_client.search_library('')
                         publish(member_store.repository,'plex',identity(member_client),member_rows,time.monotonic(),machine_identifier=member_client.machine_identifier)
+                        queue_changed_matches(member_store.repository,previous_member,member_rows)
                     except Exception:
                         jobs.output('A user library scan failed; its previous snapshot was retained.')
                         continue
@@ -124,3 +128,16 @@ def register(app):
         try:plex,lidarr=current(repo,_config(read_only=True,namespaces=[]))
         except Exception:plex,lidarr={},{}
         return {s:{k:v for k,v in value.items() if k not in ('rows','artists','queue','identity')} for s,value in [('plex',plex),('lidarr',lidarr)]}
+
+
+def queue_changed_matches(repo,previous,rows):
+    from .availability import preferences
+    if not preferences(repo).retry_missing or not any(repo.load('missing').values()):return
+    def signature(t):return tuple(str(t.get(k,'')) for k in ('plex_id','title','artist','album'))
+    old={signature(t) for t in previous.get('rows',[])}
+    added=sum(signature(t) not in old for t in rows)
+    if not added:return
+    store=jobs.Store(repo)
+    if any(j['action']=='retry_missing' and j['status'] in ('queued','running','cancelling') for j in store.list()):return
+    jid=store.enqueue('retry_missing',{'reason':'Plex inventory changed','changed_tracks':added})
+    jobs.output(f'Plex inventory has {added} new or changed tracks; queued missing-match reconciliation ({jid})')
