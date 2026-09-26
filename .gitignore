@@ -64,3 +64,5 @@ backups/
 !tests/test_beta8.py
 
 !tests/test_30_beta2.py
+
+!tests/test_30_beta3.py

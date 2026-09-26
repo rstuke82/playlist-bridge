@@ -4,10 +4,10 @@ from . import accounts, jobs
 
 def stores():
     root=accounts.root_repository()
-    owner=next((u for u in accounts.users().values() if u.get('admin')),None)
+    owner=next((u for u in accounts.users().values() if accounts.is_owner(u)),None)
     yield owner,jobs.Store(root)
     for user in accounts.users().values():
-        if user.get('admin'):continue
+        if accounts.is_owner(user):continue
         with accounts.as_user(user):
             yield user,jobs.Store(accounts.personal_repository())
 

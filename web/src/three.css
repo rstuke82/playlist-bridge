@@ -14,3 +14,7 @@ input[type="checkbox"],input[type="radio"]{width:1rem!important;min-width:1rem!i
 input:not([type]),input[type="text"],input[type="url"],input[type="search"],input[type="password"],input[type="time"]{min-width:0;max-width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--input);color:var(--text);box-sizing:border-box}
 .shared-source-form input{width:100%}.album-card .album-status{z-index:1}.album-card:has(h4){grid-column:1/-1;max-width:850px}.album-card:has(h4)>img,.album-card:has(h4)>.album-art-placeholder{width:220px;height:220px}.album-card:has(h4) .album-status{left:190px;right:auto}
 @media(max-width:1100px){.task-row{grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.task-row>*{grid-column:auto!important;grid-row:auto!important}.task-row>.task-name{grid-column:1/-1!important}.task-row>button{justify-self:start}.task-row input,.task-row select{width:100%}.task-row time{white-space:normal}}
+
+/* Keep the selected album's action within the result row. */
+.album-result{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:.6rem}.album-result>.candidate{min-width:0}.album-result>button:not(.candidate){margin-right:3rem}.shared-source-row{grid-template-columns:minmax(0,1fr) auto}.shared-source-row>.text-button{text-align:left;color:var(--accent);background:transparent;border:0}.shared-source-row small{display:block}
+@media(max-width:600px){.album-result{grid-template-columns:minmax(0,1fr)}.album-result>button:not(.candidate){justify-self:start;margin:0 0 .5rem .5rem}}

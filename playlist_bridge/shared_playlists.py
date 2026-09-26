@@ -10,6 +10,7 @@ def register(app):
     class Source(BaseModel):
         url: str = Field(max_length=1000)
         name: str = Field(min_length=1, max_length=200)
+        custom_name: bool = True
 
     class Lookup(BaseModel):
         url: str = Field(max_length=1000)
@@ -28,18 +29,56 @@ def register(app):
         try:
             response=requests.get(url,timeout=(5,15),allow_redirects=False)
             response.raise_for_status()
-            page=BeautifulSoup(response.text,'html.parser')
+            page=BeautifulSoup(response.content,'html.parser')
             tag=page.find('meta',property='og:title')
             name=tag.get('content','').strip() if tag else ''
             if not name:raise ValueError('No playlist name found')
-            name=name.removesuffix(' - Playlist - Apple Music')
+            from .source_names import clean
+            name=clean(name)
             return {'name':name}
         except (requests.RequestException,ValueError):
             raise HTTPException(502,'Could not fetch the source name. Enter a name manually.')
 
     @app.get('/api/shared-playlists')
     def listing():
-        return [{'id': key, **value} for key, value in root_repository().load('shared_playlists').items()]
+        from .api import _config, _source_for_url
+        from .legacy import Config
+        from .source_names import clean
+        config=_config(read_only=True,namespaces=[])
+        registered={(p['source'],p['source_id']) for p in config.config.get('playlists',[])}
+        from .api import job_store
+        pending={j.get('payload',{}).get('url') for j in job_store().list() if j['action']=='add' and j['status'] in ('queued','running','cancelling')}
+        rows=[]
+        for key,value in root_repository().load('shared_playlists').items():
+            value=dict(value)
+            # Older entries lack provenance: clean display only; leave stored custom text intact.
+            if value.get('custom_name') is not True:value['name']=clean(value.get('name'))
+            try:
+                source,url,_=_source_for_url(value['url'])
+                subscribed=(source,Config._extract_id(url,source)) in registered or value['url'] in pending
+            except Exception:subscribed=False
+            rows.append({'id':key,**value,'subscribed':subscribed})
+        return rows
+
+    @app.get('/api/shared-playlists/{key}/preview')
+    def preview(key:str):
+        source=root_repository().load('shared_playlists').get(key)
+        if not source:raise HTTPException(404,'Shared source not found')
+        from .api import _source_for_url
+        from .source_names import clean
+        from .discover import availability
+        import time
+        cached=root_repository().load('shared_preview').get(key,{})
+        if cached.get('expires',0)<time.time():
+            _,url,service=_source_for_url(source['url'])
+            try:tracks,metadata=service.get_playlist_tracks(url,fetch_artwork=False)
+            except Exception as exc:raise HTTPException(502,'Could not load this source playlist. Try again later.') from exc
+            cached={'tracks':tracks,'name':clean(metadata.get('name') or source['name']),'expires':time.time()+300}
+            state_put(root_repository(),'shared_preview',key,cached)
+        tracks=cached['tracks']
+        albums=availability([{'artist':t.get('artist',''),'album':t.get('album','')} for t in tracks],apply_preferences=False)
+        index={(a['artist'],a['album']):a['availability'] for a in albums}
+        return {'name':cached['name'],'tracks':[{**t,'availability':index.get((t.get('artist',''),t.get('album','')),'Unknown')} for t in tracks]}
 
     @app.post('/api/shared-playlists')
     def publish(body: Source):
@@ -65,4 +104,4 @@ def register(app):
         if not source:
             raise HTTPException(404, 'Shared source not found')
         from .api import queue_job, JobRequest
-        return queue_job(JobRequest(action='add', payload={**source, 'sync_mode': 'inherit'}))
+        return queue_job(JobRequest(action='add', payload={'url':source['url'],'name':source['name'] if source.get('custom_name') else '', 'sync_mode': 'inherit'}))

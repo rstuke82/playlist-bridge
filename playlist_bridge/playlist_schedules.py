@@ -63,6 +63,29 @@ def register(app):
     from .api import job_store,_config,_playlist_key
     def exists(key):
         if not any(_playlist_key(p)==key for p in _config(read_only=True,namespaces=[]).config.get('playlists',[])):raise HTTPException(404,'Playlist not found')
+    class BulkMode(BaseModel):
+        playlist_keys:list[str]=Field(min_length=1,max_length=1000)
+        mode:Literal['inherit','disabled']
+    @app.put('/api/playlists/sync-mode')
+    def bulk_mode(body:BulkMode):
+        from .accounts import actor
+        user=actor()
+        if user and not user.get('admin') and user.get('can_playlists',True) is False:
+            raise HTTPException(403,'Playlist changes are disabled for this account.')
+        keys=set(body.playlist_keys)
+        for key in keys:exists(key)
+        repo=job_store().repository
+        with repo.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            for key in keys:
+                row=db.execute("SELECT value FROM state WHERE namespace='playlist_schedules' AND key=?",(key,)).fetchone()
+                value=json.loads(row[0]) if row else Schedule().model_dump()
+                value.update(mode=body.mode,next_run=None)
+                db.execute("INSERT OR REPLACE INTO state VALUES('playlist_schedules',?,?)",(key,json.dumps(value)))
+        from .description_refresh import queue
+        jid=queue(list(keys))
+        return {'updated':len(keys),'job_id':jid}
+
     @app.get('/api/playlist-schedules')
     def listing():
         repo=job_store().repository

@@ -55,6 +55,19 @@ def register(app):
             r.update(availability=info.get('availability','Unknown'),availability_detail=info.get('availability_detail','Waiting for a library scan.'))
         return rows
 
+    @app.delete('/api/lidarr/requests/{album}')
+    def remove_request(album:str):
+        from .accounts import actor
+        if not actor() or not actor().get('admin'):raise HTTPException(403,'Administrator access required.')
+        repo=repository()
+        with repo.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row=db.execute("SELECT value FROM state WHERE namespace='lidarr_requests' AND key=?",(album,)).fetchone()
+            if row and active(db,json.loads(row[0]).get('job_id')):raise HTTPException(409,'Wait for the current request job to finish before removing it.')
+            db.execute("DELETE FROM state WHERE namespace='lidarr_requests' AND key=?",(album,))
+            db.execute("DELETE FROM state WHERE namespace='user_requests' AND json_extract(value,'$.album_id')=?",(album,))
+        return {'removed':True,'message':'Removed from Bridge. Lidarr album and downloads are unchanged.'}
+
     @app.post('/api/lidarr/requests/{album}/retry-search', status_code=202)
     def retry(album: str):
         from .api import job_store

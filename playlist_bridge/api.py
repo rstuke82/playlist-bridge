@@ -164,7 +164,7 @@ def _playlist_payload(config: Config, playlist: dict) -> dict:
         "match_counts": {name: counts.get(name, 0) for name in ('automatic','manual','legacy')},
         "fully_matched": bool(config.health.get(key) and config.health[key].get('source_tracks', 0)>0 and config.health[key].get('unresolved')==0 and config.health[key].get('ignored',0)==0 and config.health[key].get('matched_in_library')==config.health[key].get('source_tracks')),
         "key": key,
-        "name": playlist.get("plex_playlist_name", ""),
+        "name": (__import__("playlist_bridge.source_names",fromlist=["clean"]).clean(playlist.get("plex_playlist_name", "")) if not playlist.get("custom_name") and playlist.get("source_name") else playlist.get("plex_playlist_name", "")),
         "source": playlist.get("source", ""),
         "source_url": playlist.get("source_url", ""),
         "source_id": playlist.get("source_id", ""),
@@ -346,7 +346,7 @@ def health():
     return {
         "status": "ok",
         "version": __version__,
-        "release_name": "Playlist Bridge 3.0 Beta 2",
+        "release_name": "Playlist Bridge 3.0 Beta 3",
         "update": stored_status(config.repository),
         "build": __build__,
         "playlists": len(playlists),
@@ -662,7 +662,7 @@ def playlist_health(playlist_key: str):
                     for key, count in counts.items()]
         result = {
             "key": mapping_key,
-            "name": playlist.get("plex_playlist_name", ""),
+            "name": (__import__("playlist_bridge.source_names",fromlist=["clean"]).clean(playlist.get("plex_playlist_name", "")) if not playlist.get("custom_name") and playlist.get("source_name") else playlist.get("plex_playlist_name", "")),
             "source": source_type,
             "source_tracks": len(source_tracks),
             "plex_playlist_tracks": plex_count,
@@ -1021,7 +1021,7 @@ def save_missing_match(request: MissingMatchRequest):
             jobs.activity(mode='failed' if result.get('errors') else 'completed', stage='Playlist update finished')
             sync_results.append({
                 "key": _playlist_key(playlist),
-                "name": playlist.get("plex_playlist_name", ""),
+                "name": (__import__("playlist_bridge.source_names",fromlist=["clean"]).clean(playlist.get("plex_playlist_name", "")) if not playlist.get("custom_name") and playlist.get("source_name") else playlist.get("plex_playlist_name", "")),
                 "summary": result,
                 "ok": not result.get('errors'),
             })
@@ -1157,6 +1157,10 @@ def validated_payload(action, payload):
 
 @app.post('/api/jobs', status_code=202)
 def queue_job(request: JobRequest):
+    from .accounts import actor,as_user,is_owner
+    user=actor()
+    if user and user.get('admin') and not is_owner(user) and request.action in ('backup','check_updates','availability','lidarr_scan','health'):
+        with as_user({**user,'server_context':True}):return queue_job(request)
     try:
         payload = validated_payload(request.action, request.payload)
     except (ValueError, TypeError) as exc:
@@ -1192,6 +1196,11 @@ def submitted_job(submission_id: str):
     store=job_store()
     reference=store.repository.load('job_submissions').get(submission_id,{})
     row=store.get(reference.get('job_id',''))
+    if not row:
+        from .accounts import actor,root_repository
+        if actor() and actor().get('admin'):
+            server=jobs.Store(root_repository());reference=server.repository.load('job_submissions').get(submission_id,{})
+            row=server.get(reference.get('job_id',''))
     if not row:raise HTTPException(404,'Submission not found yet. Check Activity before submitting again.')
     return row
 

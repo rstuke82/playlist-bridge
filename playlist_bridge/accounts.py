@@ -42,17 +42,23 @@ def as_user(user):
         _actor.reset(token)
 
 
+def is_owner(user):
+    # Pre-beta-3 administrators were exclusively the verified server owner.
+    return bool(user and (user.get('server_context') or user.get('owner',user.get('admin',False))))
+
+
 def personal_repository():
     user = actor()
     root = root_repository()
-    if not user or user.get('admin'):
+    if not user or is_owner(user):
         return root
     from .storage import get_repository
     return get_repository(root.directory / 'users' / str(int(user['id'])))
 
 
 def public(user):
-    return {k: user.get(k) for k in ('id', 'name', 'avatar', 'admin', 'can_request', 'can_playlists', 'disabled', 'pending_login')}
+    user={**user,'owner':is_owner(user)}
+    return {k: user.get(k) for k in ('id', 'name', 'avatar', 'admin', 'can_request', 'can_playlists', 'disabled', 'pending_login', 'owner', 'can_downloads', 'can_manage_downloads', 'auto_approve')}
 
 
 def put(namespace, key, value):
@@ -115,7 +121,9 @@ def verify(token):
         raise HTTPException(403, 'The Plex server owner must sign in first to initialize Playlist Bridge.')
     # Only the server owner may inherit the pre-3.0 root library and settings.
     user = {'id': user_id, 'name': profile.get('username') or profile.get('title') or user_id,
-            'avatar': profile.get('thumb', ''), 'admin': owner, 'can_request': existing.get('can_request', True),
+            'avatar': profile.get('thumb', ''), 'owner':owner, 'admin': owner or existing.get('admin',False),
+            'can_downloads':existing.get('can_downloads',False),'can_manage_downloads':existing.get('can_manage_downloads',False),
+            'auto_approve':existing.get('auto_approve',True), 'can_request': existing.get('can_request', True),
             'can_playlists':existing.get('can_playlists',True), 'pending_login':False, 'disabled': False, 'plex_token': server_token, 'verified_at': time.time()}
     put('accounts', user_id, user)
     root.add_log('INFO','Plex sign-in',f'Account {user_id} signed in; server owner={owner}')
@@ -153,7 +161,10 @@ def install(app):
             await run_in_threadpool(refresh_access,user)
         except HTTPException as exc:
             return JSONResponse({'detail':exc.detail},status_code=exc.status_code)
-        with as_user(user):
+        context=user
+        if user.get('admin') and path.startswith(('/api/settings/','/api/tasks','/api/backups','/api/lidarr/','/api/schedules','/api/library')):
+            context={**user,'server_context':True}
+        with as_user(context):
             return await call_next(request)
 
     @app.get('/api/auth/me')
@@ -221,15 +232,23 @@ def install(app):
         disabled: bool
         can_request: bool
         can_playlists: bool = True
+        admin: bool | None = None
+        can_downloads: bool = False
+        can_manage_downloads: bool = False
+        auto_approve: bool = True
 
     @app.put('/api/users/{user_id}')
     def update(user_id: str, body: Permissions):
         user = users().get(user_id)
         if not user:
             raise HTTPException(404, 'User not found')
-        if user.get('admin'):
-            raise HTTPException(409, 'The server owner cannot be disabled here.')
-        user.update(body.model_dump())
+        values=body.model_dump(exclude_none=True)
+        if is_owner(user) and (body.disabled or values.get('admin') is False):
+            raise HTTPException(409,'The Plex server owner must remain an active administrator.')
+        if user.get('admin') and (body.disabled or values.get('admin') is False) and not any(u['id']!=user_id and u.get('admin') and not u.get('disabled') for u in users().values()):
+            raise HTTPException(409,'At least one active administrator is required.')
+        user['owner']=is_owner(user)
+        user.update(values)
         put('accounts', user_id, user)
         root_repository().add_log('INFO','Account permissions',f'Account {user_id}: disabled={user["disabled"]}; requests={user["can_request"]}')
         return public(user)
@@ -242,7 +261,7 @@ def owner_key():
 def member_stores():
     from .jobs import Store
     for user in users().values():
-        if not user.get('admin') and not user.get('disabled') and user.get('plex_token'):
+        if not is_owner(user) and not user.get('disabled') and user.get('plex_token'):
             with as_user(user):
                 yield user, Store(personal_repository())
 
@@ -268,7 +287,7 @@ def scheduled_members(action, schedule_id):
 
 def refresh_access(user):
     """Recheck actual music-library access periodically, failing closed on errors."""
-    if user.get('admin') or time.time() - user.get('verified_at', 0) < 300:
+    if is_owner(user) or time.time() - user.get('verified_at', 0) < 300:
         return
     from .storage import read_json
     settings = read_json(root_repository().directory / 'config.json').get('plex', {})

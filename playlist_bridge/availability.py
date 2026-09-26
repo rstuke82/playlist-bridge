@@ -12,7 +12,7 @@ class Preferences(BaseModel):
 
 def preferences(repo):
     from .accounts import actor, root_repository
-    if actor() and not actor().get("admin"):repo=root_repository()
+    repo=root_repository()
     return Preferences(**repo.load('availability_settings').get('preferences',{}))
 
 def execute(payload):

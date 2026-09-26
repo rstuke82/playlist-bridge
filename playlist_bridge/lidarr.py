@@ -72,8 +72,8 @@ class Confirm(BaseModel):
 
 
 def repository():
-    from .api import job_store
-    return job_store().repository
+    from .accounts import root_repository
+    return root_repository()
 
 
 def config(repo):

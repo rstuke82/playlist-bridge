@@ -47,8 +47,8 @@ def scan(service):
         result=publish(repo,service,key,rows,started,artists=[{'id':a.get('id'),'name':a.get('artistName'),'mbid':a.get('foreignArtistId'),'monitored':a.get('monitored')} for a in artists],queue=downloads)
         refresh_requests(repo,cfg,force=True)
     reconciliation=reconcile()
-    from .accounts import member_stores,as_user,actor
-    if not actor() or actor().get('admin'):
+    from .accounts import member_stores,as_user,actor,is_owner
+    if not actor() or is_owner(actor()):
         for user,member_store in member_stores():
             with as_user(user):
                 if service=='plex':
@@ -75,7 +75,7 @@ def current(repo,config):
     settings=config.config.get('plex',{})
     client=SimpleNamespace(base_url=settings.get('url','').rstrip('/'),music_library_key=str(settings.get('music_library_key','')).strip(),headers={'X-Plex-Token':settings.get('token',''),'Accept':'application/json'})
     plex=snapshot(repo,'plex',identity(client))
-    shared=root_repository() if actor() and not actor().get('admin') else repo
+    shared=root_repository()
     return plex,snapshot(shared,'lidarr',server_id(lidarr_config(shared)))
 
 def reconcile():

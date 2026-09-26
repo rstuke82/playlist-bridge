@@ -807,8 +807,8 @@ class ProcessLock:
     """
 
     def __init__(self, path: Path = None):
-        from .accounts import personal_repository, actor
-        self.path = Path(path) if path is not None else (personal_repository().directory / '.process.lock' if actor() and not actor().get('admin') else _process_lock_path())
+        from .accounts import personal_repository, actor, is_owner
+        self.path = Path(path) if path is not None else (personal_repository().directory / '.process.lock' if actor() and not is_owner(actor()) else _process_lock_path())
         self._handle = None
 
     def __enter__(self):
@@ -893,13 +893,13 @@ class Config:
 
     def __init__(self, *, read_only=False, namespaces=None):
         from .storage import get_repository, read_json
-        from .accounts import personal_repository, root_repository, actor
+        from .accounts import personal_repository, root_repository, actor, is_owner
         self.repository = personal_repository()
         self._account = actor()
         self.read_only = read_only
         self.config = read_json(CONFIG_FILE)
         self.config.update(self.repository.load("runtime"))
-        if self._account and not self._account.get("admin"):
+        if self._account and not __import__("playlist_bridge.accounts",fromlist=["is_owner"]).is_owner(self._account):
             self.config["plex"] = {**self.config.get("plex", {}), "token": self._account["plex_token"]}
         if not isinstance(self.config.get("plex"), dict):
             self.config["plex"] = {}
@@ -961,7 +961,7 @@ class Config:
         self.repository.save(buckets, self._baseline)
         self._baseline = copy.deepcopy(buckets)
         startup = {k: v for k, v in self.config.items() if k in STARTUP_KEYS}
-        if not (self._account and not self._account.get("admin")) and read_json(CONFIG_FILE) != startup:
+        if not (self._account and not __import__("playlist_bridge.accounts",fromlist=["is_owner"]).is_owner(self._account)) and read_json(CONFIG_FILE) != startup:
             self.repository.save_startup(startup)
 
     @staticmethod
@@ -2033,8 +2033,8 @@ class AppleMusicAPI:
             if meta:
                 description = meta.get("content", "") or ""
 
-        if name.endswith(" - Apple Music"):
-            name = name[:-14].strip()
+        from .source_names import clean
+        name = clean(name)
 
         target_name = name.casefold().strip()
         candidates = []
@@ -2361,8 +2361,8 @@ class AppleMusicAPI:
             if meta:
                 description = meta.get("content", "") or ""
 
-        if name.endswith(" - Apple Music"):
-            name = name[:-14].strip()
+        from .source_names import clean
+        name = clean(name)
 
         return {
             "name": repair_text(
@@ -2435,7 +2435,7 @@ class AppleMusicAPI:
                 )
 
             soup = BeautifulSoup(
-                resp.text,
+                resp.content,
                 "html.parser",
             )
 
@@ -3112,17 +3112,18 @@ class PlexAPI:
         if len(set(ids)) < len(ids):
             jobs.progress('Preparing source duplicates in an ordered Plex play queue', check=False)
             try:
-                response = requests.post(f'{self.base_url}/playQueues', headers=self.headers,
-                    params={'type':'audio', 'uri':self._library_uri(ids[0]), 'shuffle':0, 'repeat':0, 'continuous':0}, timeout=15)
+                from urllib.parse import quote_plus
+                uri='library:///directory/'+quote_plus('/library/metadata/'+','.join(ids))
+                response = requests.post(f'{self.base_url}/playQueues',
+                    headers={**self.headers,'X-Plex-Client-Identifier':'PlaylistBridge-sync'},
+                    params={'type':'audio','uri':uri,'shuffle':0,'repeat':0,'continuous':0,'includeRelated':0}, timeout=15)
                 response.raise_for_status()
-                queue_id = response.json().get('MediaContainer', {}).get('playQueueID')
-                if not queue_id:
-                    raise ValueError('Plex did not return a play queue ID')
-                for position, track_id in enumerate(ids[1:], 2):
-                    jobs.progress(f'Preparing playlist occurrence {position} of {len(ids)}', check=False, completed=position, total=len(ids))
-                    response = requests.put(f'{self.base_url}/playQueues/{queue_id}', headers=self.headers,
-                        params={'uri':self._library_uri(track_id), 'next':0}, timeout=15)
-                    response.raise_for_status()
+                container=response.json().get('MediaContainer',{})
+                queue_id=container.get('playQueueID')
+                if not queue_id:raise ValueError('Plex did not return a play queue ID')
+                queued=[str(t.get('ratingKey')) for t in container.get('Metadata',[])]
+                if queued!=ids:
+                    raise ValueError('Plex did not confirm every ordered occurrence; using standard additions')
             except Exception as exc:
                 from .diagnostics import redact
                 response = getattr(exc, 'response', None)
@@ -3130,7 +3131,9 @@ class PlexAPI:
                 for secret in self.headers.values():
                     if secret and str(secret) in detail and len(str(secret)) > 12:
                         detail = detail.replace(str(secret), '[REDACTED]')
-                print('⚠ Plex play queue unavailable; using standard playlist additions:', redact(detail))
+                jobs.output('Plex duplicate queue unavailable; using standard additions. This server may collapse repeated tracks.')
+                from .api import _record_log
+                _record_log('DEBUG','Plex duplicate queue',redact(detail))
                 queue_id = None
         jobs.progress('Clearing destination Plex playlist', check=False)
         if not self.clear_playlist(playlist_id):
