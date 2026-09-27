@@ -66,6 +66,9 @@ def availability(rows, apply_preferences=True):
     base=lidarr_config(root_repository()).get('url','').rstrip('/')
     from .user_preferences import blocked, preferences
     prefs=preferences()
+    from .track_bridge import context as track_context
+    bridge=track_context(config,plex.get('rows',[])) if 'tracks' in lidarr else None
+    plex_by_id={str(t['plex_id']):t for t in plex.get('rows',[])}
     associations=root_repository().load('album_links')
     by_mbid={a.get('album_id'):a for a in lidarr.get('rows',[]) if a.get('album_id')}
     seen = set()
@@ -81,6 +84,9 @@ def availability(rows, apply_preferences=True):
         exact=[by_mbid[i] for i in (linked_id or row.get('mbid'),) if i in by_mbid]
         album=exact[0] if len(exact)==1 else candidates[0] if len(candidates)==1 else None
         tracks=p.get(key(album.get('artist',''),album.get('title','')),[]) if album else p.get(k,[])
+        if album and bridge is not None:
+            ids={bridge['links'].get(str(t['id']),{}).get('plex_id') for t in bridge['tracks'] if t.get('album_id')==album.get('album_id')}
+            tracks=[plex_by_id[i] for i in ids if i in plex_by_id]
         ambiguous=bool((linked_id and linked_id not in by_mbid) or (len(candidates)>1 and not exact))
         status='Unknown'; explanation='Availability needs a current library scan.'
         queue=[q for q in lidarr.get('queue',[]) if album and (q.get('albumId')==album.get('id') or q.get('album',{}).get('id')==album.get('id'))]

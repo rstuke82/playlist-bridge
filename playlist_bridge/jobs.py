@@ -245,7 +245,7 @@ class Manager:
                     self.workers=[w for w in self.workers if w['thread'].is_alive()]
                     candidates=[(None,self.store),*member_candidates]
                     offset=getattr(self,"_turn",0)%len(candidates)
-                    concurrent={'playlist_description','sync','add','match_batch','track_match','fix_match','remove','ignore','ignore_batch','playlist_settings'}
+                    concurrent={'text_playlist','playlist_description','sync','add','match_batch','track_match','fix_match','remove','ignore','ignore_batch','playlist_settings'}
                     planned=[]
                     for user,store in candidates[offset:]+candidates[:offset]:
                         pending=store._rows("SELECT * FROM jobs WHERE status='queued' ORDER BY created_at LIMIT 1")

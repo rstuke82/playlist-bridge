@@ -1,6 +1,6 @@
 # Playlist Bridge
 
-**Release:** Playlist Bridge 3.0 Beta 3
+**Release:** Playlist Bridge 3.0 Beta 4
 
 Playlist Bridge syncs public **Spotify** and **Apple Music** playlists to playlists in your local **Plex music library**.
 
@@ -8,31 +8,32 @@ Playlist Bridge provides a self-hosted **React + TypeScript** web interface with
 
 > Back up the existing data directory before upgrading; keep its mount and connection settings.
 
-## 3.0 Beta 3: accounts, discovery and library review
+## 3.0 Beta 4: accounts, discovery and library review
 
 Sign in with Plex. The **configured Plex server owner must sign in first**; existing 2.x playlists and history remain in that owner's account. Individual users must have access to the selected music library. Managed Plex Home users are not supported. For a new installation, configure the Plex connection using the existing CLI before opening the web sign-in page. Serve remote access through HTTPS.
 
 Each other account gets a separate SQLite database under the existing data volume's `users/` directory. Its playlists, matches, blocklist and jobs stay separate, and sync uses that user's Plex access token. The administrator controls scheduled sync and health tasks across accounts, access, request permissions, and shared playlist sources. Users can preview shared sources and add their own copy. Already-added sources are hidden per account. Publishing and unpublishing remain administrator-only. Disabled accounts do not run new scheduled work.
 
-**Discover** replaces the default Dashboard navigation. Add a Last.fm API key in Settings to show albums from trending artists, search albums, or review a Last.fm user's top albums. Responses are cached server-wide for six hours. Availability uses saved inventories; album-name links do not guarantee track completeness or identical editions. Reviewing Last.fm albums does not automatically request downloads.
+**Discover** replaces the default Dashboard navigation. Add a Last.fm API key in Settings to show albums from trending artists, search albums, or review a Last.fm user's top albums. Responses are cached server-wide for six hours. Availability uses saved Lidarr track identities linked to Plex files; ambiguous links require review. Reviewing Last.fm albums does not automatically request downloads.
 
 Ordinary users request albums using server defaults. Lidarr and MusicBrainz configuration, credentials and caches remain administrator-controlled; download visibility and management can be granted independently in Settings → Users. Requests may require administrator approval. Users can review their own requests. **Library**, also administrator-only, compares Plex and Lidarr inventories: linked, Lidarr only, needs review, or **Needs Attention / Missing from Lidarr**. Missing-from-Lidarr flags wait for both successful scans. Track counts and scan times remain separate from identity links. Plex inventories for shared users respect their own token's library visibility.
 
 Backups now include personal databases. A restore invalidates browser sessions and interrupts unfinished restored jobs. Back up the entire existing data volume before upgrading or rolling back. CLI use remains the server owner's local workflow; CLI access is not an ordinary-user login.
 
-This beta uses a production frontend build, Python syntax checks and seven targeted checks with isolated data. Full regression, browser and container smoke tests were skipped. Live Plex sign-in, Last.fm discovery with your API key, and real-user Plex writes still need validation on your server. Duplicate-file inspection and audio conversion are not included.
+This beta uses a production frontend build, Python syntax checks and six targeted checks with isolated data. Full regression, browser and container smoke tests were skipped. Live Plex sign-in, Last.fm discovery with your API key, and real-user Plex writes still need validation on your server. Duplicate-file inspection and audio conversion are not included.
 
-## What changed in Beta 3
+## What changed in Beta 4
 
-- Discover shows saved-user top albums and Trending as separate sections. Both apply artist blocks and Hide Available Albums.
-- Lidarr album identifiers take priority over title matching. Administrators can link a Discover album to an existing scanned Lidarr album; links apply across accounts. Plex remains the playback/track-match check. Availability is still a snapshot, not a live guarantee of edition completeness.
-- Playlist sorting includes Date Added and Reverse Sort. Three-dot and bulk actions offer Follow Server Schedule and Manual Only; selected schedules update without waiting for a running sync. Existing custom schedules are replaced only for selected playlists.
-- Shared playlists are visible to users, with read-only source previews and album availability. Already subscribed or queued sources are hidden per account; the user section disappears when empty. Publishing remains administrator-only.
-- Apple Music service names decode correctly and lose the service suffix. Known automatic names are cleaned; custom names are preserved. Older shared entries without naming provenance receive display-only cleanup.
-- Selected album results include an inline request button. User request dialogs close after submission and track details update their request status.
-- Settings → Users supports administrator promotion, playlist/request permissions, automatic approval, download visibility and download management. Promoted users retain their own playlists and Plex credentials. The owner cannot be demoted/disabled, and the last administrator is protected. Download visibility/management grants access to server request downloads; integration credentials/settings stay private.
-- Administrators can approve/decline pending requests and remove completed/inactive Bridge request records. Removal leaves Lidarr albums, files and downloads intact. Active Bridge request jobs must finish first.
-- Duplicate-track play queues use the ordered-list URI supported by PlexAPI with an explicit client identifier, avoiding one queue-add call per occurrence. The returned order/count is verified before use; unsupported responses fall back to standard additions. Detailed fallback diagnostics stay in DEBUG. Plex may still collapse duplicates.
+- **Create from Text** accepts numbered/plain lists, artist-first or song-first lines, optional albums, and Song by Artist. Users review editable rows, fix ambiguous lines, remove headings, and name the playlist before Save & Sync. Text is treated as data, not instructions. Source order and duplicates remain intact.
+- Custom sources persist in each account's SQLite store and can be edited from Playlist Details. Revision checks prevent overwriting newer edits. Registration survives zero matches so Missing, review and request workflows can be used before a Plex copy exists. Sync creates the Plex copy when playable tracks become available. Existing ignores and blocked artist names apply to text playlists. Custom Playlist is labeled consistently in lists and Missing filters.
+- New automatic matching follows source metadata → Lidarr track identity → imported-file/Plex link. Existing recording/version thresholds and live safeguards are reused. An identified but undownloaded or unlinked track stays missing. Ambiguous identities require review.
+- Lidarr scans collect tracks and files per artist, then replace the snapshot only after successful completion. Plex scans retain file paths and GUIDs. Links prefer exact file paths, with unique exact artist/album/title metadata as a fallback. Only imported Lidarr files qualify for automatic playback links. Matching reuses the loaded catalog and persists validated source identities and links in SQLite.
+- **Music Library** browses Lidarr artists, albums with artwork, and tracks, including selected-release information, search, status filters, reverse sorting, and service links. Available, Partially Available, Downloading, Awaiting Download, Awaiting Plex, and Scan Pending are distinct.
+- **Needs Attention** shows Plex tracks not linked to Lidarr, plus imported Lidarr albums awaiting Plex. A missing association is explicitly distinguished from proof that an album is absent from Lidarr.
+- Administrators can review and correct track-to-Plex associations. Associations are server/library scoped and shared across accounts, but are reused only when the Plex item is visible and its identity remains unchanged for the current account. Existing playlist manual matches are not overwritten.
+- Discover checks playback availability through these track links when the new inventory exists. Playlist Details displays the saved Lidarr identification state.
+
+After upgrading, run a Lidarr Library Scan to populate track/file identities and a Plex Library Scan to refresh playback links. New automatic matching waits for a current Lidarr track inventory. Existing saved matches remain intact.
 
 ## Media availability
 
@@ -48,7 +49,7 @@ Playlist Details has one Sync mode: Server schedule, Custom schedule, or Manual 
 
 ## Lidarr
 
-This preview is published to the beta branch and Docker tags `beta` and `3.0.0-beta.3`. Stable main/latest remain on 2.1.0.
+This preview is published to the beta branch and Docker tags `beta` and `3.0.0-beta.4`. Stable main/latest remain on 2.1.0.
 
 In Settings → Lidarr, enter the server URL (including any URL base) and API key. Test Connection loads root folders, quality profiles and metadata profiles from that instance. Choosing a root folder loads its quality, metadata, monitoring and tag defaults; Use Root Folder Defaults restores them after overrides. A metadata profile named None is supported and is distinct from monitoring None. Choose defaults, enable the integration and save. Blank API-key fields retain the existing key only when the server URL stays the same. Keys remain server-side in the persistent SQLite database; do not publish the data directory or backups.
 
@@ -169,7 +170,7 @@ docker compose up -d --no-build
 ```
 
 The default image in this preview is `ghcr.io/rstuke82/playlist-bridge:beta`.
-To pin this build, set `PLAYLIST_BRIDGE_IMAGE=ghcr.io/rstuke82/playlist-bridge:3.0.0-beta.3`
+To pin this build, set `PLAYLIST_BRIDGE_IMAGE=ghcr.io/rstuke82/playlist-bridge:3.0.0-beta.4`
 in `.env`. The `main` and `latest` tags follow stable releases.
 
 Maintainers can publish both server architectures with the existing buildx builder:
@@ -178,7 +179,7 @@ Maintainers can publish both server architectures with the existing buildx build
 docker buildx use playlist-bridge-builder
 docker buildx inspect --bootstrap
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -t ghcr.io/rstuke82/playlist-bridge:3.0.0-beta.3 \
+  -t ghcr.io/rstuke82/playlist-bridge:3.0.0-beta.4 \
   -t ghcr.io/rstuke82/playlist-bridge:beta --push .
 ```
 

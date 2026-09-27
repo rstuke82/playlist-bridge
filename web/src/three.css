@@ -18,3 +18,5 @@ input:not([type]),input[type="text"],input[type="url"],input[type="search"],inpu
 /* Keep the selected album's action within the result row. */
 .album-result{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:.6rem}.album-result>.candidate{min-width:0}.album-result>button:not(.candidate){margin-right:3rem}.shared-source-row{grid-template-columns:minmax(0,1fr) auto}.shared-source-row>.text-button{text-align:left;color:var(--accent);background:transparent;border:0}.shared-source-row small{display:block}
 @media(max-width:600px){.album-result{grid-template-columns:minmax(0,1fr)}.album-result>button:not(.candidate){justify-self:start;margin:0 0 .5rem .5rem}}
+
+.text-track-row{display:grid;grid-template-columns:2rem repeat(3,minmax(0,1fr)) auto;gap:.5rem;align-items:center;margin:.75rem 0}.text-track-row small{grid-column:2/-1}@media(max-width:650px){.text-track-row{grid-template-columns:2rem minmax(0,1fr)}.text-track-row input,.text-track-row button{grid-column:2}.text-track-row span{grid-row:1/4}}

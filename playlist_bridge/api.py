@@ -192,6 +192,9 @@ def _playlist_payload(config: Config, playlist: dict) -> dict:
 def _source_for_url(url: str):
     normalized = Config._normalize_url_input(url)
     lower = normalized.lower()
+    if lower.startswith('text:'):
+        from .text_playlists import TextSource
+        return 'text',normalized,TextSource()
     if "spotify.com" in lower or lower.startswith("spotify:playlist:"):
         return "spotify", normalized, SpotifyAPI()
     if "music.apple.com" in lower or "itunes.apple.com" in lower:
@@ -346,7 +349,7 @@ def health():
     return {
         "status": "ok",
         "version": __version__,
-        "release_name": "Playlist Bridge 3.0 Beta 3",
+        "release_name": "Playlist Bridge 3.0 Beta 4",
         "update": stored_status(config.repository),
         "build": __build__,
         "playlists": len(playlists),
@@ -632,7 +635,7 @@ def playlist_health(playlist_key: str):
         jobs.progress("Comparing destination playlist")
         stage = "Plex destination playlist"
         plex_playlist_id = str(playlist.get("plex_playlist_id", ""))
-        plex_items, playlist_log = _health_call(plex.get_playlist_items, plex_playlist_id)
+        plex_items, playlist_log = _health_call(plex.get_playlist_items, plex_playlist_id) if plex_playlist_id else ([], '')
         actual_ids = [
             str(item.get("plex_id"))
             for item in plex_items
@@ -724,6 +727,9 @@ def playlist_detail(playlist_key: str, report=lambda message, percent: None):
         syncer = Syncer(config)
         library = {str(t.get("plex_id")): t for t in _health_plex(config).search_library("")}
         report("Resolving saved matches", 50)
+        from .track_bridge import context as bridge_context, source_status
+        bridge=bridge_context(config,list(library.values()))
+        blocked_artists={Matcher._normalize_match_text(v.get('name','')) for v in config.repository.load('blocked_artists').values()} if playlist.get('source')=='text' else set()
         rows = []
         for index, track in enumerate(tracks):
             if index % 10 == 0:
@@ -734,9 +740,9 @@ def playlist_detail(playlist_key: str, report=lambda message, percent: None):
             status = syncer._get_match_provenance(playlist_key, search_key).capitalize() if match else ('LOST' if plex_id else 'Unresolved')
             if not match and any(t.get('status') == 'lost' and syncer._same_missing_identity(t, track) for t in config.missing.get(playlist_key, [])):
                 status = 'LOST'
-            if syncer._find_ignored_track_key(playlist_key, track):
+            if syncer._find_ignored_track_key(playlist_key, track) or Matcher._normalize_match_text(track.get('artist','')) in blocked_artists:
                 status = 'Ignored'
-            rows.append({**track, "index": index, "status": status, "match": match, "plex_id": plex_id})
+            rows.append({**track, "index": index, "status": status, "match": match, "plex_id": plex_id,"catalog_status":source_status(bridge,track)})
         report("Playlist details ready", 100)
         return {"playlist": _playlist_payload(config, playlist), "metadata": metadata, "tracks": rows}
     except HTTPException:
@@ -1386,6 +1392,9 @@ def execute_job(action, payload):
     if action == 'reconcile':
         from .inventory import reconcile
         return reconcile()
+    if action == 'text_playlist':
+        from .text_playlists import execute
+        return execute(payload)
     if action == 'playlist_settings':
         from .queued_settings import execute
         return execute()
@@ -1704,6 +1713,8 @@ def remove_selected(request):
                 with config.repository.connect() as db:
                     db.execute('BEGIN IMMEDIATE')
                     db.execute("UPDATE state SET value=? WHERE namespace='runtime' AND key='playlists'",(json.dumps(remaining),))
+                    if playlist.get('source')=='text':
+                        db.execute("DELETE FROM state WHERE namespace='text_sources' AND key=?",(playlist['source_id'],))
                     for namespace in ('mapping','missing','match_metadata','source_snapshots','ignored_tracks','health','health_attempts','playlist_schedules','pending_playlist_settings'):
                         db.execute('DELETE FROM state WHERE namespace=? AND key=?',(namespace,key))
                 config.config['playlists']=remaining
@@ -1802,6 +1813,9 @@ register_source_history(app)
 
 from .import_users import register as register_import_users
 register_import_users(app)
+
+from .text_playlists import register as register_text_playlists
+register_text_playlists(app)
 
 WEB_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"
 if WEB_DIST.exists():

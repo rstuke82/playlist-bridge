@@ -615,6 +615,7 @@ def source_display_name(source_type: str) -> str:
     names = {
         "spotify": "Spotify",
         "applemusic": "Apple Music",
+        "text": "Custom Playlist",
     }
     value = str(source_type or "").lower()
     return names.get(value, str(source_type or "").title())
@@ -1336,6 +1337,11 @@ class Config:
         value = Config._normalize_url_input(url)
         if not value:
             return None
+
+        if source_type == "text":
+            import uuid
+            try:return str(uuid.UUID(value.removeprefix("text:")))
+            except ValueError:return None
 
         if source_type == "spotify":
             # spotify:playlist:7eahWLng9go8LDR5gcW6A3
@@ -2613,7 +2619,7 @@ class PlexAPI:
                 f"{self.base_url}/library/sections/"
                 f"{self.music_library_key}/all",
                 headers=self.headers,
-                params={"type": 10},
+                params={"type": 10,"includeGuids":1},
                 timeout=30,
             )
 
@@ -2666,6 +2672,8 @@ class PlexAPI:
                     "plex_id": str(t.get("ratingKey")),
                     "plex_album_id": str(t.get("parentRatingKey") or ""),
                     "key": t.get("key"),
+                    "files": [p.get("file") for m in t.get("Media",[]) for p in m.get("Part",[]) if p.get("file")],
+                    "guids": [g.get("id") for g in t.get("Guid",[]) if g.get("id")],
                 }
                 for t in tracks
                 if t.get("ratingKey")
@@ -4780,7 +4788,12 @@ class Matcher:
         }
 
     @classmethod
-    def match_track(
+    def match_track(cls,source_track,plex_library,mapping_cache=None):
+        from .track_bridge import match
+        return match(cls,source_track,plex_library,mapping_cache)
+
+    @classmethod
+    def _match_catalog_track(
         cls,
         source_track: dict,
         plex_library: List[dict],
@@ -5601,6 +5614,8 @@ class Syncer:
 
         return self.plex
 
+    from .track_bridge import scoped as _catalog_scope
+    @_catalog_scope
     def _match_source_tracks(
         self,
         source_tracks: List[dict],
@@ -5690,6 +5705,7 @@ class Syncer:
         recovered_lost = []
         stale_mappings = []
         ignored_matches = []
+        blocked_artists={Matcher._normalize_match_text(v.get('name','')) for v in self.config.repository.load('blocked_artists').values()} if mapping_key.startswith('text:') else set()
 
         for i, track in enumerate(
             source_tracks,
@@ -5708,7 +5724,7 @@ class Syncer:
             if self._is_track_ignored(
                 mapping_key,
                 track,
-            ):
+            ) or Matcher._normalize_match_text(track.get('artist','')) in blocked_artists:
                 ignored_matches.append(
                     dict(track)
                 )
@@ -6254,10 +6270,8 @@ class Syncer:
             print(f"✗ Plex connection failed: {e}")
             return
 
-        if source_type == "spotify":
-            api = SpotifyAPI()
-        else:
-            api = AppleMusicAPI()
+        from .text_playlists import TextSource
+        api = TextSource() if source_type == "text" else SpotifyAPI() if source_type == "spotify" else AppleMusicAPI()
 
         playlist_id = Config._extract_id(
             source_url,
@@ -6538,15 +6552,13 @@ class Syncer:
             "plex_playlist_name"
         ]
 
-        if source_type == "spotify":
-            api = SpotifyAPI()
-        else:
-            api = AppleMusicAPI()
+        from .text_playlists import TextSource
+        api = TextSource() if source_type == "text" else SpotifyAPI() if source_type == "spotify" else AppleMusicAPI()
 
         plex = self._get_plex()
 
-        # Plex destination preflight guard (Beta 4).
-        if not dry_run:
+        # A saved text source may await its first playable track.
+        if not dry_run and plex_playlist_id:
             from . import jobs
             jobs.progress("Checking destination Plex playlist")
             try:
@@ -6740,8 +6752,20 @@ class Syncer:
 
         operation_error = False
 
+        if not plex_playlist_id and source_type=='text':
+            if not matched_tracks:
+                self._save_source_snapshot(mapping_key,source_tracks)
+                self.config.save()
+                jobs.output('Text playlist saved. No playable tracks yet; request missing albums and sync after they arrive.')
+                return self._run_stats(unresolved=len(unmatched))
+            plex_playlist_id=self._build_new_plex_playlist(playlist_name,metadata.get('description',''),matched_tracks,'')
+            if not plex_playlist_id:raise ValueError('Could not create the Plex copy; the text source remains saved.')
+            playlist_entry['plex_playlist_id']=plex_playlist_id
+            self.config.save()
         if matched_tracks:
             operation_error = not plex.replace_playlist_tracks(plex_playlist_id, matched_tracks)
+        elif source_type=='text':
+            operation_error=not plex.clear_playlist(plex_playlist_id)
         else:
             print('⚠ No matched tracks; Plex playlist left unchanged.')
 
@@ -6927,10 +6951,8 @@ class Syncer:
                 errors=1,
             )
 
-        if source_type == "spotify":
-            api = SpotifyAPI()
-        else:
-            api = AppleMusicAPI()
+        from .text_playlists import TextSource
+        api = TextSource() if source_type == "text" else SpotifyAPI() if source_type == "spotify" else AppleMusicAPI()
 
         try:
             source_tracks, _metadata = api.get_playlist_tracks(
@@ -7419,11 +7441,8 @@ class Syncer:
             )
             return
 
-        api = (
-            SpotifyAPI()
-            if source_type == "spotify"
-            else AppleMusicAPI()
-        )
+        from .text_playlists import TextSource
+        api = TextSource() if source_type == "text" else SpotifyAPI() if source_type == "spotify" else AppleMusicAPI()
 
         print(
             f"\n→ Fetching "
@@ -8387,11 +8406,8 @@ class Syncer:
 
         mapping_key = f"{source_type}:{playlist_id}"
 
-        api = (
-            SpotifyAPI()
-            if source_type == "spotify"
-            else AppleMusicAPI()
-        )
+        from .text_playlists import TextSource
+        api = TextSource() if source_type == "text" else SpotifyAPI() if source_type == "spotify" else AppleMusicAPI()
 
         print(
             f"\n→ Fetching "

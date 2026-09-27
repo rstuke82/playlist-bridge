@@ -43,8 +43,14 @@ def scan(service):
         if not isinstance(artists,list) or not isinstance(albums,list):raise ValueError('Invalid Lidarr catalog; previous inventory retained')
         artist_lookup={a.get('id'):a for a in artists}
         rows=[{'id':a.get('id'),'album_id':a.get('foreignAlbumId'),'title':a.get('title',''),'artist':artist_lookup.get(a.get('artistId'),{}).get('artistName',a.get('artist',{}).get('artistName','')),'artist_id':a.get('artistId'),'monitored':a.get('monitored',False),'statistics':a.get('statistics',{}),'releases':[{k:r.get(k) for k in ('id','foreignReleaseId','title','releaseDate','country','format','label','catalogNumber','trackCount','monitored')} for r in a.get('releases',[])],'anyReleaseOk':a.get('anyReleaseOk')} for a in albums]
-        jobs.progress(f'Saving {len(rows)} Lidarr albums and {len(artists)} artists')
-        result=publish(repo,service,key,rows,started,artists=[{'id':a.get('id'),'name':a.get('artistName'),'mbid':a.get('foreignArtistId'),'monitored':a.get('monitored')} for a in artists],queue=downloads)
+        from .track_bridge import scan_tracks
+        tracks=scan_tracks(client,artists,albums)
+        album_lookup={a['id']:a for a in albums}
+        for row in rows:
+            original=album_lookup.get(row['id'],{})
+            row['artwork']=next((i.get('remoteUrl') for i in original.get('images',[]) if i.get('coverType')=='cover' and i.get('remoteUrl','').startswith('https://')), '')
+        jobs.progress(f'Saving {len(rows)} Lidarr albums and {len(tracks)} tracks')
+        result=publish(repo,service,key,rows,started,artists=[{'id':a.get('id'),'name':a.get('artistName'),'mbid':a.get('foreignArtistId'),'monitored':a.get('monitored')} for a in artists],queue=downloads,tracks=tracks)
         refresh_requests(repo,cfg,force=True)
     reconciliation=reconcile()
     from .accounts import member_stores,as_user,actor,is_owner

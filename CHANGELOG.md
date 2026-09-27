@@ -1,5 +1,17 @@
 # Playlist Bridge changelog
 
+## 3.0.0-beta.4 — 2026-09-26
+
+- **Create from Text** accepts numbered/plain lists, artist-first or song-first lines, optional albums, and Song by Artist. Users review editable rows, fix ambiguous lines, remove headings, and name the playlist before Save & Sync. Text is treated as data, not instructions. Source order and duplicates remain intact.
+- Custom sources persist in each account's SQLite store and can be edited from Playlist Details. Revision checks prevent overwriting newer edits. Registration survives zero matches so Missing, review and request workflows can be used before a Plex copy exists. Sync creates the Plex copy when playable tracks become available. Existing ignores and blocked artist names apply to text playlists. Custom Playlist is labeled consistently in lists and Missing filters.
+- New automatic matching follows source metadata → Lidarr track identity → imported-file/Plex link. Existing recording/version thresholds and live safeguards are reused. An identified but undownloaded or unlinked track stays missing. Ambiguous identities require review.
+- Lidarr scans collect tracks and files per artist, then replace the snapshot only after successful completion. Plex scans retain file paths and GUIDs. Links prefer exact file paths, with unique exact artist/album/title metadata as a fallback. Only imported Lidarr files qualify for automatic playback links. Matching reuses the loaded catalog and persists validated source identities and links in SQLite.
+- **Music Library** browses Lidarr artists, albums with artwork, and tracks, including selected-release information, search, status filters, reverse sorting, and service links. Available, Partially Available, Downloading, Awaiting Download, Awaiting Plex, and Scan Pending are distinct.
+- **Needs Attention** shows Plex tracks not linked to Lidarr, plus imported Lidarr albums awaiting Plex. A missing association is explicitly distinguished from proof that an album is absent from Lidarr.
+- Administrators can review and correct track-to-Plex associations. Associations are server/library scoped and shared across accounts, but are reused only when the Plex item is visible and its identity remains unchanged for the current account. Existing playlist manual matches are not overwritten.
+- Discover checks playback availability through these track links when the new inventory exists. Playlist Details displays the saved Lidarr identification state.
+
+
 ## 3.0.0-beta.3 — 2026-09-26
 
 - Discover shows saved-user top albums and Trending as separate sections. Both apply artist blocks and Hide Available Albums.
