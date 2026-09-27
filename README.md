@@ -500,3 +500,37 @@ After a verified successful sync, Plex keeps the original source description fol
 ## Beta 3 schedule upgrade
 
 Custom schedules are preserved. Previously disabled Auto Sync playlists become Manual only. The existing general sync frequency is retained when enabled; otherwise an enabled Auto Sync frequency is used. Favorites-only schedules are retired without enabling the new server task. Scoped health tasks are retired; an existing all-playlist health frequency remains. Review migration notices in Tasks when old frequencies conflict. Historical jobs and database compatibility are retained.
+
+### Local music library (preview)
+
+Local library mode is opt-in and read-only. Lidarr remains the default until it
+is enabled. Bridge never renames, deletes, moves, or retags files during a scan.
+
+1. Set `MUSIC_LIBRARY_PATH` to your host music folder in your private `.env`.
+2. Start with the optional mount:
+   `docker compose -f docker-compose.yml -f docker-compose.local.yml up -d`.
+3. In **Settings → Local Library**, add `/music`, optionally supply the matching
+   path visible to Plex, enable local mode, and save.
+4. Run **Scan Local Music Library** and **Scan Plex Library** under Tasks.
+   The local scan schedule starts disabled; select an interval if desired.
+
+MusicBrainz identifiers in audio tags are read without altering files. Add an
+artist catalog by MusicBrainz artist ID to include missing albums in the same
+library view. Load edition metadata to verify completeness. Unidentified albums
+can be linked to a MusicBrainz release, and individual files can be reconciled
+with that edition's tracks. File counts alone do not establish completeness.
+Reviewed track associations are invalidated when a file's size or modification
+time changes. Symlinks are skipped. An inaccessible root preserves the previous
+snapshot; unreadable individual audio files are listed for review.
+
+**Settings → MusicBrainz → Preferred editions** ranks release countries and media
+formats in the order entered, with an optional official-release preference.
+For example, `US,XE` means United States before Europe; `XW` means Worldwide.
+`Digital Media,CD` prefers digital editions before CDs. Alternatives remain
+visible, and preferences never change existing file identities. These edition
+preferences are separate from release-group types such as Album, EP, or Single.
+Artwork uses Cover Art Archive when available.
+
+This preview does not import downloads, organize files, or replace existing
+Lidarr download automation. Existing playlist mappings remain intact. New
+matching uses local tracks and account-visible Plex links when local mode is on.

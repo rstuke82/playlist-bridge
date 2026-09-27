@@ -7,6 +7,9 @@ class Preferences(BaseModel):
     enabled: bool = True
     cache_days: Literal[7, 30] = 7
     release_priority: list[Literal['Album', 'EP', 'Single', 'Other']] = Field(default_factory=lambda: ['Album','EP','Single','Other'])
+    preferred_countries: list[str] = Field(default_factory=lambda: ["US", "XE"], max_length=30)
+    preferred_formats: list[str] = Field(default_factory=lambda: ["Digital Media", "CD"], max_length=20)
+    prefer_official: bool = True
     prefer_studio: bool = True
     retries: int = Field(default=2, ge=0, le=3)
 
@@ -19,6 +22,12 @@ class Preferences(BaseModel):
         self.server_url = self.server_url.strip().rstrip('/')
         if len(self.release_priority) != 4 or len(set(self.release_priority)) != 4:
             raise ValueError('Include Album, EP, Single and Other exactly once.')
+        self.preferred_countries = list(dict.fromkeys(v.strip().upper() for v in self.preferred_countries if v.strip()))
+        if any(len(v) != 2 or not v.isalpha() for v in self.preferred_countries):
+            raise ValueError("Use two-letter release countries, such as US, XE or XW.")
+        self.preferred_formats = list(dict.fromkeys(v.strip() for v in self.preferred_formats if v.strip()))
+        if any(len(v)>60 for v in self.preferred_formats):
+            raise ValueError("Release formats must be at most 60 characters.")
         return self
 
 def settings(repo):
@@ -72,3 +81,16 @@ def search_scores(rows,request):
         exact=len(supplied)==2 and all(q==normalize(row.get(k,'')) for k,q in supplied)
         result.append({**row,'query_score':100 if exact else min(99,score) if score is not None else None,'query_exact':exact})
     return sorted(result,key=lambda r:(not r['query_exact'],-(r['query_score'] or 0)))
+
+
+def ordered_releases(rows, preferences):
+    """Soft preferences for editions, never an identity or ownership decision."""
+    countries=preferences.get('preferred_countries',[])
+    formats=[f.casefold() for f in preferences.get('preferred_formats',[])]
+    def position(values, wanted):
+        return min((wanted.index(v) for v in values if v in wanted),default=len(wanted))
+    def rank(r):
+        cs={r.get('country','')} | {e.get('area',{}).get('iso-3166-1-codes',[''])[0] for e in r.get('release-events',[]) if e.get('area',{}).get('iso-3166-1-codes')}
+        fs={m.get('format','').casefold() for m in r.get('media',[])}
+        return (int(preferences.get('prefer_official',True) and r.get('status')!='Official'),position(cs,countries),position(fs,formats),r.get('date') or '9999',r.get('id',''))
+    return sorted(rows,key=rank)

@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from croniter import croniter
 
-ACTIONS = {'playlist_description','recreate','plex_scan','lidarr_scan','reconcile','retry_missing','playlist_settings','availability','sync', 'health', 'analyze', 'add', 'fix_match', 'track_match', 'remove', 'backup', 'check_updates', 'restore_backup', 'lidarr_add', 'lidarr_search', 'match_batch', 'ignore', 'ignore_batch'}
+ACTIONS = {'local_scan','local_catalog','playlist_description','recreate','plex_scan','lidarr_scan','reconcile','retry_missing','playlist_settings','availability','sync', 'health', 'analyze', 'add', 'fix_match', 'track_match', 'remove', 'backup', 'check_updates', 'restore_backup', 'lidarr_add', 'lidarr_search', 'match_batch', 'ignore', 'ignore_batch'}
 SCOPES = {'all', 'favorites', 'automatic', 'selected'}
 TERMINAL = {'completed', 'failed', 'cancelled', 'interrupted'}
 _local = threading.local()
@@ -131,7 +131,7 @@ class Store:
 
     def save_schedule(self, data, schedule_id=None):
         from .tasks import expression, DEFINITIONS
-        if data['action'] not in {'sync','health','backup','check_updates','availability','plex_scan','lidarr_scan','reconcile','retry_missing'}:
+        if data['action'] not in {'local_scan','sync','health','backup','check_updates','availability','plex_scan','lidarr_scan','reconcile','retry_missing'}:
             raise ValueError('Unsupported recurring task')
         if data['action'] in ('sync','health') and data['scope']!='all':raise ValueError('This scoped task has been retired; use the consolidated task')
         hours = data['hours']

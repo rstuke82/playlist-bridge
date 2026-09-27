@@ -1,5 +1,12 @@
 # Playlist Bridge changelog
 
+## 3.0.0-beta.5 — 2026-09-27
+
+- Add opt-in read-only local music scans, MusicBrainz catalog reconciliation and local-to-Plex links.
+- Add release-country and media-format preferences with official-release priority.
+- Use local inventory for matching and availability when enabled; preserve existing mappings.
+- Add optional read-only Docker music mount and scheduled local scanning.
+
 ## 3.0.0-beta.4 — 2026-09-26
 
 - **Create from Text** accepts numbered/plain lists, artist-first or song-first lines, optional albums, and Song by Artist. Users review editable rows, fix ambiguous lines, remove headings, and name the playlist before Save & Sync. Text is treated as data, not instructions. Source order and duplicates remain intact.

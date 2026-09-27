@@ -50,6 +50,12 @@ def context(config,plex):
     from .lidarr import config as settings
     from .inventory import current,identity as plex_identity
     from .lidarr_requests import server_id
+    from .local_library import settings as local_settings, snapshot as local_snapshot, scope as local_scope, resolved_tracks
+    local=local_settings()
+    if local['enabled']:
+        inv=local_snapshot();tracks=[{**t,'plex_id':str(t['id']),'file':t.get('plex_file',t['file'])} for t in resolved_tracks() if t.get('artist') and t.get('title')]
+        p=config.config['plex'];key='local:'+local_scope(local)+':'+hashlib.sha256((p['url'].rstrip('/')+'|'+str(p.get('music_library_key',''))).encode()).hexdigest()
+        return {'provider':'Local library','tracks':tracks,'links':links(tracks,plex),'scope':key,'resolved':{},'source_links':config.repository.load('catalog_source_matches').get(key,{}),'pending':time.time()-inv.get('checked_at',0)>86400}
     cfg=settings(root_repository())
     if not cfg.get('enabled'):return None
     _,inventory=current(config.repository,config)
@@ -68,7 +74,7 @@ def scoped(fn):
         library=plex_library if plex_library is not None else self._get_plex().search_library('')
         ctx=context(self.config,library)
         from . import jobs
-        if ctx is not None:jobs.output('Lidarr-first matching: '+('run a Lidarr Library Scan before new automatic matches' if ctx['pending'] else f"{len(ctx['tracks'])} catalog tracks; {len(ctx['links'])} linked to Plex"))
+        if ctx is not None:jobs.output(ctx.get('provider','Lidarr')+' matching: '+('run a current library scan before new automatic matches' if ctx['pending'] else f"{len(ctx['tracks'])} catalog tracks; {len(ctx['links'])} linked to Plex"))
         token=_context.set(ctx)
         try:
             result=fn(self,source_tracks,mapping_key,library,*args,**kwargs)
@@ -103,10 +109,10 @@ def match(cls,source,plex,mapping=None):
 
 def source_status(ctx,source):
     if ctx is None:return None
-    if ctx.get('pending'):return 'Waiting for a Lidarr Library Scan'
+    if ctx.get('pending'):return 'Waiting for a current library scan'
     key=hashlib.sha256(repr(identity(source)).encode()).hexdigest()
     saved=ctx.get('source_links',{}).get(key,{})
     track=next((t for t in ctx['tracks'] if str(t['id'])==saved.get('lidarr_id') and list(identity(t))==saved.get('identity')),None)
-    if not track:return 'Not yet identified in Lidarr'
-    if str(track['id']) in ctx['links']:return 'Linked to Lidarr and Plex'
-    return 'In Lidarr · awaiting Plex or link review' if track.get('file') else 'In Lidarr · awaiting download'
+    if not track:return 'Not yet identified in '+ctx.get('provider','Lidarr')
+    if str(track['id']) in ctx['links']:return 'Linked to '+ctx.get('provider','Lidarr')+' and Plex'
+    return 'In '+ctx.get('provider','Lidarr')+' · awaiting Plex or link review' if track.get('file') else 'Awaiting download'

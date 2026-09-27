@@ -52,7 +52,7 @@ def register(app):
         by_id={r['mbid']:r for r in linked}
         for r in rows:
             info=by_id.get(r['key'],{})
-            r.update(availability=info.get('availability','Unknown'),availability_detail=info.get('availability_detail','Waiting for a library scan.'))
+            r.update(availability_source=info.get('availability_source','lidarr'),availability_checked_at=info.get('checked_at'),availability=info.get('availability','Unknown'),availability_detail=info.get('availability_detail','Waiting for a library scan.'))
         return rows
 
     @app.delete('/api/lidarr/requests/{album}')

@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 INTERVALS = {0: 'Disabled', 1: 'Every hour', 3: 'Every 3 hours', 6: 'Every 6 hours', 12: 'Every 12 hours', 24: 'Daily'}
-DEFINITIONS = [('plex_scan','all','Scan Plex Library',1),('lidarr_scan','all','Scan Lidarr Library',1),('reconcile','all','Reconcile Availability',0),('retry_missing','all','Retry Missing Matches',0),('sync','all','Sync Playlists',0),('health','all','Health Check',0),('backup','all','Backup',24),('check_updates','all','Check for Updates',6)]
+DEFINITIONS = [('local_scan','all','Scan Local Music Library',0),('plex_scan','all','Scan Plex Library',1),('lidarr_scan','all','Scan Lidarr Library',1),('reconcile','all','Reconcile Availability',0),('retry_missing','all','Retry Missing Matches',0),('sync','all','Sync Playlists',0),('health','all','Health Check',0),('backup','all','Backup',24),('check_updates','all','Check for Updates',6)]
 
 
 def expression(hours, start_time="00:00"):

@@ -3,7 +3,15 @@ import {request} from './api'
 import ErrorNotice from './ErrorNotice'
 import {FilterMenu,SortMenu,FilterChips,filterMatches,Icon} from './Controls'
 import Modal from './Modal'
+import LocalLibrary from './LocalLibrary'
 export default function Library(){
+ const [local,setLocal]=useState<boolean|null>(null),[error,setError]=useState('')
+ useEffect(()=>{request<any>('/api/settings/local-library').then(v=>setLocal(v.enabled)).catch(e=>setError(e.message))},[])
+ if(error)return <ErrorNotice error={error}/>
+ if(local===null)return <p>Loading library…</p>
+ return local?<LocalLibrary/>:<><p><a href="#settings/local-library">Set up read-only local music scanning →</a></p><LidarrLibrary/></>
+}
+function LidarrLibrary(){
  const [data,setData]=useState<any>(null),[error,setError]=useState(''),[query,setQuery]=useState(''),[filters,setFilters]=useState<string[]>([]),[sort,setSort]=useState('artist:asc'),[artist,setArtist]=useState(''),[album,setAlbum]=useState<any>(null),[tab,setTab]=useState('library'),[link,setLink]=useState<any>(null),[candidates,setCandidates]=useState<any[]>([]),[search,setSearch]=useState('')
  const load=()=>request<any>('/api/library').then(setData).catch(e=>setError(e.message))
  useEffect(()=>{void load()},[])

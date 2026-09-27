@@ -1,0 +1,11 @@
+# Optional read-only local library mount. MUSIC_LIBRARY_PATH is a host folder.
+# docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
+services:
+  playlist-bridge:
+    volumes:
+      - type: bind
+        source: ${MUSIC_LIBRARY_PATH:?Set MUSIC_LIBRARY_PATH to your host music folder}
+        target: /music
+        read_only: true
+        bind:
+          create_host_path: false

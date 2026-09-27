@@ -349,7 +349,7 @@ def health():
     return {
         "status": "ok",
         "version": __version__,
-        "release_name": "Playlist Bridge 3.0 Beta 4",
+        "release_name": "Playlist Bridge 3.0 Beta 5",
         "update": stored_status(config.repository),
         "build": __build__,
         "playlists": len(playlists),
@@ -1104,12 +1104,12 @@ class RemoveRequest(BaseModel):
 
 class JobRequest(BaseModel):
     submission_id: str = Field(default="", pattern=r"^(|[0-9a-f-]{36})$")
-    action: Literal['sync','health','analyze','add','fix_match','track_match','remove','backup','check_updates','ignore_batch','availability','plex_scan','lidarr_scan','reconcile','retry_missing']
+    action: Literal['local_scan','sync','health','analyze','add','fix_match','track_match','remove','backup','check_updates','ignore_batch','availability','plex_scan','lidarr_scan','reconcile','retry_missing']
     payload: dict = Field(default_factory=dict)
 
 
 class ScheduleRequest(BaseModel):
-    action: Literal['sync','health','backup','check_updates','availability','plex_scan','lidarr_scan','reconcile','retry_missing']
+    action: Literal['local_scan','sync','health','backup','check_updates','availability','plex_scan','lidarr_scan','reconcile','retry_missing']
     scope: Literal['all','favorites','automatic'] = 'all'
     hours: Literal[0,1,3,6,12,24]
     start_time: str = Field(default='00:00',pattern=r'^([01][0-9]|2[0-3]):[0-5][0-9]$')
@@ -1134,7 +1134,7 @@ def validated_payload(action, payload):
         if any(not t.universal and not t.playlist_keys for t in batch.tracks):
             raise ValueError('Select playlists or universal ignore for every track')
         return batch.model_dump()
-    if action in ('backup','check_updates','availability','plex_scan','lidarr_scan','reconcile','retry_missing'):return {}
+    if action in ('local_scan','backup','check_updates','availability','plex_scan','lidarr_scan','reconcile','retry_missing'):return {}
     if action == 'remove':
         return RemoveRequest(**payload).model_dump()
     if action == 'track_match':
@@ -1165,7 +1165,7 @@ def validated_payload(action, payload):
 def queue_job(request: JobRequest):
     from .accounts import actor,as_user,is_owner
     user=actor()
-    if user and user.get('admin') and not is_owner(user) and request.action in ('backup','check_updates','availability','lidarr_scan','health'):
+    if user and user.get('admin') and not is_owner(user) and request.action in ('local_scan','backup','check_updates','availability','lidarr_scan','health'):
         with as_user({**user,'server_context':True}):return queue_job(request)
     try:
         payload = validated_payload(request.action, request.payload)
@@ -1380,6 +1380,9 @@ def _health_batch(playlists, config):
 
 
 def execute_job(action, payload):
+    if action in ("local_scan", "local_catalog"):
+        from .local_library import scan, refresh_catalog
+        return scan() if action=="local_scan" else refresh_catalog(payload)
     if action=="playlist_description":
         from .description_refresh import execute
         return execute(payload)
@@ -1767,6 +1770,8 @@ from .settings_routes import register as register_settings
 register_settings(app)
 from .updates import register as register_updates
 register_updates(app)
+from .local_library import register as register_local_library
+register_local_library(app)
 from .lidarr import register as register_lidarr
 register_lidarr(app)
 from .match_queue import register as register_match_queue

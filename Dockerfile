@@ -7,8 +7,8 @@ COPY web/ ./
 RUN npm run build
 
 FROM python:3.12-slim-bookworm AS runtime
-ARG VERSION=3.0.0-beta.4
-ARG BUILD=20260926.3
+ARG VERSION=3.0.0-beta.5
+ARG BUILD=20260927.1
 ARG VCS_REF=unknown
 LABEL org.opencontainers.image.title="Playlist Bridge" \
       org.opencontainers.image.description="Sync Spotify and Apple Music playlists to Plex" \

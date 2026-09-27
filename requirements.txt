@@ -7,3 +7,4 @@ fastapi>=0.115.0
 uvicorn>=0.30.0
 croniter>=6.0.0
 tzdata>=2024.1
+mutagen>=1.47.0

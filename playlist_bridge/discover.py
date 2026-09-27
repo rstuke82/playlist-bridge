@@ -51,6 +51,8 @@ def album_row(a):
 
 
 def availability(rows, apply_preferences=True):
+    from .local_library import settings as local_settings, availability as local_availability
+    if local_settings()["enabled"]:return local_availability(rows,apply_preferences)
     from .legacy import Matcher, Config
     from .inventory import current
     config=Config(read_only=True,namespaces=[])
