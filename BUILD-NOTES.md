@@ -1,34 +1,38 @@
-# Playlist Bridge 3.0 Beta 5
+# Playlist Bridge 3.0 Beta 6
 
-Package/image version: `3.0.0-beta.5`. Default port: 8173. Beta channel only.
+Package/image version: `3.0.0-beta.6`. Default port: 8173. Beta channel only.
 
-## Local music library preview
+## Artist-first local library
 
-- Opt-in, read-only scanning of mounted music folders, independent of Lidarr.
-- Scheduled Local Music Library Scan task, disabled by default.
-- Reuse unchanged file metadata; retain the previous inventory if a root becomes inaccessible.
-- Unified local albums and explicitly loaded MusicBrainz artist catalogs, with release-type and availability filters.
-- Review album editions and individual recording associations without altering file tags.
-- Completeness checks use recording/edition identities rather than file counts alone.
-- Optional path mappings connect local files to account-visible Plex tracks.
-- Local-mode matching, Discover and Requests availability use the local inventory; existing playlist mappings remain intact.
+- Library opens to compact artist rows, with album and track counts.
+- Select an artist to browse their unified album catalog.
+- One filter menu: artist association filters in the artist list, release-type and availability groups in album views.
+- Shared filter/sort popovers render above translucent panels and remain within the viewport.
+- Embedded MusicBrainz artist IDs provide direct links. Untagged artists can be associated through reviewed candidates or an explicit MBID. Same-name artists with different MBIDs remain separate.
+- Refresh Metadata loads the MusicBrainz catalog as a background job.
 
-## MusicBrainz edition preferences
+## Optional iTunes metadata
 
-Rank release countries (for example US, XE, XW) and media formats (Digital Media, CD), with an optional official-release preference. Release-group priorities remain separate. These are soft preferences: alternatives remain available and existing files are not relabeled.
+- Supplement MusicBrainz with genre, album artwork and missing display dates; no identity or file-tag replacement.
+- Automatic iTunes association requires an exact artist name and a corroborating album. Ambiguous candidates require review.
+- Cache results for seven days and pace requests. Toggle enrichment in Settings → Local Library.
+- Hide invalid years such as 0000 and 0001.
 
-## Upgrade and setup
+## Upgrade
 
-1. Update the Docker beta image normally; SQLite state is retained.
-2. To use local mode, set `MUSIC_LIBRARY_PATH` to a host music folder in your private `.env`, then start with `docker compose -f docker-compose.yml -f docker-compose.local.yml up -d`.
-3. In Settings → Local Library, add `/music`, optionally map its Plex path, enable local mode, and save.
-4. Run Scan Local Music Library and Scan Plex Library under Settings → Tasks.
-5. Load MusicBrainz artist/edition metadata from Library when needed. Unidentified files appear under Needs Attention.
+Pull the beta image and recreate your container. Preserve your existing data and read-only music mount. Local Library remains opt-in. Open an artist and use Review Artist Link or Refresh Metadata, then refresh Library after the Activity job finishes.
 
-Lidarr remains the default until local mode is enabled. This preview does not import downloads, move files, rewrite tags, or provide native Soulseek downloading. The Users-page redesign and other queued UI work are not included in this release.
+When using the optional local Compose override, keep it in both commands:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.local.yml pull
+docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
+```
+
+This release does not add native downloading/importing, the queued Users redesign, or automatic recreation of missing Plex playlists.
 
 ## Validation
 
-Five focused local-library checks passed, including read-only scanning, metadata reuse, failed-root preservation, edition ranking and identity-based completeness. Python compilation and the production frontend build passed. No full regression or live-library/service testing was performed.
+Four focused artist/metadata checks and five local-library checks passed. Python compilation and the frontend build passed. No full regression, live-service metadata testing or browser visual testing was performed.
 
-Images: `ghcr.io/rstuke82/playlist-bridge:beta` and `:3.0.0-beta.5` (AMD64 and ARM64). Stable main/latest are unchanged. Backups and runtime databases are excluded from artifacts.
+Docker tags: `ghcr.io/rstuke82/playlist-bridge:beta` and `:3.0.0-beta.6`, for AMD64 and ARM64. Stable main/latest remain unchanged. Backups and runtime databases are excluded from publication.

@@ -534,3 +534,16 @@ Artwork uses Cover Art Archive when available.
 This preview does not import downloads, organize files, or replace existing
 Lidarr download automation. Existing playlist mappings remain intact. New
 matching uses local tracks and account-visible Plex links when local mode is on.
+
+The local Library opens to an artist list. Select an artist to browse their
+unified album catalog. Embedded MusicBrainz artist IDs provide direct links;
+untagged artists can be linked through **Link MusicBrainz**, using reviewed
+search candidates or an artist ID. Same-name artists with different MBIDs remain
+separate. **Refresh Metadata** loads the artist catalog in a background job.
+
+Optional iTunes enrichment supplies genre, album artwork and missing display
+dates without changing MusicBrainz identities or file tags. Enable or disable it
+in Local Library settings. Artist-name matches must also have a known album in
+common before automatic iTunes association; ambiguous results require review.
+iTunes results are cached for seven days. Refresh Library after the metadata job
+completes. Artwork supplied by iTunes includes an Apple Music link.

@@ -1,5 +1,12 @@
 # Playlist Bridge changelog
 
+## 3.0.0-beta.6 — 2026-09-28
+
+- Open local Library to an artist list with MusicBrainz association review.
+- Add optional cached iTunes metadata enrichment without changing file identities.
+- Consolidate Library filters and fix shared menu stacking above glass panels.
+- Hide invalid release years.
+
 ## 3.0.0-beta.5 — 2026-09-27
 
 - Add opt-in read-only local music scans, MusicBrainz catalog reconciliation and local-to-Plex links.

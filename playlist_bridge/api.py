@@ -349,7 +349,7 @@ def health():
     return {
         "status": "ok",
         "version": __version__,
-        "release_name": "Playlist Bridge 3.0 Beta 5",
+        "release_name": "Playlist Bridge 3.0 Beta 6",
         "update": stored_status(config.repository),
         "build": __build__,
         "playlists": len(playlists),
@@ -1380,6 +1380,9 @@ def _health_batch(playlists, config):
 
 
 def execute_job(action, payload):
+    if action=="artist_metadata":
+        from .artist_library import refresh
+        return refresh(payload)
     if action in ("local_scan", "local_catalog"):
         from .local_library import scan, refresh_catalog
         return scan() if action=="local_scan" else refresh_catalog(payload)

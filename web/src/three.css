@@ -20,3 +20,15 @@ input:not([type]),input[type="text"],input[type="url"],input[type="search"],inpu
 @media(max-width:600px){.album-result{grid-template-columns:minmax(0,1fr)}.album-result>button:not(.candidate){justify-self:start;margin:0 0 .5rem .5rem}}
 
 .text-track-row{display:grid;grid-template-columns:2rem repeat(3,minmax(0,1fr)) auto;gap:.5rem;align-items:center;margin:.75rem 0}.text-track-row small{grid-column:2/-1}@media(max-width:650px){.text-track-row{grid-template-columns:2rem minmax(0,1fr)}.text-track-row input,.text-track-row button{grid-column:2}.text-track-row span{grid-row:1/4}}
+/* Portaled menus escape translucent panel stacking contexts. */
+.control-menu>.icon-button{position:relative}.control-menu>.icon-button[aria-expanded=true]{color:var(--accent)}
+.control-portal{box-sizing:border-box;min-width:0;overflow-y:auto;overscroll-behavior:contain}
+.control-portal .filter-group-title{margin-top:12px;border-top:1px solid var(--border);padding-top:12px}
+.local-library-header .panel-head{align-items:flex-start;gap:16px}.local-library-toolbar{display:flex;align-items:center;gap:10px;margin-top:18px;flex-wrap:wrap}
+.local-library-toolbar>input{flex:1;min-width:180px;max-width:560px}.library-scan-time{display:block;margin-top:12px;color:var(--muted)}
+.artist-list{padding:0 20px}.artist-list-row{display:flex;align-items:center;gap:18px;padding:18px 0;border-bottom:1px solid var(--border)}.artist-list-row:last-child{border:0}
+.artist-list-name{flex:1;min-width:0}.artist-list-name>button{font-size:17px;font-weight:650;text-align:left;border:0;background:none;padding:0;color:var(--text)}.artist-list-name>small{display:block;margin-top:6px;color:var(--muted)}
+.artist-list-status{font-size:12px;color:var(--muted)}.artist-list-links{display:flex;gap:10px;align-items:center}.artist-monogram{width:44px;height:44px;border-radius:12px;display:grid;place-items:center;background:var(--hover);color:var(--accent);font-size:20px;flex:none}
+.library-album-grid .album-card{text-align:left}.library-album-grid .album-card h3{font-size:15px;margin:10px 0 5px}.library-album-grid .album-card p{margin:6px 0;font-size:13px}
+@media(max-width:760px){.artist-list-row{gap:10px;flex-wrap:wrap}.artist-list-links{margin-left:54px;flex-wrap:wrap}.artist-list-status{display:none}.local-library-toolbar>input{max-width:none}.local-library-header .panel-head{flex-wrap:wrap}}
+.library-album-grid .album-open{display:block;width:100%;padding:0;border:0;background:none;text-align:left;color:var(--text)}.library-album-grid .album-open img{width:100%;aspect-ratio:1;object-fit:cover;border-radius:9px}.library-album-grid .album-card>a{font-size:12px}

@@ -70,3 +70,5 @@ backups/
 !tests/test_30_beta4.py
 
 !tests/test_local_library.py
+
+!tests/test_artist_library.py

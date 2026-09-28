@@ -42,6 +42,7 @@ class Root(BaseModel):
 
 class Settings(BaseModel):
     enabled:bool=False
+    itunes_enrichment:bool=True
     roots:list[Root]=Field(default_factory=list,max_length=20)
     @model_validator(mode='after')
     def distinct(self):
@@ -56,6 +57,10 @@ def scope(cfg):return digest(json.dumps(cfg['roots'],sort_keys=True))
 def snapshot():
     cfg=settings()
     return repo().load('local_inventory').get(scope(cfg),{}) if cfg['enabled'] else {}
+
+def valid_year(value):
+    match=re.match(r'^(\d{4})(?:-|$)',str(value or ''))
+    return match.group(1) if match and 1000<=int(match.group(1))<=int(time.strftime('%Y'))+2 else ''
 
 def read_tags(file):
     import mutagen
@@ -74,7 +79,7 @@ def read_tags(file):
     title=value('title');artist=value('artist');album_artist=value('albumartist') or artist
     info=audio.info
     return {'title':title or Path(file).stem,'artist':artist or album_artist,'album_artist':album_artist,
-            'album':value('album'),'year':value('originaldate','date')[:4],
+            'album':value('album'),'year':valid_year(value('originaldate')) or valid_year(value('date')),
             'artist_id':mbid(value('musicbrainz_albumartistid','musicbrainz_artistid')),
             'album_id':mbid(value('musicbrainz_releasegroupid')),'release_id':mbid(value('musicbrainz_albumid')),
             'recording_id':mbid(value('musicbrainz_trackid')),'release_track_id':mbid(value('musicbrainz_releasetrackid')),
@@ -206,7 +211,7 @@ def native_view():
     groups={};owned=defaultdict(list)
     for artist in repo().load('local_artists').values():
         for group in artist.get('groups',[]):
-            groups[group['id']]={'album_id':group['id'],'title':group.get('title',''),'artist':artist['name'],'artist_id':artist['id'],'year':group.get('first-release-date','')[:4],'type':group.get('primary-type','Other'),'secondary_types':group.get('secondary-types',[])}
+            groups[group['id']]={'album_id':group['id'],'title':group.get('title',''),'artist':artist['name'],'artist_id':artist['id'],'year':valid_year(group.get('first-release-date')),'type':group.get('primary-type','Other'),'secondary_types':group.get('secondary-types',[])}
     for original in tracks:
         t=dict(original)
         override=track_links.get(t['id'],{})
@@ -217,7 +222,7 @@ def native_view():
         r=releases.get(t.get('release_id') or saved.get('release_id'),{})
         gid=r.get('release-group',{}).get('id') or t.get('album_id') or 'unidentified:'+folder_id
         owned[gid].append({**t,'folder_id':folder_id,'selected_release':r,'selected_release_id':r.get('id') or t.get('release_id')})
-        groups.setdefault(gid,{'album_id':gid,'title':r.get('title') or t['album'] or Path(folder).name,'artist':credit(r.get('artist-credit')) or t['album_artist'] or 'Unknown artist','artist_id':t.get('artist_id',''),'year':r.get('date','')[:4] or t.get('year',''),'type':r.get('release-group',{}).get('primary-type','Other'),'secondary_types':r.get('release-group',{}).get('secondary-types',[])})
+        groups.setdefault(gid,{'album_id':gid,'title':r.get('title') or t['album'] or Path(folder).name,'artist':credit(r.get('artist-credit')) or t['album_artist'] or 'Unknown artist','artist_id':t.get('artist_id',''),'year':valid_year(r.get('date')) or valid_year(t.get('year')),'type':r.get('release-group',{}).get('primary-type','Other'),'secondary_types':r.get('release-group',{}).get('secondary-types',[])})
     config=_config(read_only=True,namespaces=[]);plex,_=current(config.repository,config)
     linked=links([{**t,'file':t.get('plex_file',t['file'])} for t in tracks],plex.get('rows',[]))
     rows=[];errors=list(snap.get('errors',[]))
@@ -249,7 +254,18 @@ def native_view():
     if snap.get('checked_at') and plex.get('checked_at'):
         for t in plex.get('rows',[]):
             if str(t['plex_id']) not in linked_ids:errors.append({'id':'plex:'+str(t['plex_id']),'title':t.get('title'),'artist':t.get('artist'),'reason':'Plex item has no link to a scanned local file. Check music folders and path mappings.'})
-    return {'enabled':cfg['enabled'],'rows':rows,'errors':errors,'checked_at':snap.get('checked_at'),'plex_checked_at':plex.get('checked_at')}
+    from .artist_library import directory,normalize,artist_key
+    artist_links=repo().load('local_artist_links');extras=repo().load('local_artist_enrichment')
+    for row in rows:
+        row['year']=valid_year(row.get('year'))
+        source=artist_key(row['artist'],row.get('artist_id',''))
+        aid=artist_links.get(source,{}).get('artist_id') or row.get('artist_id')
+        extra=extras.get(aid,{})
+        matches=[a for a in extra.get('albums',[]) if normalize(a['title'])==normalize(row['title'])]
+        if len(matches)==1:
+            row['itunes_artwork']=matches[0]['artwork'];row['itunes_url']=matches[0]['url']
+            if not row['year']:row['year']=matches[0]['year'];row['year_source']='iTunes'
+    return {'artists':directory(rows),'enabled':cfg['enabled'],'rows':rows,'errors':errors,'checked_at':snap.get('checked_at'),'plex_checked_at':plex.get('checked_at')}
 
 def availability(rows,apply_preferences=True):
     """One local-file verdict reused by Discover and Requests."""
@@ -275,6 +291,8 @@ def availability(rows,apply_preferences=True):
     return out
 
 def register(app):
+    from .artist_library import register as register_artists
+    register_artists(app)
     class Catalog(BaseModel):
         artist_id:str=''
         release_id:str=''
