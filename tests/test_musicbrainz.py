@@ -1,12 +1,16 @@
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from playlist_bridge.storage import Repository
 from playlist_bridge.musicbrainz_settings import Preferences, settings, ordered
 from playlist_bridge import lidarr
 
 class MusicBrainzTests(unittest.TestCase):
+    @staticmethod
+    def response(data):
+        value=Mock();value.json.return_value=data;value.raise_for_status.return_value=None
+        return value
     def test_order_and_secondary_types(self):
         rows=[{'type':'Album','secondary_types':['Live'],'title':'Live'}, {'type':'Single','title':'Single'}, {'type':'Album','title':'Studio'}]
         prefs=Preferences().model_dump()
@@ -27,13 +31,12 @@ class MusicBrainzTests(unittest.TestCase):
             import hashlib,time
             key=hashlib.sha256(('release-group'+'releasegroup:"Album" AND artist:"Artist"').encode()).hexdigest()
             lidarr.state_put(repo,'musicbrainz_cache',key,{'at':time.time(),'rows':[{'type':'Single'},{'type':'Album'}]})
-            with patch.object(lidarr.requests,'get') as get:
+            with patch('playlist_bridge.musicbrainz_client._session.get') as get:
                 result=lidarr.musicbrainz_search(repo,{},request)
                 self.assertTrue(result['cached'])
                 self.assertEqual(result['rows'][0]['type'],'Album')
                 get.assert_not_called()
-            with patch.object(lidarr.requests,'get') as get:
-                get.return_value.json.return_value={'release-groups':[]}
+            with patch('playlist_bridge.musicbrainz_client._session.get',return_value=self.response({'release-groups':[]})) as get, patch('playlist_bridge.musicbrainz_client.time.sleep'):
                 request.force_refresh=True
                 result=lidarr.musicbrainz_search(repo,{},request)
                 self.assertFalse(result['cached'])
@@ -44,11 +47,10 @@ class MusicBrainzTests(unittest.TestCase):
             repo=Repository(Path(directory)/'bridge.sqlite')
             for values, entity, query in [
                 ({'album':'Armageddon'}, 'release-group', 'releasegroup:"Armageddon"'),
-                ({'title':'Song','artist':'Artist','album':'Album'}, 'recording', 'recording:"Song" AND release:"Album" AND artist:"Artist"'),
+                ({'title':'Song','artist':'Artist','album':'Album'}, 'release-group', 'releasegroup:"Album" AND artist:"Artist"'),
                 ({'artist':'Artist'}, 'release-group', 'artist:"Artist"'),
             ]:
-                with patch.object(lidarr.requests,'get') as get:
-                    get.return_value.json.return_value={}
+                with patch('playlist_bridge.musicbrainz_client._session.get',return_value=self.response({})) as get, patch('playlist_bridge.musicbrainz_client.time.sleep'):
                     lidarr.musicbrainz_search(repo,{},lidarr.Lookup(**values, fields_search=True))
                     self.assertTrue(get.call_args.args[0].endswith('/'+entity))
                     self.assertEqual(get.call_args.kwargs['params']['query'],query)

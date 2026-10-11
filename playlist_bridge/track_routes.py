@@ -30,16 +30,22 @@ class ApplyRequest(BaseModel):
     preview_id: str
 
 
-def inspect(config, track):
+def inspect(config, track, playlist_keys=None):
     from .api import _playlist_key
-    from .legacy import Syncer
+    from .sync_engine import Syncer
     syncer=Syncer(config)
     memberships=[];unknown=[]
     for playlist in config.config.get('playlists',[]):
         key=_playlist_key(playlist)
+        if playlist_keys is not None and key not in playlist_keys:continue
         health=config.health.get(key,{})
-        source=health.get('source_preview')
-        if source is None:source=config.source_snapshots.get(key)
+        source=config.source_snapshots.get(key)
+        historical=False
+        if not isinstance(source,list):
+            source=health.get('source_preview');historical=isinstance(source,list)
+        if isinstance(source,list):
+            from .playlist_overlays import apply
+            source=apply(config.repository,key,source)
         source_known=isinstance(source,list)
         if not source_known:unknown.append(playlist.get('plex_playlist_name',key));source=[]
         occurrences=[t for t in source if syncer._same_missing_identity(t,track)]
@@ -64,7 +70,7 @@ def inspect(config, track):
             details.append({'source':t,'search_key':search_key,'plex_id':str(plex_id) if plex_id is not None else None,
                 'status':status,'match':metadata.get('matched_track') if isinstance(metadata,dict) else None})
         memberships.append({'key':key,'name':playlist.get('plex_playlist_name',key),'source':playlist.get('source'),
-            'occurrences':len(occurrences),'count_exact':source_known,'tracks':details,'statuses':dict(Counter(d['status'] for d in details))})
+            'occurrences':len(occurrences),'count_exact':source_known and not historical,'source_basis':'historical health' if historical else 'current saved source' if source_known else 'legacy match state','tracks':details,'statuses':dict(Counter(d['status'] for d in details))})
     return {'track':track,'memberships':memberships,'occurrences':sum(m['occurrences'] for m in memberships),
             'cached':True,'unknown_playlists':unknown}
 
@@ -76,13 +82,14 @@ def fingerprint(config, rows):
 
 def preview(request):
     from .api import _config, _health_plex
-    from .legacy import Matcher
-    config=_config(read_only=True)
+    from .matching import Matcher
+    config=_config(read_only=True,namespaces=['health','source_snapshots','mapping','match_metadata','missing','ignored_tracks','artist_aliases'])
     track=request.model_dump(include={'title','artist','album'})
     result=inspect(config,track)
     rows=[m for m in result['memberships'] if m['key'] in request.playlist_keys]
     if set(m['key'] for m in rows)!=set(request.playlist_keys):raise HTTPException(409,'Playlist memberships changed. Reload Track Details.')
-    library=_health_plex(config).search_library('');lookup={str(t.get('plex_id')):t for t in library}
+    from .inventory import read_plex
+    library=read_plex(config);lookup={str(t.get('plex_id')):t for t in library}
     if request.mode=='manual' and request.plex_id not in lookup:raise HTTPException(404,'Choose an existing Plex track')
     changes=[];unchanged=[];decisions={}
     for membership in rows:
@@ -110,7 +117,8 @@ def preview(request):
 
 def apply_preview(preview_id):
     from .api import _config, _playlist_key, _capture, _health_plex
-    from .legacy import ProcessLock, Syncer
+    from .process_lock import ProcessLock
+    from .sync_engine import Syncer
     from . import jobs
     with ProcessLock():
         with _lock:cached=copy.deepcopy(_cache.get(preview_id))
@@ -156,6 +164,6 @@ def register(app):
     @app.post('/api/tracks/details')
     def details(request:TrackRequest):
         from .api import _config
-        return inspect(_config(read_only=True),request.model_dump())
+        return inspect(_config(read_only=True,namespaces=['health','source_snapshots','mapping','match_metadata','missing','ignored_tracks','artist_aliases']),request.model_dump())
     @app.post('/api/tracks/preview')
     def make_preview(request:PreviewRequest):return preview(request)

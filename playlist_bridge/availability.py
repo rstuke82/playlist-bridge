@@ -7,7 +7,6 @@ from . import jobs
 
 class Preferences(BaseModel):
     refresh_lidarr: bool = True
-    retry_missing: bool = True
     cache_minutes: Literal[5,15,30,60] = 15
 
 def preferences(repo):
@@ -17,7 +16,9 @@ def preferences(repo):
 
 def execute(payload):
     from .api import _config,_health_plex,_playlist_key,job_store,_record_log
-    from .legacy import ProcessLock,Syncer,Matcher
+    from .process_lock import ProcessLock
+    from .sync_engine import Syncer
+    from .matching import Matcher
     from .lidarr import config as lidarr_config
     from .lidarr_downloads import snapshot
     from .library_cache import reuse
@@ -39,7 +40,6 @@ def execute(payload):
                 signature=json.dumps({k:track.get(k,'') for k in ('title','artist','album')},sort_keys=True)
                 if old and str(old) in lookup:candidate=str(old)
                 elif provenance=='manual':continue
-                elif not prefs.retry_missing:continue
                 else:
                     if signature not in decisions:
                         decisions[signature]=Matcher.match_track(track,library,{})

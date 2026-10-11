@@ -29,7 +29,7 @@ def enqueue(keys,changes):
 
 def execute():
     from .api import job_store,_config,_playlist_key
-    from .legacy import ProcessLock
+    from .process_lock import ProcessLock
     from . import jobs
     repo=job_store().repository
     with ProcessLock():

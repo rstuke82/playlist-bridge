@@ -1,8 +1,8 @@
-"""Playlist Bridge 2.0 command dispatcher."""
+"""Harmonia web application launcher."""
 
 import sys
 
-from . import __version__
+from . import __release_name__, __version__
 
 
 def main() -> int:
@@ -17,11 +17,10 @@ def main() -> int:
         print(f"{__version__}")
         return 0
 
-    print("Playlist Bridge 3.0 Beta 6")
+    print(__release_name__)
     print("Usage:")
-    print("  python sync.py                 # existing CLI")
-    print("  python sync.py --sync-all      # automated CLI sync")
-    print("  python -m playlist_bridge web  # web UI/API on port 8173")
+    print("  python -m playlist_bridge web      # web UI/API on port 8173")
+    print("  python -m playlist_bridge version  # installed version")
     return 0
 
 

@@ -1,4 +1,4 @@
-"""Generic webhook notification support for Playlist Bridge 2.0."""
+"""Generic webhook notification support for Harmonia 2.0."""
 
 from __future__ import annotations
 
@@ -59,7 +59,7 @@ class WebhookNotifier:
         response = requests.post(
             self.settings.url,
             json={
-                "application": "Playlist Bridge",
+                "application": "Harmonia",
                 "event": event,
                 "message": message,
                 "data": data or {},

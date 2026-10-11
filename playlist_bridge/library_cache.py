@@ -1,4 +1,4 @@
-"""Bounded account-scoped Plex snapshots, opt-in for sync operations only."""
+"""Saved account-scoped Plex reads, with opt-in fresh sync verification."""
 import contextvars
 import hashlib
 import threading
@@ -23,8 +23,16 @@ def reuse(minutes=15, refresh=False):
 
 def load(client, fetch):
     policy = _policy.get()
-    if policy is None:
-        return fetch()
+    # Ordinary reads consume the last completed account-scoped scan, without
+    # an age expiry or a network fallback. Only explicit refresh work fetches.
+    if policy is None or not policy['refresh']:
+        from .api import job_store
+        from .inventory import snapshot,identity
+        from fastapi import HTTPException
+        saved=snapshot(job_store().repository,'plex',identity(client))
+        if not saved or not saved.get('checked_at'):
+            raise HTTPException(409,'No saved Plex inventory is available for this account. Run Scan Plex Library first.')
+        return [dict(t) for t in saved.get('rows',[])]
     identity = hashlib.sha256(repr((client.base_url, client.music_library_key, sorted(client.headers.items()))).encode()).hexdigest()
     # Only identical credentials/library share a loading lock. Never hold the
     # global cache lock during a network read for an unrelated account.

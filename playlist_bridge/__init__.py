@@ -1,5 +1,8 @@
-"""Playlist Bridge package."""
+"""Harmonia package."""
 
-__version__ = "3.0.0-beta.6"
+__version__ = "3.0.0-beta7"
 
-__build__ = "20260928.1"
+__build__ = "20261011.9"
+
+
+__release_name__ = "Harmonia 3.0 Beta 7"

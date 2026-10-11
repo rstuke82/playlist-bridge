@@ -8,7 +8,7 @@ from playlist_bridge.storage import Repository
 from playlist_bridge.jobs import Store,next_run
 from playlist_bridge import inventory,library_cache,queued_settings,playlist_schedules
 from playlist_bridge.lidarr import state_put
-from playlist_bridge.legacy import Matcher
+from playlist_bridge.matching import Matcher
 
 class Beta2(unittest.TestCase):
  def setUp(self):
@@ -26,8 +26,15 @@ class Beta2(unittest.TestCase):
    with library_cache.reuse():self.assertEqual(library_cache.load(client,fetch)[0]['plex_id'],'1')
    fetch.assert_not_called()
    library_cache.invalidate(discard_persistent=True)
-   with library_cache.reuse():self.assertEqual(library_cache.load(client,fetch)[0]['plex_id'],'fresh')
+   with self.assertRaises(__import__('fastapi').HTTPException):library_cache.load(client,fetch)
+   fetch.assert_not_called()
   self.assertIn('lidarr',self.repo.load('inventory'))
+ def test_snapshot_decodes_only_requested_inventory(self):
+  inventory.publish(self.repo,'plex','plex-server',[{'plex_id':'1'}],time.monotonic())
+  inventory.publish(self.repo,'lidarr','lidarr-server',[{'id':2}],time.monotonic())
+  with patch.object(self.repo,'load',side_effect=AssertionError('must not decode the entire inventory namespace')):
+   self.assertEqual(inventory.snapshot(self.repo,'lidarr','lidarr-server')['rows'],[{'id':2}])
+   self.assertFalse(inventory.snapshot(self.repo,'plex','wrong-server'))
  def test_retired_flags_cannot_be_queued(self):
   from fastapi import HTTPException
   c=SimpleNamespace(config={'playlists':[{'source':'spotify','source_id':'1'}]})
@@ -51,14 +58,14 @@ class Beta2(unittest.TestCase):
   client=SimpleNamespace(base_url='plex',music_library_key='1',headers={'X-Plex-Token':'x','Accept':'application/json'})
   inventory.publish(self.repo,'plex',inventory.identity(client),[{'plex_id':'different','title':'Song','artist':'Artist','album':'Album'}],time.monotonic())
   syncer=Mock();syncer._get_match_provenance.return_value='manual';syncer._find_ignored_track_key.return_value=None
-  with patch('playlist_bridge.api.job_store',return_value=self.store),patch('playlist_bridge.api._config',return_value=c),patch('playlist_bridge.legacy.Syncer',return_value=syncer):
+  with patch('playlist_bridge.api.job_store',return_value=self.store),patch('playlist_bridge.api._config',return_value=c),patch('playlist_bridge.sync_engine.Syncer',return_value=syncer):
    result=inventory.reconcile()
   self.assertEqual(result['available'],0);c.save.assert_not_called()
   self.assertEqual(c.mapping['spotify:1']['Song|Artist'],'missing-manual-id')
  def test_failed_scan_keeps_previous_snapshot(self):
   inventory.publish(self.repo,'plex','original',[{'plex_id':'1'}],time.monotonic())
   with patch('playlist_bridge.api.job_store',return_value=self.store),patch('playlist_bridge.api._config'),patch('playlist_bridge.api._health_plex') as plex:
-   plex.return_value.search_library.side_effect=RuntimeError('Plex unavailable')
+   plex.return_value._fetch_library.side_effect=RuntimeError('Plex unavailable')
    with self.assertRaises(RuntimeError):inventory.scan('plex')
   self.assertEqual(self.repo.load('inventory')['plex']['identity'],'original')
  def test_safe_identity_normalization(self):

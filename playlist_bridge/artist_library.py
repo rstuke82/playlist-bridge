@@ -90,7 +90,7 @@ def enrich(artist,local_albums,selected_id=None):
     known={normalize(a) for a in local_albums}
     if not selected_id and not any(normalize(a.get('collectionName')) in known for a in albums):
         put('local_artist_enrichment',aid,{'status':'Review iTunes artist','candidates':[person],'checked_at':time.time()});return
-    put('local_artist_enrichment',aid,{'status':'Loaded','reviewed':bool(selected_id),'itunes_id':itunes_id,'genre':person.get('primaryGenreName',''),'artist_url':apple_url(person.get('artistLinkUrl') or person.get('artistViewUrl')),'checked_at':time.time(),'albums':[{'title':a.get('collectionName',''),'year':valid_year(a.get('releaseDate')),'artwork':image_url(a.get('artworkUrl100')),'url':apple_url(a.get('collectionViewUrl'))} for a in albums]})
+    put('local_artist_enrichment',aid,{'status':'Loaded','reviewed':bool(selected_id),'itunes_id':itunes_id,'genre':person.get('primaryGenreName',''),'artist_url':apple_url(person.get('artistLinkUrl') or person.get('artistViewUrl')),'checked_at':time.time(),'albums':[{'id':a.get('collectionId'),'title':a.get('collectionName',''),'year':valid_year(a.get('releaseDate')),'artwork':image_url(a.get('artworkUrl100')),'url':apple_url(a.get('collectionViewUrl'))} for a in albums]})
 
 def refresh(payload):
     from .local_library import native_view,refresh_catalog,settings

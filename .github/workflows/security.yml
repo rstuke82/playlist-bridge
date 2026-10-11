@@ -1,0 +1,36 @@
+name: Runtime image security
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  image:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Build exact runtime
+        run: docker build -t harmonia:ci .
+      - name: Verify runtime and regressions
+        run: |
+          docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:rw,noexec,nosuid,size=64m --entrypoint python -v "$PWD/tests:/app/tests:ro" harmonia:ci -c "import os; assert os.getuid()==10001; import playlist_bridge.api"
+          docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:rw,noexec,nosuid,size=64m --entrypoint python -v "$PWD/tests:/app/tests:ro" -w /app -v "$PWD/scripts:/app/scripts:ro" harmonia:ci -m unittest discover -s /app/tests
+      - name: Frontend regressions
+        run: |
+          npm --prefix web ci
+          for script in tests/*.cjs; do node "$script" || exit 1; done
+      - name: Scan actual image OS and Python packages
+        env:
+          DOCKER_SCOUT_HUB_USER: ${{ secrets.DOCKER_SCOUT_HUB_USER }}
+          DOCKER_SCOUT_HUB_PASSWORD: ${{ secrets.DOCKER_SCOUT_HUB_PASSWORD }}
+        run: |
+          mkdir -p verification
+          docker save harmonia:ci -o verification/image.tar
+          docker run --rm -v "$PWD/verification:/scan:ro" -e DOCKER_SCOUT_HUB_USER -e DOCKER_SCOUT_HUB_PASSWORD docker/scout-cli:1.25.0@sha256:d385046155c692ff5f4752fc32d612202a9211ae2c7904ae52bb65f9e1dc620a cves --exit-code --only-severity critical,high archive:///scan/image.tar

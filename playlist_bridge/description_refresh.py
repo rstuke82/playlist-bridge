@@ -26,8 +26,8 @@ def queue_server_schedule():
 
 def execute(payload):
     from .api import _config, _playlist_key, _health_plex
-    from .legacy import ProcessLock
-    from .playlist_description import render, MARKER
+    from .process_lock import ProcessLock
+    from .playlist_description import render, MARKER, LEGACY_MARKER
     changed = 0
     with ProcessLock():
         config = _config(read_only=True, namespaces=[])
@@ -42,16 +42,17 @@ def execute(payload):
             if not rows:
                 raise ValueError('Plex did not return the playlist metadata.')
             description = rows[0].get('summary', '')
-            if MARKER not in description:
-                jobs.output('No Bridge sync summary yet; it will be added on the next successful sync.')
+            marker=MARKER if MARKER in description else LEGACY_MARKER
+            if marker not in description:
+                jobs.output('No Harmonia sync summary yet; it will be added on the next successful sync.')
                 continue
             # Preserve the last successful sync's source/count summary exactly.
-            old = description.split(MARKER, 1)[1]
+            old = description.split(marker, 1)[1]
             next_line = next(line for line in render('', playlist, 0, 0, 0).splitlines() if line.startswith('Next scheduled sync:'))
             lines = [line for line in old.splitlines() if not line.startswith('Next scheduled sync:')]
             at = next((i+1 for i, line in enumerate(lines) if line.startswith('Last successful sync:')), len(lines))
             lines.insert(at, next_line)
-            updated = description.split(MARKER, 1)[0] + MARKER + '\n'.join(lines)
+            updated = description.split(marker, 1)[0] + MARKER + '\n'.join(lines)
             write = requests.put(f"{plex.base_url}/playlists/{playlist['plex_playlist_id']}", headers=plex.headers, params={'summary': updated}, timeout=20)
             write.raise_for_status()
             changed += 1

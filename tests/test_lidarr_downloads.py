@@ -74,6 +74,24 @@ class DownloadTests(unittest.TestCase):
         self.client.items=[];downloads._last.clear()
         downloads.snapshot(self.repo,self.cfg)
         self.assertEqual(self.repo.load('lidarr_requests')['album']['download_status'],'Imported into Lidarr')
+    def test_direct_lookup_prevents_false_removed_status_during_catalog_lag(self):
+        original=self.client.call
+        def lagging(method,path,**kwargs):
+            if path=='album':return []
+            return original(method,path,**kwargs)
+        self.client.call=lagging
+        downloads.snapshot(self.repo,self.cfg,force=True)
+        state=self.repo.load('lidarr_requests')['album']
+        self.assertFalse(state['removed_from_lidarr'])
+        self.assertEqual(state['download_status'],'Downloading')
+        self.assertIn(('GET','album/7',{'quiet':True}),self.client.calls)
+    def test_failed_finalization_is_not_automatically_requeued(self):
+        from playlist_bridge.lidarr_requests import save
+        from playlist_bridge.jobs import Store
+        self.client.items=[]
+        save(self.repo,'album',download_status='Imported into Lidarr',finalize_status='failed',finalize_error='Previous failure')
+        downloads.snapshot(self.repo,self.cfg,force=True)
+        self.assertEqual(Store(self.repo)._rows("SELECT * FROM jobs WHERE action='album_finalize'"),[])
     def test_import_failure_preserves_reason_and_unknown_size(self):
         result=downloads.describe({'id':1,'status':'completed','trackedDownloadState':'importFailed','statusMessages':[{'title':'Import failed','messages':['Permission denied']} ]})
         self.assertEqual(result['status'],'Import blocked');self.assertIsNone(result['percent']);self.assertIn('Permission denied',result['error'])

@@ -1,6 +1,6 @@
 **
 !requirements.txt
-!sync.py
+!requirements.lock
 !LICENSE
 !playlist_bridge/
 !playlist_bridge/*.py

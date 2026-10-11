@@ -11,7 +11,25 @@ from zipfile import ZipFile, ZIP_DEFLATED
 from contextlib import closing
 from . import __version__
 
-TABLES=('state','health_history','migration_backups','application_logs','jobs','schedules','job_events')
+TABLES=('state','health_history','migration_backups','application_logs','diagnostic_events','jobs','schedules','job_events')
+
+
+def _upgrade_database(path):
+    """Bring a Beta 12 database snapshot forward before compatibility checks."""
+    with closing(sqlite3.connect(path)) as db:
+        version=db.execute('PRAGMA user_version').fetchone()[0]
+        if version==4:
+            db.execute('''CREATE TABLE diagnostic_events(
+                id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL,
+                level TEXT NOT NULL, operation TEXT NOT NULL, message TEXT NOT NULL,
+                worker TEXT, job_id TEXT, request_id TEXT, user_id TEXT, service TEXT,
+                entity_type TEXT, entity_id TEXT, details TEXT)''')
+            db.execute('''INSERT INTO diagnostic_events(created_at,level,operation,message)
+                          SELECT created_at,level,operation,message FROM application_logs''')
+            db.execute('PRAGMA user_version=5')
+            version=5
+        if version!=5:
+            raise ValueError('Invalid user database in backup')
 
 
 def directory(repo):
@@ -75,7 +93,7 @@ def create(repo,kind='manual'):
 
 def restore(repo,name):
     from . import jobs
-    from .legacy import _atomic_write_json
+    from .atomic_files import _atomic_write_json
     archive=path_for(repo,name)
     ctx=jobs.current()
     with tempfile.TemporaryDirectory(dir=directory(repo),prefix='.restore-') as tmp:
@@ -91,9 +109,11 @@ def restore(repo,name):
                 match=re.fullmatch(r'users/([0-9]+)/playlist-bridge\.db',member)
                 if not match:continue
                 path=Path(tmp)/('user-'+match[1]+'.db');path.write_bytes(z.read(member))
+                _upgrade_database(path)
                 with closing(sqlite3.connect(path)) as check:
-                    if check.execute('PRAGMA quick_check').fetchone()[0]!='ok' or check.execute('PRAGMA user_version').fetchone()[0]!=4:raise ValueError('Invalid user database in backup')
+                    if check.execute('PRAGMA quick_check').fetchone()[0]!='ok':raise ValueError('Invalid user database in backup')
                 members[match[1]]=path
+        _upgrade_database(restored)
         with closing(sqlite3.connect(restored)) as check:
             if check.execute('PRAGMA quick_check').fetchone()[0]!='ok':raise ValueError('Backup database is damaged')
             for table in TABLES:

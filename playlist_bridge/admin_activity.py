@@ -31,13 +31,20 @@ def resolve(job_id):
     return mine
 
 
-def history(offset=0,limit=50,owner=''):
-    rows=[];total=0
+def history(offset=0,limit=50,owner='',worker='',sections=False):
+    where,params=jobs.history_where(worker)
+    rows=[];active=[];total=0
+    completed_where=where+" AND status NOT IN ('running','cancelling','queued')" if sections else where
+    order="COALESCE(finished_at,started_at,created_at) DESC,created_at DESC,id ASC" if sections else "created_at DESC"
     for user,store in stores():
         if owner and str(user['id'] if user else 'server')!=owner:continue
-        with store.repository.connect() as db:total+=db.execute('SELECT COUNT(*) FROM jobs').fetchone()[0]
-        rows.extend(describe(r,user) for r in store._rows('SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?',(offset+limit,)))
-    return {'rows':sorted(rows,key=lambda r:r['created_at'],reverse=True)[offset:offset+limit],'total':total}
+        with store.repository.connect() as db:total+=db.execute('SELECT COUNT(*) FROM jobs'+completed_where,params).fetchone()[0]
+        rows.extend(describe(r,user) for r in store._rows('SELECT * FROM jobs'+completed_where+' ORDER BY '+order+' LIMIT ?',(*params,offset+limit)))
+        if sections:active.extend(describe(r,user) for r in store._rows("SELECT * FROM jobs"+where+" AND status IN ('running','cancelling','queued') ORDER BY created_at ASC,id ASC",params))
+    key=lambda r:(r.get('finished_at') or r.get('started_at') or r['created_at'],r['created_at']) if sections else (r['created_at'],)
+    result={'rows':sorted(rows,key=key,reverse=True)[offset:offset+limit],'total':total}
+    if sections:result['active']=active
+    return result
 
 
 def job(job_id):

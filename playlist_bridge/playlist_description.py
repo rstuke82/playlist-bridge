@@ -1,7 +1,8 @@
 """A replaceable summary derived from the original source description."""
 from datetime import datetime
 from zoneinfo import ZoneInfo
-MARKER='\n\n— Playlist Bridge —\n'
+MARKER='\n\n— Harmonia —\n'
+LEGACY_MARKER='\n\n— Playlist Bridge —\n'
 
 def readable(value,zone):
     try:return datetime.fromisoformat(value).astimezone(ZoneInfo(zone)).strftime('%b %d, %Y at %-I:%M %p %Z')
@@ -13,7 +14,7 @@ def render(description,playlist,source_count,matched_count,missing_count,ignored
     repo=personal_repository();tz=zone(repo)
     schedule=read(repo,f"{playlist.get('source')}:{playlist.get('source_id')}")
     upcoming='Manual only' if schedule['mode']=='disabled' else readable(schedule['next_run'],tz) if schedule.get('next_run') else 'Automatic sync disabled'
-    original=(description or '').split(MARKER,1)[0].rstrip()
+    original=(description or '').split(MARKER,1)[0].split(LEGACY_MARKER,1)[0].rstrip()
     detail=(f"Source: {playlist.get('source_url','')}\n"
             f"Last successful sync: {readable(playlist.get('last_synced'),tz)}\n"
             f"Next scheduled sync: {upcoming}\n"

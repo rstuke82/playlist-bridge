@@ -47,7 +47,7 @@ def register(app):
         if any(i not in candidates for i in body.ids):raise HTTPException(409,'Plex sharing changed. Refresh the list.')
         for key in set(body.ids):
             if key in existing:continue
-            accounts.put('accounts',key,{**candidates[key],'admin':False,'can_request':True,'can_playlists':True,'disabled':False,'pending_login':True})
+            accounts.put('accounts',key,{**candidates[key],'admin':False,'can_request':True,'auto_approve':False,'can_playlists':True,'disabled':False,'pending_login':True})
             count+=1
         accounts.root_repository().add_log('INFO','Users',f'Administrator imported {count} Plex users; waiting for their own sign-in')
         return {'imported':count}

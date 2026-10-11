@@ -22,7 +22,7 @@ class Beta3(unittest.TestCase):
   modes=self.repo.load('playlist_schedules')
   self.assertEqual([modes['spotify:'+str(i)]['mode'] for i in [1,2,3]],['inherit','disabled','custom'])
   self.assertEqual(len(sync_policy.eligible(self.repo,self.playlists)),1)
-  self.assertFalse(next(s for s in self.store.schedules() if s['action']=='sync')['enabled'])
+  self.assertTrue(next(s for s in self.store.schedules() if s['action']=='sync')['enabled'])
  def test_upgrade_scoped_schedules_retired_history_retained(self):
   with self.repo.connect() as db:
    db.execute("INSERT INTO schedules(id,name,action,scope,cron,timezone,enabled,next_run) VALUES('old','old','sync','automatic','0 */3 * * *','UTC',1,'2099-01-01')")
@@ -30,7 +30,7 @@ class Beta3(unittest.TestCase):
   jid=self.store.enqueue('health',{'scope':'favorites'});self.store.update(jid,status='completed')
   sync_policy.migrate(self.store)
   items=self.store.schedules();server=next(s for s in items if s['action']=='sync' and s['scope']=='all')
-  self.assertTrue(server['enabled']);self.assertEqual(server['cron'],'0 */3 * * *')
+  self.assertTrue(server['enabled']);self.assertEqual(server['cron'],tasks.expression(24,'02:00'))
   self.assertFalse(next(s for s in items if s['id']=='health-old')['enabled']);self.assertEqual(self.store.get(jid)['status'],'completed')
   self.assertTrue(self.repo.load('tasks')['sync_modes_v3']['notes'])
  def test_global_and_custom_due_same_tick(self):
@@ -45,7 +45,7 @@ class Beta3(unittest.TestCase):
  def test_rename_is_latest_value_and_keeps_identity(self):
   config=SimpleNamespace(config={'playlists':self.playlists},save=Mock())
   plex=SimpleNamespace(base_url='http://plex',headers={})
-  with patch('playlist_bridge.api._config',return_value=config),patch('playlist_bridge.api.job_store',return_value=self.store),patch('playlist_bridge.api._health_plex',return_value=plex),patch('playlist_bridge.legacy.ProcessLock',return_value=nullcontext()),patch('requests.put') as put:
+  with patch('playlist_bridge.api._config',return_value=config),patch('playlist_bridge.api.job_store',return_value=self.store),patch('playlist_bridge.api._health_plex',return_value=plex),patch('playlist_bridge.process_lock.ProcessLock',return_value=nullcontext()),patch('requests.put') as put:
    first=queued_settings.enqueue(['spotify:1'],{'name':'First'})
    last=queued_settings.enqueue(['spotify:1'],{'name':'Heavy Rotation — Ryan'})
    self.assertEqual(first['job_id'],last['job_id']);queued_settings.execute()
@@ -54,14 +54,16 @@ class Beta3(unittest.TestCase):
   self.assertEqual(self.playlists[0]['custom_name'],'Heavy Rotation — Ryan');self.assertFalse(self.repo.load('pending_playlist_settings'))
  def test_description_replaces_summary(self):
   p={'source_url':'https://example.com/playlist','last_synced':'2026-09-24T12:00:00+00:00'}
-  first=render('Source notes',p,100,90,8,2);second=render(first,p,100,95,3,2)
+  first=render('Source notes',p,100,90,8,2).replace(MARKER,'\n\n— Playlist Bridge —\n');second=render(first,p,100,95,3,2)
   self.assertEqual(second.count(MARKER),1);self.assertTrue(second.startswith('Source notes'))
   self.assertIn('95 matched',second);self.assertNotIn('90 matched',second)
- def test_health_scope_is_always_all(self):
+ def test_health_scope_retains_selection(self):
   from playlist_bridge.api import validated_payload
-  self.assertEqual(validated_payload('health',{'scope':'favorites'}),{'scope':'all'})
-  self.assertEqual(validated_payload('health',{'scope':'selected','playlist_keys':['spotify:1']}),{'scope':'all'})
- def test_manual_sync_includes_custom_and_health_includes_everyone(self):
+  with self.assertRaises(ValueError):validated_payload('health',{'scope':'favorites'})
+  config=SimpleNamespace(config={'playlists':self.playlists})
+  with patch('playlist_bridge.api._config',return_value=config):
+   self.assertEqual(validated_payload('health',{'scope':'selected','playlist_keys':['spotify:1']}),{'scope':'selected','playlist_keys':['spotify:1']})
+ def test_manual_sync_includes_custom_and_health_retains_scope(self):
   from playlist_bridge.api import _execute_job
   config=SimpleNamespace(config={'playlists':self.playlists},repository=self.repo)
   sync_policy.migrate(self.store)
@@ -71,6 +73,8 @@ class Beta3(unittest.TestCase):
    self.assertEqual(sync.call_count,3)
   with patch('playlist_bridge.api._config',return_value=config),patch('playlist_bridge.api._health_batch',return_value={}) as health:
    _execute_job('health',{'scope':'selected','playlist_keys':['spotify:1']})
+   self.assertEqual(len(health.call_args.args[0]),1)
+   _execute_job('health',{'scope':'all'})
    self.assertEqual(len(health.call_args.args[0]),3)
  def test_lidarr_removed_and_readded_relinked(self):
   cfg={'url':'http://lidarr','api_key':'secret','enabled':True}

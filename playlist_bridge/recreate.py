@@ -6,7 +6,7 @@ from . import jobs
 
 def execute(payload):
     from .api import _config, _playlist_key, _health_plex, sync_one
-    from .legacy import ProcessLock
+    from .process_lock import ProcessLock
     import requests
     with ProcessLock():
         config = _config()
@@ -15,23 +15,23 @@ def execute(payload):
             raise ValueError('Playlist registration no longer exists.')
         plex = _health_plex(config)
         # Validate library access separately: a Plex 404 alone cannot prove deletion.
-        library = plex.search_library('')
-        response = requests.get(f"{plex.base_url}/playlists/{playlist['plex_playlist_id']}", headers=plex.headers, timeout=(5, 15))
-        if response.status_code != 404:
-            response.raise_for_status()
-            raise ValueError('The existing Plex playlist is accessible. Sync it instead of recreating it.')
+        plex.search_library('')
+        destination_id = str(playlist.get('plex_playlist_id') or '').strip()
+        if destination_id:
+            response = requests.get(f"{plex.base_url}/playlists/{destination_id}", headers=plex.headers, timeout=(5, 15))
+            if response.status_code != 404:
+                response.raise_for_status()
+                raise ValueError('The existing Plex playlist is accessible. Sync it instead of recreating it.')
+        else:
+            jobs.output('The destination is already marked missing; retrying recreation from the source playlist.')
         key = payload['playlist_key']
-        available = {str(t['plex_id']) for t in library}
-        seed = next((str(v) for v in config.mapping.get(key, {}).values() if str(v) in available), None)
-        if not seed:
-            raise ValueError('No saved match is currently available in Plex. Resolve a track before recreating this playlist.')
-        jobs.progress('Creating a replacement Plex playlist')
-        destination = plex.create_playlist(playlist.get('custom_name') or playlist['plex_playlist_name'], seed)
-        if not destination:
-            raise ValueError('Plex did not confirm the replacement ID. Inspect Plex before retrying; a playlist may have been created.')
-        # Record the confirmed new ID before syncing, retaining mappings and schedule.
-        playlist['plex_playlist_id'] = str(destination)
+        # The confirmed destination is gone. Clearing only its ID lets the normal
+        # source/Lidarr/Plex matching pipeline choose a currently playable seed,
+        # create the replacement, preserve duplicate ordering, and sync once.
+        # This also makes a failed attempt safely retryable later.
+        playlist['plex_playlist_id'] = ''
         config.save()
+        jobs.progress('Matching the source and recreating its Plex playlist')
     return sync_one(key)
 
 

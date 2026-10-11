@@ -1,8 +1,9 @@
+from playlist_bridge.config import Config
 """Focused beta checks; external media services are never mutated."""
 import asyncio,json
 from unittest.mock import patch
 from test_30 import MultiUser
-from playlist_bridge import accounts,api,legacy
+from playlist_bridge import accounts, api
 from playlist_bridge.lidarr import state_put
 
 class Beta3(MultiUser):
@@ -11,19 +12,19 @@ class Beta3(MultiUser):
         return status,json.loads(raw)
     def test_promotion_keeps_personal_library(self):
         with accounts.as_user(self.a):
-            c=legacy.Config();c.config['playlists']=[{'source':'spotify','source_id':'mine'}];c.save();original=accounts.personal_repository().directory
+            c=Config();c.config['playlists']=[{'source':'spotify','source_id':'mine'}];c.save();original=accounts.personal_repository().directory
         status,data=self.call('/api/users/11','PUT',self.admin,{'admin':True,'disabled':False,'can_request':True})
         self.assertEqual(status,200,data)
         with accounts.as_user(accounts.users()['11']):
             self.assertEqual(accounts.personal_repository().directory,original)
-            self.assertEqual(legacy.Config().config['plex']['token'],'ALICE_SECRET')
-            self.assertEqual(legacy.Config().config['playlists'][0]['source_id'],'mine')
+            self.assertEqual(Config().config['plex']['token'],'ALICE_SECRET')
+            self.assertEqual(Config().config['playlists'][0]['source_id'],'mine')
         self.assertIn('11',[u['id'] for u,_ in accounts.member_stores()])
         status,_=self.call('/api/users/1','PUT',self.admin,{'admin':False,'disabled':False,'can_request':True})
         self.assertEqual(status,409)
     def test_bulk_schedule_updates_only_selected(self):
         with accounts.as_user(self.a):
-            c=legacy.Config();c.config['playlists']=[{'source':'spotify','source_id':v} for v in ('one','two')];c.save()
+            c=Config();c.config['playlists']=[{'source':'spotify','source_id':v} for v in ('one','two')];c.save()
         status,data=self.call('/api/playlists/sync-mode','PUT',body={'playlist_keys':['spotify:one'],'mode':'disabled'})
         self.assertEqual(status,200,data)
         with accounts.as_user(self.a):
@@ -35,7 +36,7 @@ class Beta3(MultiUser):
         state_put(self.repo,'shared_playlists','example',source)
         status,rows=self.call('/api/shared-playlists');self.assertEqual(status,200);self.assertEqual(rows[0]['name'],'Rock Workout');self.assertFalse(rows[0]['subscribed'])
         with accounts.as_user(self.a):
-            c=legacy.Config();c.config['playlists']=[{'source':'applemusic','source_id':'pl.test'}];c.save()
+            c=Config();c.config['playlists']=[{'source':'applemusic','source_id':'pl.test'}];c.save()
         _,rows=self.call('/api/shared-playlists');self.assertTrue(rows[0]['subscribed'])
         _,rows=self.call('/api/shared-playlists',user=self.b);self.assertFalse(rows[0]['subscribed'])
         status,_=self.call('/api/shared-playlists','POST',body=source);self.assertEqual(status,403)

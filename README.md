@@ -1,28 +1,40 @@
-# Playlist Bridge
+# Harmonia
 
-**Release:** Playlist Bridge 3.0 Beta 4
+**Release:** Harmonia 3.0 Beta 7 (`v3.0.0-beta7`) — source build 20261011.9.
 
-Playlist Bridge syncs public **Spotify** and **Apple Music** playlists to playlists in your local **Plex music library**.
+Current changes and validation are recorded in REMAINING-FIXES.md. Runtime credentials and databases are excluded from release packaging. The complete regression suite is tracked.
 
-Playlist Bridge provides a self-hosted **React + TypeScript** web interface with a **FastAPI** backend while retaining the existing matching engine, CLI, with SQLite runtime storage.
+Docker uses Python 3.12; native validation uses the workspace Python. Live Plex/Lidarr and physical-device checks remain separate deployment validation.
+
+Harmonia syncs public **Spotify** and **Apple Music** playlists to playlists in your local **Plex music library**.
+
+Harmonia provides a self-hosted **React + TypeScript** web interface with a **FastAPI** backend with its matching engine and SQLite runtime storage.
 
 > Back up the existing data directory before upgrading; keep its mount and connection settings.
 
-## 3.0 Beta 4: accounts, discovery and library review
+See [historical release notes](HISTORICAL-README-NOTES.md) for older build reports.
 
-Sign in with Plex. The **configured Plex server owner must sign in first**; existing 2.x playlists and history remain in that owner's account. Individual users must have access to the selected music library. Managed Plex Home users are not supported. For a new installation, configure the Plex connection using the existing CLI before opening the web sign-in page. Serve remote access through HTTPS.
+## First-time setup
 
-Each other account gets a separate SQLite database under the existing data volume's `users/` directory. Its playlists, matches, blocklist and jobs stay separate, and sync uses that user's Plex access token. The administrator controls scheduled sync and health tasks across accounts, access, request permissions, and shared playlist sources. Users can preview shared sources and add their own copy. Already-added sources are hidden per account. Publishing and unpublishing remain administrator-only. Disabled accounts do not run new scheduled work.
+Start Harmonia with its persistent `/data` volume and open the web page. On a fresh installation, the container startup logs print a one-time **setup key**. Enter that key on the setup page, then sign in as the Plex server owner. The authorized sign-in discovers the owned server/music library and creates the administrator. Keep the key and startup logs private; no key is returned by the public API or stored in application Activity logs.
 
-**Discover** replaces the default Dashboard navigation. Add a Last.fm API key in Settings to show albums from trending artists, search albums, or review a Last.fm user's top albums. Responses are cached server-wide for six hours. Availability uses saved Lidarr track identities linked to Plex files; ambiguous links require review. Reviewing Last.fm albums does not automatically request downloads.
+```bash
+docker logs playlist-bridge
+```
 
-Ordinary users request albums using server defaults. Lidarr and MusicBrainz configuration, credentials and caches remain administrator-controlled; download visibility and management can be granted independently in Settings → Users. Requests may require administrator approval. Users can review their own requests. **Library**, also administrator-only, compares Plex and Lidarr inventories: linked, Lidarr only, needs review, or **Needs Attention / Missing from Lidarr**. Missing-from-Lidarr flags wait for both successful scans. Track counts and scan times remain separate from identity links. Plex inventories for shared users respect their own token's library visibility.
+If those startup logs are unavailable, the same key is stored privately in `/data/setup-key` until setup succeeds:
 
-Backups now include personal databases. A restore invalidates browser sessions and interrupts unfinished restored jobs. Back up the entire existing data volume before upgrading or rolling back. CLI use remains the server owner's local workflow; CLI access is not an ordinary-user login.
+```bash
+docker exec playlist-bridge cat /data/setup-key
+```
 
-This beta uses a production frontend build, Python syntax checks and six targeted checks with isolated data. Full regression, browser and container smoke tests were skipped. Live Plex sign-in, Last.fm discovery with your API key, and real-user Plex writes still need validation on your server. Duplicate-file inspection and audio conversion are not included.
+The key persists across restarts before setup, is bound to the authorized Plex sign-in attempt, and is consumed when ownership is established. The private key file is then deleted. Existing configured installations do not need a setup key. If first setup fails before ownership is saved, correct connectivity and retry with the same key. If configuration writing is interrupted after ownership commits, the next startup recovers it automatically.
 
-## What changed in Beta 4
+First-owner setup automatically queues the initial Plex Library Scan. A library-preparation notice links to its progress in Jobs; albums appear when saved inventory is available. A failed scan shows a notice and can be retried in Settings → Tasks. Lidarr and Last.fm can be configured later and remain optional. New members also get their own initial Plex inventory scan.
+
+Sign-in checks are shared for two seconds per attempt. Admission limits apply per IP and globally, with at most eight active PIN checks. A busy response includes Retry-After and the web page waits automatically. Login attempts expire after ten minutes. Reverse proxies must forward client addresses from trusted proxy addresses for per-IP limits to distinguish visitors.
+
+## Core 3.0 changes
 
 - **Create from Text** accepts numbered/plain lists, artist-first or song-first lines, optional albums, and Song by Artist. Users review editable rows, fix ambiguous lines, remove headings, and name the playlist before Save & Sync. Text is treated as data, not instructions. Source order and duplicates remain intact.
 - Custom sources persist in each account's SQLite store and can be edited from Playlist Details. Revision checks prevent overwriting newer edits. Registration survives zero matches so Missing, review and request workflows can be used before a Plex copy exists. Sync creates the Plex copy when playable tracks become available. Existing ignores and blocked artist names apply to text playlists. Custom Playlist is labeled consistently in lists and Missing filters.
@@ -37,9 +49,9 @@ After upgrading, run a Lidarr Library Scan to populate track/file identities and
 
 ## Media availability
 
-Settings → Tasks provides separate Plex Library Scan, Lidarr Library Scan, Reconcile Availability, and Retry Missing Matches tasks. Each task has a frequency and editable start time in the server timezone; Run Now does not shift the schedule. Plex cache and matching options live in Settings → Plex; Lidarr inventory options live in Settings → Lidarr.
+Settings → Tasks provides separate Plex Library Scan, Lidarr Library Scan, Scan Local Files, metadata refresh, playlist, health and maintenance work grouped by worker. Each task has a frequency and editable start time in the server timezone; Run Now does not shift the schedule. Plex cache options live in Settings → Plex; Lidarr inventory options live in Settings → Lidarr.
 
-Scans inventory the entire configured Plex music library and Lidarr catalog, including albums added outside Bridge. Successful snapshots persist in SQLite across restarts and are scoped to the configured service. Scans link saved source tracks and requests without changing playlist contents or manual mappings. Retry Missing Matches applies the automatic matcher separately and marks affected playlists Ready to Sync. Their configured schedule or a manual action handles syncing.
+Scans inventory the entire configured Plex music library and Lidarr catalog, including albums added outside Harmonia. Successful snapshots persist in SQLite across restarts and are scoped to the configured service. Inventory scans update availability without changing playlist contents, manual mappings, or silently starting a playlist retry. Normal playlist sync and health workflows perform matching when needed.
 
 Routine syncs can reuse a fresh Plex snapshot for the configured lifetime. Source playlists are still fetched and destination contents verified. Failed verification invalidates the snapshot. Actual speed gains depend on library size and external services.
 
@@ -49,17 +61,17 @@ Playlist Details has one Sync mode: Server schedule, Custom schedule, or Manual 
 
 ## Lidarr
 
-This preview is published to the beta branch and Docker tags `beta` and `3.0.0-beta.4`. Stable main/latest remain on 2.1.0.
+This candidate follows the existing beta distribution. See the release status at the top of this document; this build targets the beta image.
 
 In Settings → Lidarr, enter the server URL (including any URL base) and API key. Test Connection loads root folders, quality profiles and metadata profiles from that instance. Choosing a root folder loads its quality, metadata, monitoring and tag defaults; Use Root Folder Defaults restores them after overrides. A metadata profile named None is supported and is distinct from monitoring None. Choose defaults, enable the integration and save. Blank API-key fields retain the existing key only when the server URL stays the same. Keys remain server-side in the persistent SQLite database; do not publish the data directory or backups.
 
-On Missing or playlist details, choose **Add Album to Lidarr**. Opening the dialog searches Lidarr using the source album, or track and artist when the album is unknown. Select a result, adjust options inline and click **Add to Lidarr**. Validation runs before the request is queued, then the dialog closes with confirmation on the same page. **Advanced Lookup · MusicBrainz** provides editable Recording, Artist and Album fields, prefilled where possible. Clear a field to omit it; clear Recording and Artist for an album-only search. Missing source albums are resolved through recording search; metadata results are candidates for review, not automatic identifications. MusicBrainz uses its public API without credentials, a descriptive User-Agent, throttling, and a SQLite cache (7 or 30 days, at most 500 lookups). Its availability and Lidarr's metadata catalog can differ.
+On Missing or playlist details, choose **Add Album to Lidarr**. Opening the dialog searches MusicBrainz using the source album, or track and artist when the album is unknown. Select a result, adjust options inline and click **Add to Lidarr**. Validation runs before the request is queued, then the dialog closes with confirmation on the same page. MusicBrainz search provides editable Song, Artist and Album fields, prefilled where possible. Clear a field to omit it; clear Recording and Artist for an album-only search. Missing source albums are resolved through recording search; metadata results are candidates for review, not automatic identifications. MusicBrainz uses its public API without credentials, a descriptive User-Agent, throttling, and a SQLite cache (7 or 30 days, at most 500 lookups). Its availability and Lidarr's metadata catalog can differ.
 
 Defaults monitor only the selected album, do not monitor future discoveries, and do not search immediately. Broader monitoring choices apply only when adding a new artist. Existing artists retain their profiles, paths and other album flags. Paused artists must be enabled in Lidarr before requesting monitored/searching additions. Existing album entries are reused; an already monitored album is never silently unmonitored. Confirmation queues a persistent Activity job; changing settings invalidates an unexecuted preview. A timed-out external write is not automatically retried: inspect Lidarr before retrying.
 
-Adding an album does not remove Bridge's missing entry or alter Plex. Once Lidarr's download/import reaches Plex, Sync / Refresh can resolve it. No scheduled bulk album adds, automatic downloads of every missing album, or automatic MusicBrainz-to-track match changes are included.
+Adding an album does not remove Harmonia's missing entry or alter Plex. Once Lidarr's download/import reaches Plex, Sync / Refresh can resolve it. No scheduled bulk album adds, automatic downloads of every missing album, or automatic MusicBrainz-to-track match changes are included.
 
-When searching a newly added album, Bridge waits for Lidarr’s own refresh and track data rather than starting another refresh. Request status is retained in SQLite and shared across playlists: **Requested in Lidarr**, **Album added; search pending**, or **Album added; search failed**. **Retry Search** only checks readiness and submits or resumes the album search; it does not add or refresh the album again. A pending command is observed, not resubmitted. A search submission that times out without a command ID requires inspection in Lidarr.
+When searching a newly added album, Harmonia waits for Lidarr’s own refresh and track data rather than starting another refresh. Request status is retained in SQLite and shared across playlists: **Requested in Lidarr**, **Album added; search pending**, or **Album added; search failed**. **Retry Search** only checks readiness and submits or resumes the album search; it does not add or refresh the album again. A pending command is observed, not resubmitted. A search submission that times out without a command ID requires inspection in Lidarr.
 
 Playlist filters now consolidate drift, health errors, missing and LOST under **Needs Attention**. Playlist details also support Ignore in the current playlist or universally. See [the roadmap](ROADMAP.md) for future plans.
 
@@ -70,8 +82,8 @@ Additional features:
 - A persistent match queue shared by Missing, playlist details and Track Details. Queue several choices, then **Apply Matches & Sync** to save all and sync each affected playlist once. Edits remain drafts until applied; failed validation and cancelled pending jobs return them to review. Existing compatibility API endpoints retain their immediate job behavior.
 - Ignore requests wait behind active jobs instead of contending with an active sync's write lock. They are saved when executed; Plex removal still happens on the next sync.
 - Add Playlist clears and unlocks its URL field as soon as the job is queued.
-- Settings → General → Console logging: debug off by default, with detailed terminal matching output and successful GET access lines only when enabled. Errors and job summaries remain visible; detailed Activity logs are always retained. CLI output is unchanged.
-- Optional Apple song discovery and preview in match review and Track Details. Select a catalog recording to load Apple's official embedded player and store link. No audio is downloaded or cached by Bridge; preview availability depends on region and Apple's catalog. Spotify preview URLs are deprecated, so Playlist Bridge uses Apple for preview discovery even for Spotify-source tracks.
+- Settings → General → Console logging: debug off by default, with detailed terminal matching output and successful GET access lines only when enabled. Errors and job summaries remain visible; detailed Activity logs are always retained.
+- Optional Apple song discovery and preview in match review and Track Details. Select a catalog recording to load Apple's official embedded player and store link. No audio is downloaded or cached by Harmonia; preview availability depends on region and Apple's catalog. Spotify preview URLs are deprecated, so Harmonia uses Apple for preview discovery even for Spotify-source tracks.
 
 API references: [Lidarr](https://lidarr.audio/docs/api/), [MusicBrainz rate limits](https://musicbrainz.org/doc/MusicBrainz_API/Rate_Limiting).
 
@@ -84,7 +96,7 @@ API references: [Lidarr](https://lidarr.audio/docs/api/), [MusicBrainz rate limi
 
 ## Features
 
-Playlist Bridge provides SQLite persistence, Docker deployment and the existing CLI and matching engine.
+Harmonia provides SQLite persistence, Docker deployment and the matching engine.
 
 - Add Playlist is one action: paste a public Spotify or Apple Music URL, optionally choose a destination name and sync mode, and add it. Invalid or already registered URLs are rejected inline before queuing. Fetching, matching and Plex creation run as a background job with Activity details. The analysis API remains compatible for existing clients.
 - All dialogs render above the application panels, centered in the visible viewport even after scrolling. Dialog content scrolls internally, controls remain reachable on mobile, keyboard focus stays within the dialog and returns to the trigger when closed. This includes Ignore, Fix Match, removal, backup restore, log clearing and Quick Actions.
@@ -92,7 +104,7 @@ Playlist Bridge provides SQLite persistence, Docker deployment and the existing 
 - Activity has permanent desktop and mobile navigation, full job history and retained logs. Playlist filters, sync modes, consistent Settings pages, daily backups, restore and configurable recurring tasks are included.
 - Stable installations default to the latest image and main update channel.
 
-Storage remains SQLite schema 4. New activity snapshots use the existing generic state table; existing schema 4 databases require no schema migration. Jobs and output survive restarts. The API keeps idle polling slow; live activity uses one completion-scheduled request at a time while expanded, then stops after final output. Lists and settings load on demand. Two bounded detail workers, request timeouts, read-only health concurrency, matching thresholds, Docker port 8173 and CLI support are preserved.
+Storage uses SQLite schema 5. Existing schema 4 databases migrate automatically; Beta 12 backups are upgraded during restore. Structured diagnostic events are retained separately from per-job output so the timeline can correlate activity across workers and services. Jobs and output survive restarts. The API keeps idle polling slow; live activity uses one completion-scheduled request at a time while expanded, then stops after final output. Lists and settings load on demand. Two bounded detail workers, request timeouts, read-only health concurrency, matching thresholds, and Docker port 8173 are preserved.
 
 - React + TypeScript web interface
 - FastAPI backend
@@ -103,13 +115,12 @@ Storage remains SQLite schema 4. New activity snapshots use the existing generic
 - Deduplicated missing-track review with Plex candidate matching
 - Reviewed matches wait in a durable queue; apply the batch or use Sync Now to apply the selected playlist’s edits and sync once
 - Plex configuration directly in the Settings page
-- Existing Playlist Bridge CLI remains available
 - Automatic legacy JSON import with preserved backups
 - Atomic state writes and process locking
 
 ## Persistent storage and migration
 
-Native installs use the current working directory, or `PLAYLIST_BRIDGE_DATA_DIR` when set. Docker uses `/data`.
+Native installs use the current working directory, or `HARMONIA_DATA_DIR` when set. Docker uses `/data`.
 
 - `config.json`: startup settings (Plex connection, server/data directory settings).
 - `playlist-bridge.db`: registered playlists, sync policies, mappings, provenance, missing/ignored tracks, snapshots, sync history, artist aliases, notification settings/history where present, and health results/history.
@@ -118,7 +129,7 @@ At first startup, legacy config and `mapping.json`, `missing_tracks.json`, `matc
 
 Back up the entire data directory with the application stopped before upgrading. After migration, retain the database and config when updating. To roll back to a pre-SQLite build, restore the pre-migration backups into a separate directory; later SQLite changes are not exported to legacy JSON.
 
-Missing, empty, `{}`, and partial config files allow the UI to launch. Artist aliases now live in SQLite; editing the old alias JSON no longer changes matching. CLI alias management remains available. First use initializes/migrates storage even for a CLI dry run; subsequent dry-run matching does not save sync state.
+Missing, empty, `{}`, and partial config files allow the UI to launch. Artist aliases now live in SQLite; editing the old alias JSON no longer changes matching. Manage artist aliases through Settings in the web interface.
 
 ## Docker installation (macOS and Ubuntu)
 
@@ -137,18 +148,18 @@ Missing, blank, and `{}` config files are valid; no Plex connection is needed fo
 Use a Plex address reachable from the container; `localhost` inside Docker refers to the container itself.
 
 Compose mounts `./data` at `/data`. Keep that directory when updating or recreating the container.
-To migrate an existing native install, stop its web service and scheduled CLI syncs, back up its state,
+To migrate an existing native install, stop its web service and any sync schedules from older releases, back up its state,
 and copy the existing config and legacy state JSON files into `./data` before starting Docker.
 Do not run the native and container installations against the same data at the same time.
 
 To change the port, put this in a `.env` file alongside `docker-compose.yml`:
 
 ```dotenv
-PLAYLIST_BRIDGE_PORT=8174
+HARMONIA_PORT=8174
 ```
 
 Compose uses that port for both the host mapping and backend. The healthcheck follows it automatically.
-`PLAYLIST_BRIDGE_DATA_DIR` can also select a data directory for native runs; relative paths resolve from the working directory.
+`HARMONIA_DATA_DIR` can also select a data directory for native runs; relative paths resolve from the working directory.
 Inside this Compose service it stays `/data`; change the left side of `./data:/data` to relocate host storage.
 
 ### Updating a locally built image
@@ -170,7 +181,7 @@ docker compose up -d --no-build
 ```
 
 The default image in this preview is `ghcr.io/rstuke82/playlist-bridge:beta`.
-To pin this build, set `PLAYLIST_BRIDGE_IMAGE=ghcr.io/rstuke82/playlist-bridge:3.0.0-beta.4`
+To pin this build after it is published, set `HARMONIA_IMAGE=ghcr.io/rstuke82/playlist-bridge:build-20261011.9`
 in `.env`. The `main` and `latest` tags follow stable releases.
 
 Maintainers can publish both server architectures with the existing buildx builder:
@@ -179,7 +190,7 @@ Maintainers can publish both server architectures with the existing buildx build
 docker buildx use playlist-bridge-builder
 docker buildx inspect --bootstrap
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -t ghcr.io/rstuke82/playlist-bridge:3.0.0-beta.4 \
+  -t ghcr.io/rstuke82/playlist-bridge:build-20261011.9 \
   -t ghcr.io/rstuke82/playlist-bridge:beta --push .
 ```
 
@@ -189,17 +200,10 @@ The image includes OCI title, description, source, version, and revision labels.
 See the [Dockerfile reference](https://docs.docker.com/reference/dockerfile/) and
 [GitHub Container Registry documentation](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry).
 
-To run the CLI in the running container:
-
-```bash
-docker compose exec playlist-bridge python sync.py
-docker compose exec playlist-bridge python sync.py --sync-all
-```
-
 ## Native requirements
 
 - macOS or Ubuntu
-- Python 3.9 or newer
+- Python 3.12 or newer
 - Node.js 22.12 or newer
 - npm
 - Git
@@ -207,7 +211,7 @@ docker compose exec playlist-bridge python sync.py --sync-all
 - Plex authentication token
 - Public Spotify and/or Apple Music playlist URLs
 
-Playlist Bridge does not currently require Spotify or Apple Music developer credentials for public-playlist source handling.
+Harmonia does not currently require Spotify or Apple Music developer credentials for public-playlist source handling.
 
 ## Installation
 
@@ -241,7 +245,7 @@ git --version
 
 Node.js should be version 22.12 or newer.
 
-### 2. Clone Playlist Bridge
+### 2. Clone Harmonia
 
 For the stable branch:
 
@@ -279,7 +283,7 @@ cd ..
 
 A successful build creates `web/dist/`. FastAPI serves this production build automatically.
 
-### 5. Start Playlist Bridge
+### 5. Start Harmonia
 
 From the project root with the Python virtual environment active:
 
@@ -287,7 +291,7 @@ From the project root with the Python virtual environment active:
 python -m playlist_bridge web
 ```
 
-Playlist Bridge listens on port `8173`; set `PLAYLIST_BRIDGE_PORT` to override it.
+Harmonia listens on port `8173`; set `HARMONIA_PORT` to override it.
 
 On the same computer, open:
 
@@ -350,11 +354,11 @@ Keep the database, config, and migration backups during updates.
 
 ## Running automatically on Ubuntu with systemd
 
-If Playlist Bridge is running continuously on an Ubuntu server, you can create a systemd service. Replace `/path/to/playlist-bridge` with the actual clone location on that machine.
+If Harmonia is running continuously on an Ubuntu server, you can create a systemd service. Replace `/path/to/playlist-bridge` with the actual clone location on that machine.
 
 ```ini
 [Unit]
-Description=Playlist Bridge Web UI
+Description=Harmonia Web UI
 After=network-online.target
 Wants=network-online.target
 
@@ -377,31 +381,15 @@ sudo systemctl enable --now playlist-bridge
 sudo systemctl status playlist-bridge
 ```
 
-## CLI compatibility
-
-The existing CLI remains available:
-
-```bash
-python sync.py
-```
-
-Automated sync:
-
-```bash
-python sync.py --sync-all
-```
-
-Dry-run automated sync:
-
-```bash
-python sync.py --sync-all --dry-run
-```
+## Installed version
 
 Show the installed version:
 
 ```bash
 python -m playlist_bridge version
 ```
+
+Playlist synchronization and scheduling are managed through the web interface.
 
 ## Playlist health
 
@@ -428,16 +416,16 @@ Click a registered playlist name to view its full live source track list, saved 
 
 ## Missing-track fixes
 
-When a deduplicated missing track is matched from the web UI, Playlist Bridge saves the match as a manual mapping across the affected unresolved occurrences and then syncs the affected playlists so the correction is immediately reflected in Plex.
+When a deduplicated missing track is matched from the web UI, Harmonia saves the match as a manual mapping across the affected unresolved occurrences and then syncs the affected playlists so the correction is immediately reflected in Plex.
 
 ## Compatibility
 
-The web API uses the existing matching engine and SQLite repository. Earlier JSON state is imported automatically; CLI support remains available.
+The web API uses the existing matching engine and SQLite repository. Earlier JSON state is imported automatically.
 
 
 ## Settings logs
 
-Settings includes a Logs viewer with Refresh, level and action filters, and Clear logs. It shows recent web operations, health failures, and captured sync output, newest first. The latest 1,000 entries are stored in SQLite; the viewer shows up to 200. Plex tokens and recognized credentials are redacted. This is an application activity log, not a live Docker console or historical CLI log importer. Docker process/startup failures before the application opens its database remain available through `docker compose logs`.
+Settings includes a Logs viewer with Refresh, level and action filters, and Clear logs. It shows recent web operations, health failures, and captured sync output, newest first. Up to 100,000 entries are retained in SQLite; Activity shows the 500 newest matching events. Plex tokens and recognized credentials are redacted. This is an application activity log, not a live Docker console. Docker process/startup failures before the application opens its database remain available through `docker compose logs`.
 
 Older supported SQLite databases migrate automatically. Keep a backup before upgrading; restore the matching backup when rolling back to an older release.
 
@@ -453,7 +441,7 @@ The Tasks page displays the scheduling timezone. Set `TZ=America/Chicago` (or yo
 
 Backups are stored under the persistent data directory's `backups` folder. SQLite's online backup API creates a consistent database snapshot alongside startup configuration. Browser-local appearance and filter preferences, host environment files, Plex playlists and media files are not part of the backup. The Restore action uses a listed backup; to recover a downloaded archive on another installation, place the intact `bridge-*.zip` archive in its data/backups directory. Restore validates compatibility and creates a safety backup first. Connection credentials are included, so store downloaded archives privately.
 
-Cancellation is cooperative: queued jobs stop immediately; running jobs stop at safe checkpoints. An in-flight network call or playlist update can finish first. Completed Plex changes and saved manual matches are retained. Restarting the app is not an undo operation. Existing CLI commands remain synchronous and retain their matching behavior.
+Cancellation is cooperative: queued jobs stop immediately; running jobs stop at safe checkpoints. An in-flight network call or playlist update can finish first. Completed Plex changes and saved manual matches are retained. Restarting the app is not an undo operation.
 
 ## Finding and organizing music
 
@@ -465,7 +453,7 @@ Missing sorts by track title, artist, album, last checked, occurrences, or playl
 
 ### Album search and sync
 
-Album search starts with `Artist - Album` (or `Artist - Track` when the album is unknown). Bypass cache requests fresh MusicBrainz results while preserving rate limiting; Lidarr lookups already go directly to Lidarr. Upstream caches remain outside Bridge’s control. Existing results stay visible while retrying, and album options use saved defaults under Options.
+Album search starts with `Artist - Album` (or `Artist - Track` when the album is unknown). Bypass cache requests fresh MusicBrainz results while preserving rate limiting; Lidarr lookups already go directly to Lidarr. Upstream caches remain outside Harmonia’s control. Existing results stay visible while retrying, and album options use saved defaults under Options.
 
 Existing Lidarr albums show their monitoring state and offer Search Album. This action queues a search without re-adding the album or changing monitoring settings. If match edits save but a subsequent Plex sync fails, Activity reports partial completion and retains the individual playlist errors. Plex verification reports missing titles/artists and occurrence counts, with sensitive response details redacted.
 
@@ -493,57 +481,110 @@ Activity separates Jobs from Album Downloads. Downloads supports In Progress and
 
 ## Playlist names and Plex descriptions
 
-Rename Playlist changes the Bridge and linked Plex name, preserving it across syncs without changing the source playlist. Use Source Name restores source naming. When adding, an optional destination name distinguishes identically named playlists; identities are based on source IDs, never names.
+Rename Playlist changes the Harmonia and linked Plex name, preserving it across syncs without changing the source playlist. Use Source Name restores source naming. When adding, an optional destination name distinguishes identically named playlists; identities are based on source IDs, never names.
 
-After a verified successful sync, Plex keeps the original source description followed by one Playlist Bridge summary: source URL, last successful sync timestamp, and source/matched/missing/ignored counts. This section is replaced on subsequent successful syncs.
+After a verified successful sync, Plex keeps the original source description followed by one Harmonia summary: source URL, last successful sync timestamp, and source/matched/missing/ignored counts. This section is replaced on subsequent successful syncs.
 
 ## Beta 3 schedule upgrade
 
 Custom schedules are preserved. Previously disabled Auto Sync playlists become Manual only. The existing general sync frequency is retained when enabled; otherwise an enabled Auto Sync frequency is used. Favorites-only schedules are retired without enabling the new server task. Scoped health tasks are retired; an existing all-playlist health frequency remains. Review migration notices in Tasks when old frequencies conflict. Historical jobs and database compatibility are retained.
 
-### Local music library (preview)
+### Library and file links
 
-Local library mode is opt-in and read-only. Lidarr remains the default until it
-is enabled. Bridge never renames, deletes, moves, or retags files during a scan.
+Lidarr is the library manager and source of truth. Library opens to artists,
+then Albums, EPs, Singles, and other releases. Album tracks are ordered by disc
+and track number. In Library means Lidarr reports imported files; Plex playback
+availability is shown separately. Inventory timestamps show how current that evidence is.
 
-1. Set `MUSIC_LIBRARY_PATH` to your host music folder in your private `.env`.
-2. Start with the optional mount:
-   `docker compose -f docker-compose.yml -f docker-compose.local.yml up -d`.
-3. In **Settings → Local Library**, add `/music`, optionally supply the matching
-   path visible to Plex, enable local mode, and save.
-4. Run **Scan Local Music Library** and **Scan Plex Library** under Tasks.
-   The local scan schedule starts disabled; select an interval if desired.
+Settings → File Tools maps a folder in Lidarr to the same folder inside Harmonia
+and Plex. Track details show selectable file paths and direct Plex links. Browser
+paths refer to server files, not the device running the browser. Harmonia does not
+serve audio files or change files through these controls.
 
-MusicBrainz identifiers in audio tags are read without altering files. Add an
-artist catalog by MusicBrainz artist ID to include missing albums in the same
-library view. Load edition metadata to verify completeness. Unidentified albums
-can be linked to a MusicBrainz release, and individual files can be reconciled
-with that edition's tracks. File counts alone do not establish completeness.
-Reviewed track associations are invalidated when a file's size or modification
-time changes. Symlinks are skipped. An inaccessible root preserves the previous
-snapshot; unreadable individual audio files are listed for review.
+Needs Attention separates duplicate Plex entries referencing one path, possible
+same-recording duplicates within an album, unmapped paths, missing Plex links,
+and Plex items without a Lidarr association. Inventory findings use saved service data. Optional File Audit adds direct file evidence and on-demand SHA-256 verification. Different editions
+and intentional copies must be reviewed before deciding anything is redundant.
 
-**Settings → MusicBrainz → Preferred editions** ranks release countries and media
-formats in the order entered, with an optional official-release preference.
-For example, `US,XE` means United States before Europe; `XW` means Worldwide.
-`Digital Media,CD` prefers digital editions before CDs. Alternatives remain
-visible, and preferences never change existing file identities. These edition
-preferences are separate from release-group types such as Album, EP, or Single.
-Artwork uses Cover Art Archive when available.
+MusicBrainz and optional cached iTunes metadata supplement Lidarr; they never
+create an independent ownership catalog. Previous local-catalog settings and
+data are retained for compatibility but no longer drive Library, Discover, or
+new automatic matches. Local scan schedules are retired. Existing playlist
+manual matches remain intact.
 
-This preview does not import downloads, organize files, or replace existing
-Lidarr download automation. Existing playlist mappings remain intact. New
-matching uses local tracks and account-visible Plex links when local mode is on.
+MusicBrainz text and indexed searches always use public musicbrainz.org. An
+optional MusicBrainz Mirror URL can serve direct MBID metadata hydration and
+browse requests. Leaving it blank keeps all requests public. Timeout,
+connection, and server failures on the mirror fall back through the normal
+rate-limited public client; a normal 404 does not.
 
-The local Library opens to an artist list. Select an artist to browse their
-unified album catalog. Embedded MusicBrainz artist IDs provide direct links;
-untagged artists can be linked through **Link MusicBrainz**, using reviewed
-search candidates or an artist ID. Same-name artists with different MBIDs remain
-separate. **Refresh Metadata** loads the artist catalog in a background job.
+Jobs use independent playlist, health, metadata, library, downloads, and
+maintenance lanes. Same-account playlist work remains serialized; different
+accounts can progress together. Backup/restore waits for other workers and
+runs exclusively. MusicBrainz and iTunes retain their service pacing.
 
-Optional iTunes enrichment supplies genre, album artwork and missing display
-dates without changing MusicBrainz identities or file tags. Enable or disable it
-in Local Library settings. Artist-name matches must also have a known album in
-common before automatic iTunes association; ambiguous results require review.
-iTunes results are cached for seven days. Refresh Library after the metadata job
-completes. Artwork supplied by iTunes includes an Apple Music link.
+### Optional File Audit
+
+Keep Lidarr as the library manager. To check physical files, mount music read-only
+(for example with the optional `docker-compose.local.yml` override), configure
+its path mapping in Library Management, and enable local file scanning. Run
+Scan Local Files in Tasks
+or Library → Issues; standard audits can be scheduled. A current Lidarr scan is
+required to classify missing imports and unmanaged files.
+
+Verify Duplicates is an on-demand, potentially disk-intensive check of same-size
+audio files. SHA-256 confirms identical bytes; different encodings/tags require
+manual review. Hard links are identified separately. Unreadable or unexpectedly
+empty roots do not generate mass missing-file findings. No symlinks are followed.
+Unchanged file signatures reuse metadata and hashes. This is a diagnostic tool;
+no files are removed, retagged, moved, or imported.
+
+Issues can be marked intentional and reopened using Show intentional. These
+review decisions follow the specific evidence, so changed duplicate evidence
+appears for review again. Audit timestamps and stale labels make old findings
+explicit. Scan evidence never overrides Lidarr ownership or Plex playability.
+
+
+### Startup tasks
+
+Settings → Tasks includes an **At startup** choice for each task. The startup choice is independent of recurring frequency. **If missing** requires no matching saved inventory (or no completed run for other tasks). **If missing or outdated** also checks the recurring interval; disabled schedules use the task’s default interval. Existing queued or running work is reused.
+
+Plex and Lidarr default to **If missing**. Last.fm defaults to **If missing or outdated**. Other tasks default to **Never**. Unconfigured services are skipped. Main saved pages default to preparing when missing or their source data changes, while existing saved pages remain readable. This warms landing pages only, rather than every album or artist. Routine page preparation stays out of Activity.
+
+Build 20261009.9: see PLAYLIST-AND-WEBHOOKS-20261009.9.md for request webhook and playlist consistency changes.
+
+## Local credential file permissions
+
+Harmonia repairs its data directory to mode 0700 and credentials/database/migration snapshots to mode 0600 on POSIX systems. SQLite WAL/SHM files are restricted too. Run the service as the owner of its data directory; Docker mount ownership must allow that service user to read and write it. Back up the data directory before changing ownership. Windows uses filesystem ACLs rather than these POSIX modes.
+
+## Source packaging
+
+Use `python scripts/package_source.py /absolute/path/harmonia-source.zip` from the source directory. The packager uses an explicit source allowlist, excludes dependencies/build output/runtime state, rejects database files from its archive manifest, and verifies ZIP integrity. It does not include historical diagnostic logs. Never publish your data directory or .env file. The existing GHCR/repository coordinates remain the supported compatibility locations until an explicit migration is planned.
+
+## Runtime module layout
+
+Application code is organized by domain: `config`, `matching`, `sync_engine`,
+`plex_client`, `spotify_source`, and `apple_music_source`. Shared persistence,
+locking, output, text, and startup helpers have separate modules. The web backend
+imports these modules directly. Playlist management, synchronization, matching,
+and scheduling are available through the web interface.
+
+The former `legacy.py` compatibility layer and interactive command-line
+workflows have been removed. Start the web application with
+`python -m playlist_bridge web`. Plex configuration errors direct users to
+Settings rather than prompting on standard input. Library discovery remains
+available through Settings → Plex → Test & Discover Libraries.
+
+See [RUNTIME-MIGRATION.md](RUNTIME-MIGRATION.md) for scope, validation and the exact
+file manifest. This working migration does not change persisted schemas or
+playlist matching policy.
+
+## HTTPS and browser hardening
+
+For public deployments, enable `HARMONIA_HTTPS_ONLY=true`, set `HARMONIA_TRUSTED_PROXIES` to the actual proxy addresses and restrict the application port to the proxy. Compose now defaults to a loopback host binding. See [SECURITY-DEPLOYMENT.md](SECURITY-DEPLOYMENT.md) for local HTTP compatibility, Docker proxy networking, forwarding configuration and deployment verification. Browser security headers and sensitive-API no-store rules are applied by the application; public API documentation is disabled.
+
+Unpublished working updates: Requests pagination now offers 5/10/25/50/100 results per page (default 25). Container hardening, safe redirects, approval-first member defaults, bounded queues and reproducible runtime/image scanning are documented in [SECURITY-DEPLOYMENT.md](SECURITY-DEPLOYMENT.md). Exact changes and unresolved advisories: [SECURITY-HARDENING-CHANGES.md](SECURITY-HARDENING-CHANGES.md). Existing data ownership must be prepared before deploying the non-root image.
+
+### Build 20261011.9 configuration migration
+
+Environment settings now use `HARMONIA_*` exclusively. Rename existing deployment environment entries and `.env` keys before recreating the container. `HARMONIA_IMAGE` selects the image in Compose; it is not read by the application and does not need to be passed into the container. Keep `TZ` unchanged. Database filenames and `/data` mappings are unchanged; application data still requires ownership by UID/GID 10001.

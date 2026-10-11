@@ -1,7 +1,9 @@
 """Optional Lidarr integration: read-only discovery, reviewed writes and cached metadata."""
+from .history_links import HistorySource
 import copy
 import hashlib
 import json
+import re
 import threading
 import time
 import uuid
@@ -11,7 +13,7 @@ from typing import Literal
 import requests
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
-from . import __version__, jobs
+from . import jobs
 
 _mb_lock = threading.Lock()
 _mb_last = 0.0
@@ -50,6 +52,8 @@ class Lookup(BaseModel):
     provider: Literal['lidarr', 'musicbrainz'] = 'lidarr'
     fields_search: bool = False
     force_refresh: bool = False
+    lookup_session: str = Field(default='',max_length=64)
+    recording_offset: int = Field(default=0, ge=0, le=10000)
     attempt: int = Field(default=1, ge=1, le=4)
     attempts: int = Field(default=1, ge=1, le=4)
     retry_delay: int = Field(default=0, ge=0, le=120)
@@ -60,12 +64,14 @@ class Preview(Defaults):
 
 
 class ExistingSearch(BaseModel):
+    history_source: HistorySource | None = None
     album_id: uuid.UUID
     source_title: str = Field(default='', max_length=500)
     source_artist: str = Field(default='', max_length=500)
 
 
 class Confirm(BaseModel):
+    history_source: HistorySource | None = None
     preview_id: uuid.UUID
     source_title: str = Field(default='', max_length=500)
     source_artist: str = Field(default='', max_length=500)
@@ -208,7 +214,41 @@ def mb_quote(value):
     return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
 
 
-def musicbrainz_search(repo, cfg, request, test=False):
+def _discovery_title(value):
+    """Remove edition/version noise without changing the user's title casing."""
+    value = str(value or '').strip()
+    qualifiers = (
+        r'remaster(?:ed)?(?:\s+\d{4})?|deluxe(?:\s+edition)?|expanded(?:\s+edition)?|'
+        r'anniversary(?:\s+edition)?|special\s+edition|collector\'?s\s+edition|bonus(?:\s+track)?|'
+        r'advance(?:\s+(?:copy|promo|version))?(?=\s*(?:[\])]|$))|radio\s+(?:edit|mix)|single\s+edit|ep|single'
+    )
+    value = re.sub(rf'\s*[\[(]\s*(?:{qualifiers})[^\])]*[\])]', ' ', value, flags=re.I)
+    value = re.sub(rf'\s+(?:-|–|—|:)\s*(?:{qualifiers})(?:\s+version)?\s*$', ' ', value, flags=re.I)
+    # Providers also append bare release types without punctuation. Keep this
+    # anchored so words such as "Epilogue" and "Single Ladies" survive.
+    value = re.sub(r'\s+(?:ep|single)(?:\s+version)?\s*$', ' ', value, flags=re.I)
+    return re.sub(r'\s+', ' ', value).strip(' -–—:')
+
+
+def album_search_rows(records, known):
+    rows={}
+    for record in records:
+        groups = [(record, record.get('first-release-date', ''))] if known else [(r.get('release-group', {}), r.get('date', '')) for r in record.get('releases', [])]
+        credit = ''.join(c.get('name', c.get('artist', {}).get('name', '')) + c.get('joinphrase', '') for c in record.get('artist-credit', []) if isinstance(c, dict))
+        for group, release_date in groups:
+            if not group.get('id'):
+                continue
+            year = (group.get('first-release-date') or release_date or '')[:4]
+            previous = rows.get(group['id'], {}).get('year', '')
+            if previous and (not year or previous < year):year = previous
+            rows[group['id']] = {'album_id': group['id'], 'title': group.get('title', ''),
+                'artist': credit if known else ''.join(c.get('name', c.get('artist', {}).get('name', '')) + c.get('joinphrase', '') for c in group.get('artist-credit', []) if isinstance(c, dict)), 'year': year,
+                'type': group.get('primary-type', ''), 'secondary_types': group.get('secondary-types', []),
+                'exists': None, **({'other_release':bool(group.get('other-release'))} if not known else {}), 'artwork':'https://coverartarchive.org/release-group/'+group['id']+'/front-500'}
+    return list(rows.values())
+
+
+def musicbrainz_search(repo, cfg, request, test=False, publish=None):
     global _mb_last
     from .musicbrainz_settings import settings, ordered, search_scores
     preferences = settings(repo)
@@ -218,17 +258,24 @@ def musicbrainz_search(repo, cfg, request, test=False):
         raise HTTPException(409, 'MusicBrainz lookup is disabled in Settings → MusicBrainz.')
     album = request.album.strip()
     known = bool(album and album.casefold() not in ('n/a', 'unknown'))
+    # Search broad canonical titles; edition labels belong in result review,
+    # not in the indexed discovery query.
+    search_album = _discovery_title(album) if known else album
+    from .song_albums import search_identity
+    search_artist,search_song=search_identity(request.artist,request.title) if not known else (request.artist.strip(),request.title)
     if request.fields_search:
-        recording = request.title.strip()
-        artist = request.artist.strip()
+        recording = _discovery_title(search_song)
+        artist = search_artist
         if not (recording or artist or known):
             raise HTTPException(422, 'Enter a recording, artist, or album for MusicBrainz lookup.')
-        entity = 'recording' if recording else 'release-group'
+        # A known album is the strongest discovery anchor. Song becomes the
+        # discovery query only when no usable album title is available.
+        entity = 'release-group' if known or not recording else 'recording'
         terms = []
-        if recording:
+        if entity == 'recording' and recording:
             terms.append(f'recording:{mb_quote(recording)}')
         if known:
-            terms.append(f'{"release" if recording else "releasegroup"}:{mb_quote(album)}')
+            terms.append(f'releasegroup:{mb_quote(search_album)}')
         if artist:
             terms.append(f'artist:{mb_quote(artist)}')
         query = ' AND '.join(terms)
@@ -237,62 +284,51 @@ def musicbrainz_search(repo, cfg, request, test=False):
         if not request.artist.strip() or (not request.title.strip() and not known):
             raise HTTPException(422, 'Enter a track title and artist for MusicBrainz lookup.')
         entity = 'release-group' if known else 'recording'
-        term = f'releasegroup:{mb_quote(album)}' if known else f'recording:{mb_quote(request.title)}'
-        query = term + f' AND artist:{mb_quote(request.artist)}'
-    key = hashlib.sha256((('' if preferences['server_url']=='https://musicbrainz.org' else preferences['server_url']+':') + ('dates-v2:' if entity == 'recording' else '') + entity + query).encode()).hexdigest()
-    # A bounded shared lock also prevents duplicate identical requests.
-    if not _mb_lock.acquire(timeout=2):
-        raise HTTPException(429, 'Another metadata lookup is running. Try again shortly.')
+        term = f'releasegroup:{mb_quote(search_album)}' if known else f'recording:{mb_quote(_discovery_title(search_song))}'
+        query = term + f' AND artist:{mb_quote(search_artist)}'
+    key = hashlib.sha256((('song-albums-v6:'+str(request.recording_offset)+':' if entity == 'recording' else '') + entity + query).encode()).hexdigest()
+    # Background jobs coalesce identical work; public-service rate limiting is per request.
+    saved = state_get(repo, 'musicbrainz_cache', key)
+    if not request.force_refresh and saved and time.time() - saved['at'] < preferences['cache_days'] * 86400:
+        from .api import _record_log
+        _record_log('INFO', 'MusicBrainz', f'Cache hit for {entity}: {query}; {len(saved["rows"])} candidates; priority={preferences["release_priority"]}; prefer studio={preferences["prefer_studio"]}')
+        return {'rows': search_scores(ordered(saved['rows'], preferences),request), 'cached': True, 'provider': 'MusicBrainz',
+            'lookup_source':saved.get('lookup_source','unknown'),'lookup_host':saved.get('lookup_host',''),'lookup_reason':saved.get('lookup_reason',''),'next_recording_offset':saved.get('next_recording_offset')}
+    _record_log('INFO','MusicBrainz',f'{entity} lookup: {query}; cache={"bypass" if request.force_refresh else "miss"}')
+    started = time.monotonic()
     try:
-        saved = state_get(repo, 'musicbrainz_cache', key)
-        if not request.force_refresh and saved and time.time() - saved['at'] < preferences['cache_days'] * 86400:
-            from .api import _record_log
-            _record_log('INFO', 'MusicBrainz', f'Cache hit for {entity}: {query}; {len(saved["rows"])} candidates; priority={preferences["release_priority"]}; prefer studio={preferences["prefer_studio"]}')
-            return {'rows': search_scores(ordered(saved['rows'], preferences),request)[:50], 'cached': True, 'provider': 'MusicBrainz'}
-        _record_log('INFO','MusicBrainz',f'{entity} lookup: {query}; cache={"bypass" if request.force_refresh else "miss"}')
-        time.sleep(max(0, 1.1 - (time.monotonic() - _mb_last)))
-        started = time.monotonic()
-        try:
-            _mb_last = time.monotonic()
-            response = requests.get(preferences['server_url'] + '/ws/2/' + entity,
-                params={'query': query, 'fmt': 'json', 'limit': 25},
-                headers={'User-Agent': f'PlaylistBridge/{__version__} (https://github.com/rstuke82/playlist-bridge)'},
-                timeout=(5, 20))
-            response.raise_for_status()
-            data = response.json()
-        except (requests.RequestException, ValueError) as exc:
+        from .musicbrainz_client import get as mb_get
+        data = mb_get(repo, entity, {'query': query, 'limit': 25,**({'offset':request.recording_offset} if entity=='recording' and request.recording_offset else {})})
+    except (requests.RequestException, ValueError) as exc:
+        from .diagnostics import service_failure
+        from .diagnostics import redact
+        failure=service_failure('MusicBrainz', exc, started)
+        response=getattr(exc,'response',None)
+        detail=redact(response.text[:2000]) if response is not None else redact(str(exc))
+        _record_log('ERROR','MusicBrainz',f'{failure.detail} — {detail}')
+        if request.attempt < request.attempts:
+            _record_log('INFO','MusicBrainz',f'Client may retry after {15*request.attempt}s if lookup remains open and error is retryable')
+        raise failure from None
+    route=data.get('_playlist_bridge_route') or {};lookup_source=route.get('source','unknown');lookup_host=route.get('host','');lookup_reason=route.get('reason','')
+    rows = {}
+    records = data.get('release-groups', []) if known else data.get('recordings', [])
+    next_offset=request.recording_offset+len(records) if not known and records and request.recording_offset+len(records)<int(data.get('recording-count',request.recording_offset+len(records)+(1 if len(records)==25 else 0))) else None
+    if not known:
+        from .song_albums import containing_albums
+        try:records = containing_albums(repo, records, request, preferences, mb_get,
+            publish=(lambda partial:publish({'rows':search_scores(ordered(album_search_rows(partial,False),preferences),request),'provider':'MusicBrainz','cached':False})) if publish else None)
+        except ValueError as exc:raise HTTPException(422,str(exc)) from None
+        except requests.RequestException as exc:
             from .diagnostics import service_failure
-            from .diagnostics import redact
-            failure=service_failure('MusicBrainz', exc, started)
-            response=getattr(exc,'response',None)
-            detail=redact(response.text[:2000]) if response is not None else redact(str(exc))
-            _record_log('ERROR','MusicBrainz',f'{failure.detail} — {detail}')
-            if request.attempt < request.attempts:
-                _record_log('INFO','MusicBrainz',f'Client may retry after {15*request.attempt}s if lookup remains open and error is retryable')
-            raise failure from None
-        rows = {}
-        records = data.get('release-groups', []) if known else data.get('recordings', [])
-        for record in records:
-            groups = [(record, record.get('first-release-date', ''))] if known else [(r.get('release-group', {}), r.get('date', '')) for r in record.get('releases', [])]
-            credit = ''.join(c.get('name', c.get('artist', {}).get('name', '')) + c.get('joinphrase', '') for c in record.get('artist-credit', []) if isinstance(c, dict))
-            for group, release_date in groups:
-                if not group.get('id'):
-                    continue
-                year = (group.get('first-release-date') or release_date or '')[:4]
-                previous = rows.get(group['id'], {}).get('year', '')
-                if previous and (not year or previous < year):year = previous
-                rows[group['id']] = {'album_id': group['id'], 'title': group.get('title', ''),
-                    'artist': credit, 'year': year,
-                    'type': group.get('primary-type', ''), 'secondary_types': group.get('secondary-types', []),
-                    'exists': None}
-        result = list(rows.values())
-        _record_log('INFO','MusicBrainz',f'HTTP {response.status_code} in {time.monotonic()-started:.2f}s; {len(records)} records, {len(result)} album candidates; priority={preferences["release_priority"]}; prefer studio={preferences["prefer_studio"]}')
-        state_put(repo, 'musicbrainz_cache', key, {'at': time.time(), 'rows': result})
-        with repo.connect() as db:
-            db.execute("DELETE FROM state WHERE namespace='musicbrainz_cache' AND key NOT IN (SELECT key FROM state WHERE namespace='musicbrainz_cache' ORDER BY json_extract(value,'$.at') DESC LIMIT 500)")
-        return {'rows': search_scores(ordered(result, preferences), request)[:50], 'cached': False, 'provider': 'MusicBrainz'}
-    finally:
-        _mb_lock.release()
+            raise service_failure('MusicBrainz',exc,started) from None
+    result = album_search_rows(records,known)
+    source_label='configured mirror' if lookup_source=='mirror' else 'public fallback' if lookup_source=='public_fallback' else 'public' if lookup_source=='public' else 'unknown route'
+    _record_log('INFO','MusicBrainz',f'{source_label.title()} search completed in {time.monotonic()-started:.2f}s; {len(records)} records, {len(result)} album candidates; priority={preferences["release_priority"]}; prefer studio={preferences["prefer_studio"]}')
+    state_put(repo, 'musicbrainz_cache', key, {'at': time.time(), 'rows': result,'lookup_source':lookup_source,'lookup_host':lookup_host,'lookup_reason':lookup_reason,'next_recording_offset':next_offset})
+    with repo.connect() as db:
+        db.execute("DELETE FROM state WHERE namespace='musicbrainz_cache' AND key NOT IN (SELECT key FROM state WHERE namespace='musicbrainz_cache' ORDER BY json_extract(value,'$.at') DESC LIMIT 500)")
+    return {'rows': search_scores(ordered(result, preferences), request), 'cached': False, 'provider': 'MusicBrainz','lookup_source':lookup_source,'lookup_host':lookup_host,'lookup_reason':lookup_reason,'next_recording_offset':next_offset}
+
 
 
 def resolve(client, album_id):
@@ -324,7 +360,8 @@ def prepare(repo, request):
     token = str(uuid.uuid4())
     record = {'at': time.time(), 'config_hash': fingerprint(cfg), 'album_id': str(request.album_id),
               'artist_id': artist['foreignArtistId'], 'defaults': defaults,
-              'title': album.get('title', ''), 'artist': artist.get('artistName', '')}
+              'title': album.get('title', ''), 'artist': artist.get('artistName', ''),
+              'artwork': album_summary(album)['artwork'] or 'https://coverartarchive.org/release-group/'+str(request.album_id)+'/front-500'}
     state_put(repo, 'lidarr_previews', token, record)
     with repo.connect() as db:
         db.execute("DELETE FROM state WHERE namespace='lidarr_previews' AND json_extract(value,'$.at') < ? AND json_extract(value,'$.job_id') IS NULL", (time.time() - 3600,))
@@ -439,12 +476,44 @@ def wait_album_ready(client, album_id, timeout=120):
         time.sleep(2)
 
 
+def select_preferred_edition(repo, client, album_id, group_id):
+    """Rank Lidarr's own editions and preserve its import acceptance setting."""
+    from .musicbrainz_settings import settings
+    album=client.call('GET',f'album/{album_id}')
+    if str(album.get('foreignAlbumId'))!=str(group_id):
+        raise ValueError('Lidarr album identity changed; no search started.')
+    releases=[r for r in (album.get('releases') or []) if isinstance(r,dict) and r.get('foreignReleaseId')]
+    if not releases:raise ValueError('Lidarr has no release editions yet; no search started. Retry after its metadata refresh.')
+    files=client.call('GET','trackfile',params={'albumId':album_id})
+    if files:
+        jobs.output('Existing album files found; preserving the current release and file identities.')
+        return
+    if album.get('anyReleaseOk') is False and len([r for r in releases if r.get('monitored')])==1:
+        jobs.output('Preserving the explicitly selected Lidarr release.')
+        return
+    preferences=settings(repo)
+    from .edition_preferences import ranker
+    rank=ranker(preferences)
+    jobs.progress('Ranking Lidarr editions by preferred countries, formats and official status')
+    selected=min(releases,key=rank);release_id=str(selected['foreignReleaseId'])
+    original_any=album.get('anyReleaseOk')
+    for row in album.get('releases') or []:
+        row['monitored']=str(row.get('foreignReleaseId'))==release_id
+    jobs.progress('Applying the preferred edition in Lidarr')
+    client.call('PUT',f'album/{album_id}',json=album)
+    confirmed=client.call('GET',f'album/{album_id}')
+    monitored=[str(r.get('foreignReleaseId')) for r in (confirmed.get('releases') or []) if r.get('monitored')]
+    if confirmed.get('anyReleaseOk')!=original_any or monitored!=[release_id]:
+        raise ValueError('Lidarr did not retain the preferred edition and original anyReleaseOk setting; no search started.')
+    jobs.output(f"Preferred edition verified: {selected.get('country') or 'Unknown country'} · {selected.get('format') or 'Unknown format'} · {selected.get('trackCount')} tracks · {selected.get('disambiguation') or 'standard'} · {release_id}; anyReleaseOk unchanged ({original_any})")
+
+
 def finish_search(repo, client, payload, album_id, added=False):
     from .lidarr_requests import save
     from .api import _record_log
     base = 'Album added' if added else 'Album is in Lidarr'
     result = {'album_id':album_id,'title':payload['title'],'added':added,'search_requested':False}
-    if not payload['defaults']['search_now']:
+    if not payload['defaults']['search_now'] and not added:
         result['summary'] = base + '; no search requested'
         return result
     save(repo,payload['album_id'],status='search_pending')
@@ -461,6 +530,11 @@ def finish_search(repo, client, payload, album_id, added=False):
                 previous_id = None
         if not previous_id:
             wait_album_ready(client,album_id)
+            select_preferred_edition(repo,client,album_id,payload['album_id'])
+            if not payload['defaults']['search_now']:
+                save(repo,payload['album_id'],status='added',error='')
+                result['summary']=base+'; preferred edition checked; no search requested'
+                return result
         def accepted(cid):
             nonlocal command_id
             command_id = cid
@@ -476,7 +550,7 @@ def finish_search(repo, client, payload, album_id, added=False):
         unknown = submitting and not command_id and isinstance(exc,HTTPException)
         status = 'search_unknown' if unknown else 'search_pending' if pending else 'search_failed'
         summary = base + ('; search submission unconfirmed' if unknown else '; search pending' if pending else '; search failed')
-        save(repo,payload['album_id'],status=status,error=detail)
+        save(repo,payload['album_id'],status=status,error='' if pending else detail,search_wait_detail=detail if pending else '')
         _record_log('WARNING' if pending else 'ERROR','Lidarr search',summary+': '+detail)
         result.update(partial_success=True,summary=summary,error=detail,search_command_id=command_id)
     return result
@@ -506,7 +580,7 @@ def retry_search(payload):
         raise ValueError('Lidarr album identity changed; search was not submitted.')
     from .lidarr_downloads import queue
     if any(q.get('albumId')==record['lidarr_id'] for q in queue(client)):
-        raise ValueError('This album already has a queued download. Review it in Activity → Downloads.')
+        raise ValueError('This album already has a queued download. Review it in Requests.')
     return finish_search(repo,client,{'album_id':payload['album_id'],'title':record['title'],'defaults':{'search_now':True}},record['lidarr_id'])
 
 
@@ -546,6 +620,27 @@ def register(app):
         with _mb_lock:
             repository().save({'musicbrainz_cache': {}})
         return {'cleared': True}
+
+    @app.post('/api/lidarr/search-jobs', status_code=202)
+    def start_lookup(request: Lookup):
+        repo=repository();enabled(repo)
+        request.provider='musicbrainz'
+        payload=request.model_dump(exclude={'attempt','attempts','retry_delay'})
+        store=jobs.Store(repo)
+        return {'id':store.enqueue('musicbrainz_lookup',payload)}
+
+    @app.get('/api/lidarr/search-jobs/{job_id}')
+    def lookup_status(job_id: str):
+        job=jobs.Store(repository()).get(job_id)
+        if not job or job['action']!='musicbrainz_lookup':raise HTTPException(404,'Search not found.')
+        return {k:job.get(k) for k in ('id','status','progress','result','error')}
+
+    @app.delete('/api/lidarr/search-jobs/{job_id}')
+    def cancel_lookup(job_id: str):
+        store=jobs.Store(repository());job=store.get(job_id)
+        if not job or job['action']!='musicbrainz_lookup':raise HTTPException(404,'Search not found.')
+        store.cancel(job_id)
+        return {'cancelled':True}
 
     @app.post('/api/lidarr/search')
     def search(request: Lookup):
@@ -596,9 +691,21 @@ def register(app):
                     record.pop('search_command_id', None)
                 jid = job_store().enqueue('lidarr_search', {'album_id': album_key, 'server': server}, db=db)
                 record.update(job_id=jid, status='search_pending', error='')
+            from .accounts import actor
+            user=actor() or {}
+            if user.get('id'):
+                people=record.get('requesters') or []
+                uid=str(user['id'])
+                if not any(str(person.get('user_id'))==uid for person in people):
+                    people.append({'user_id':uid,'name':user.get('name') or 'User '+uid,'requested_at':time.time()})
+                record['requesters']=people
+            now=time.time()
             record.update(server=server, lidarr_id=album['id'], title=album.get('title',''),
-                          artist=(album.get('artist') or {}).get('artistName',''), sources=sources, updated_at=time.time())
+                          artist=(album.get('artist') or {}).get('artistName',''), artwork=album_summary(album)['artwork'] or record.get('artwork') or 'https://coverartarchive.org/release-group/'+album_key+'/front-500', sources=sources,
+                          created_at=record.get('created_at') or now, updated_at=now)
             db.execute("INSERT INTO state(namespace,key,value) VALUES('lidarr_requests',?,?) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value", (album_key, json.dumps(record)))
+        from .history_links import requested
+        requested(request.history_source,album_key,jid)
         return job_store().get(jid)
 
     @app.post('/api/lidarr/preview')
@@ -635,9 +742,39 @@ def register(app):
                     job_id = record['job_id']
                     record['sources'] = sources
                 else:
+                    from .accounts import actor
+                    user=actor() or {}
+                    payload['requester_id']=str(user.get('id') or '')
+                    payload['requester_name']=user.get('name') or ''
                     job_id = job_store().enqueue('lidarr_add', payload, db=db)
-                    record = {'server':server,'sources':sources,'title':payload['title'],'artist':payload['artist'],'job_id':job_id,'status':'queued','updated_at':time.time()}
+                    now=time.time()
+                    record = {'server':server,'sources':sources,'title':payload['title'],'artist':payload['artist'],'job_id':job_id,'status':'queued','created_at':now,'updated_at':now}
+                from .accounts import actor
+                user=actor() or {}
+                if user.get('id'):
+                    requesters=record.get('requesters') or []
+                    uid=str(user['id'])
+                    if not any(str(r.get('user_id'))==uid for r in requesters):
+                        requesters.append({'user_id':uid,'name':user.get('name') or 'User '+uid,'requested_at':time.time()})
+                    record['requesters']=requesters
+                record['artwork']=record.get('artwork') or payload.get('artwork') or 'https://coverartarchive.org/release-group/'+payload['album_id']+'/front-500'
                 db.execute("INSERT INTO state(namespace,key,value) VALUES('lidarr_requests',?,?) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value", (payload['album_id'],json.dumps(record)))
                 payload['job_id'] = job_id
                 db.execute("UPDATE state SET value=? WHERE namespace='lidarr_previews' AND key=?", (json.dumps(payload), str(request.preview_id)))
+        from .history_links import requested
+        requested(request.history_source,payload['album_id'],job_id)
         return job_store().get(job_id)
+
+
+def execute_lookup(payload):
+    if payload.get('member_request'):
+        from .member_album_search import execute
+        return execute(payload)
+    ctx=jobs.current()
+    repo=ctx.store.repository if ctx else repository()
+    def publish(result):
+        if ctx:
+            ctx.checkpoint()
+            ctx.store.update(ctx.id,result=result)
+    jobs.progress('Searching MusicBrainz')
+    return musicbrainz_search(repo,enabled(repo),Lookup(**payload),publish=publish)

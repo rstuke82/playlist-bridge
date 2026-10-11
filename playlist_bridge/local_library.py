@@ -78,6 +78,9 @@ def read_tags(file):
     # EasyID3 and EasyMP4 names; raw Vorbis names already match these.
     title=value('title');artist=value('artist');album_artist=value('albumartist') or artist
     info=audio.info
+    description=str(getattr(info,'codec_description','') or getattr(info,'codec','') or '').upper()
+    suffix=Path(file).suffix.lower()
+    codec='ALAC' if 'ALAC' in description else 'AAC' if ('AAC' in description or 'MP4A' in description or suffix=='.aac') else suffix.lstrip('.').upper()
     return {'title':title or Path(file).stem,'artist':artist or album_artist,'album_artist':album_artist,
             'album':value('album'),'year':valid_year(value('originaldate')) or valid_year(value('date')),
             'artist_id':mbid(value('musicbrainz_albumartistid','musicbrainz_artistid')),
@@ -86,7 +89,7 @@ def read_tags(file):
             'track_number':value('tracknumber').split('/')[0],'disc_number':value('discnumber').split('/')[0] or '1',
             'duration':getattr(info,'length',0),'bitrate':getattr(info,'bitrate',0),
             'sample_rate':getattr(info,'sample_rate',0),'bits_per_sample':getattr(info,'bits_per_sample',0),
-            'format':Path(file).suffix.lstrip('.').upper()}
+            'format':Path(file).suffix.lstrip('.').upper(),'codec':codec}
 
 def scan():
     import mutagen  # Fail before replacing inventory if the reader is unavailable.
@@ -122,35 +125,19 @@ def scan():
     return {'summary':f'Scanned {len(result)} local audio files; {len(errors)} need attention.','seconds':round(time.time()-started,2)}
 
 def mb_get(entity,params=None):
-    """Share request pacing with existing lookups and cache responses by server."""
-    from . import lidarr,__version__
+    """Cache metadata while central routing chooses public search or a mirror."""
     from .musicbrainz_settings import settings as mb_settings
-    import requests
     cfg=mb_settings(repo())
     if not cfg['enabled']:raise ValueError('MusicBrainz lookups are disabled.')
-    key=digest(cfg['server_url']+entity+json.dumps(params or {},sort_keys=True))
+    search=bool((params or {}).get('query'))
+    route='public-search' if search else cfg['server_url']
+    key=digest(route+entity+json.dumps(params or {},sort_keys=True))
     cached=repo().load('local_metadata_cache').get(key,{})
     if cached and time.time()-cached['at']<cfg['cache_days']*86400:return cached['data']
-    for attempt in range(cfg['retries']+1):
-        jobs.progress(f'MusicBrainz · {entity.split("/")[0]} · attempt {attempt+1}')
-        with lidarr._mb_lock:
-            time.sleep(max(0,1.1-(time.monotonic()-lidarr._mb_last)))
-            lidarr._mb_last=time.monotonic()
-            started=time.monotonic()
-            try:
-                response=requests.get(cfg['server_url']+'/ws/2/'+entity,params={'fmt':'json',**(params or {})},headers={'User-Agent':f'PlaylistBridge/{__version__} (https://github.com/rstuke82/playlist-bridge)'},timeout=(5,20))
-                jobs.output(f'MusicBrainz {entity}: HTTP {response.status_code} in {time.monotonic()-started:.2f}s')
-                response.raise_for_status();data=response.json()
-            except (requests.RequestException,ValueError) as exc:
-                status=getattr(getattr(exc,'response',None),'status_code',None)
-                if attempt>=cfg['retries'] or (status is not None and status not in (429,502,503,504)):
-                    repo().add_log('ERROR','MusicBrainz',f'{entity}: {type(exc).__name__}: {exc}')
-                    raise ValueError(f'MusicBrainz lookup failed: {type(exc).__name__}'+(f' HTTP {status}' if status else '')) from None
-                data=None
-        if data is not None:
-            put('local_metadata_cache',key,{'at':time.time(),'data':data});return data
-        for _ in range(15*(attempt+1)):
-            jobs.progress('MusicBrainz busy; waiting to retry');time.sleep(1)
+    jobs.progress(f'MusicBrainz · {entity.split("/")[0]}')
+    from .musicbrainz_client import get
+    data=get(repo(),entity,params)
+    put('local_metadata_cache',key,{'at':time.time(),'data':data});return data
 
 def browse(entity,params):
     rows=[];offset=0
@@ -269,7 +256,7 @@ def native_view():
 
 def availability(rows,apply_preferences=True):
     """One local-file verdict reused by Discover and Requests."""
-    from .legacy import Matcher
+    from .matching import Matcher
     from .user_preferences import blocked,preferences
     data=native_view();prefs=preferences();out=[]
     norm=Matcher._normalize_match_text

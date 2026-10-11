@@ -14,7 +14,7 @@ def plex_error(exc, operation='contact Plex'):
     if isinstance(exc, requests.exceptions.SSLError):
         return 'Plex TLS certificate could not be verified. Check the HTTPS URL and certificate in Settings → Plex.'
     if isinstance(exc, requests.exceptions.Timeout):
-        return 'Plex timed out. Check the server URL in Settings → Plex and confirm the server is running and reachable from Playlist Bridge.'
+        return 'Plex timed out. Check the server URL in Settings → Plex and confirm the server is running and reachable from Harmonia.'
     if isinstance(exc, requests.exceptions.ConnectionError):
         return 'Cannot connect to Plex. Check the server URL and port in Settings → Plex. In Docker, localhost refers to the container; use an address reachable from the container.'
     if isinstance(exc, requests.exceptions.HTTPError):
@@ -70,7 +70,7 @@ def service_failure(service, exc, started):
     elif isinstance(exc, requests.exceptions.Timeout):
         reason = 'Request timed out. Check connectivity and try again later.'
     elif isinstance(exc, requests.exceptions.ConnectionError):
-        reason = 'Connection failed (DNS, network, or refused connection). Check connectivity from the Bridge container.'
+        reason = 'Connection failed (DNS, network, or refused connection). Check connectivity from the Harmonia container.'
     elif status == 429:
         reason = 'Rate limited (HTTP 429). Wait before retrying.'
     elif status in (401, 403):

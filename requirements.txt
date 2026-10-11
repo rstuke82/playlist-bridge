@@ -1,10 +1,2 @@
-requests>=2.28.0
-fuzzywuzzy>=0.18.0
-python-Levenshtein>=0.20.0
-beautifulsoup4>=4.11.0
-Pillow>=9.0.0
-fastapi>=0.115.0
-uvicorn>=0.30.0
-croniter>=6.0.0
-tzdata>=2024.1
-mutagen>=1.47.0
+# Install the resolved Python 3.12 runtime dependencies.
+-r requirements.lock

@@ -1,8 +1,20 @@
 """Runtime console verbosity; retained web job output is unaffected."""
+from copy import deepcopy
 import logging
 
 enabled = False
 web_mode = False
+
+
+def uvicorn_log_config():
+    """Keep Uvicorn's normal output while dating every console line."""
+    from uvicorn.config import LOGGING_CONFIG
+    config = deepcopy(LOGGING_CONFIG)
+    for name in ('default', 'access'):
+        formatter = config['formatters'][name]
+        formatter['fmt'] = '%(asctime)s %(levelprefix)s %(message)s'
+        formatter['datefmt'] = '%Y-%m-%dT%H:%M:%S%z'
+    return config
 
 
 class AccessFilter(logging.Filter):
@@ -23,6 +35,8 @@ def configure(repo):
     global enabled, web_mode
     enabled = bool(repo.load('console_settings').get('debug', False))
     web_mode = True
+    if not enabled:
+        repo.clear_debug_logs()
     logging.getLogger('uvicorn.error').setLevel(logging.DEBUG if enabled else logging.INFO)
     logger = logging.getLogger('uvicorn.access')
     if not any(isinstance(f, AccessFilter) for f in logger.filters):

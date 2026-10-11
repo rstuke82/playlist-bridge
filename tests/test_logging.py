@@ -4,6 +4,13 @@ import requests
 from playlist_bridge.diagnostics import redact, service_failure
 
 class DiagnosticsTests(unittest.TestCase):
+    def test_console_log_format_includes_timestamp_and_timezone(self):
+        from playlist_bridge.console_logging import uvicorn_log_config
+        config=uvicorn_log_config()
+        for name in ('default','access'):
+            self.assertIn('%(asctime)s',config['formatters'][name]['fmt'])
+            self.assertIn('%z',config['formatters'][name]['datefmt'])
+
     def test_secret_redaction(self):
         text = redact('X-Api-Key: abc api_key=def Authorization: Bearer xyz token=ghi https://user:pass@example.com')
         for secret in ('abc','def','xyz','ghi','user:pass'):
@@ -86,7 +93,7 @@ class DiagnosticsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             repo=Repository(Path(directory)/'bridge.sqlite')
             response=requests.Response();response.status_code=503;response._content=b'{"error":"Server busy"}'
-            with patch.object(lidarr.requests,'get',return_value=response),patch('playlist_bridge.api._record_log') as log:
+            with patch('playlist_bridge.musicbrainz_client._session.get',return_value=response),patch('playlist_bridge.api._record_log') as log:
                 from fastapi import HTTPException
                 with self.assertRaises(HTTPException):lidarr.musicbrainz_search(repo,{},lidarr.Lookup(title='Song',artist='Artist'))
                 self.assertTrue(any(c.args[0]=='INFO' and 'cache=miss' in c.args[2] for c in log.call_args_list))

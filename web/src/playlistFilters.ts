@@ -16,3 +16,8 @@ export function openPlaylistView(filters:string[]=[]){
 }
 
 export function normalizePlaylistFilters(filters:string[]){return [...new Set(filters.map(f=>['Health Drift','Health Errors','Has Missing','Has LOST','Unhealthy'].includes(f)?'Needs Attention':f))].filter(f=>f.replace(/^!/, '') in playlistPredicates)}
+
+export function playlistSyncSelection(rows:Pick<Playlist,'key'>[],selected:string[],filters:string[],query:string){
+ const visible=new Set(rows.map(p=>p.key)),chosen=selected.filter(key=>visible.has(key))
+ return {keys:chosen.length?chosen:rows.map(p=>p.key),label:chosen.length?'Sync selected':filters.length||query.trim()?'Sync filtered':'Sync all'}
+}

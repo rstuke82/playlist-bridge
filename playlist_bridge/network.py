@@ -10,6 +10,9 @@ def __getattr__(name):
 
 
 def request(method, url, **kwargs):
+    quiet_statuses=set(kwargs.pop('_quiet_statuses',()) or ())
+    if any(str(k).lower() in ('x-plex-token','x-api-key','authorization') for k in (kwargs.get('headers') or {})):
+        kwargs['allow_redirects']=False
     host = (urlsplit(str(url)).hostname or '').lower()
     ctx = jobs.current()
     plex_host = urlsplit(ctx.redaction_config.config.get('plex', {}).get('url', '')).hostname if ctx else None
@@ -23,12 +26,23 @@ def request(method, url, **kwargs):
             from .api import _record_log
             _record_log(level, service, message)
     with jobs.waiting(service):
-        try:
-            response = _requests.request(method, url, **kwargs)
-        except _requests.RequestException as exc:
-            from .diagnostics import service_failure
-            report('ERROR', service_failure(service, exc, started).detail)
-            raise
+        attempts=3 if str(method).upper()=='GET' else 1
+        for attempt in range(1,attempts+1):
+            try:
+                response = _requests.request(method, url, **kwargs)
+                break
+            except _requests.exceptions.ChunkedEncodingError as exc:
+                if attempt < attempts:
+                    report('WARNING',f'{method} {urlsplit(str(url)).path} returned an incomplete response; retrying ({attempt}/{attempts-1})')
+                    time.sleep(0.35*attempt)
+                    continue
+                from .diagnostics import service_failure
+                report('ERROR', service_failure(service, exc, started).detail)
+                raise
+            except _requests.RequestException as exc:
+                from .diagnostics import service_failure
+                report('ERROR', service_failure(service, exc, started).detail)
+                raise
         elapsed = time.monotonic() - started
         message = f'{method} {urlsplit(str(url)).path} returned HTTP {response.status_code} in {elapsed:.2f}s'
         if response.status_code >= 400:
@@ -38,7 +52,7 @@ def request(method, url, **kwargs):
                 if any(name in key.lower() for name in ('token', 'key', 'authorization')) and value:
                     detail = detail.replace(str(value), '[REDACTED]')
             message += ' — ' + redact(detail, ctx.redaction_config if ctx else None)
-        report('ERROR' if response.status_code >= 400 else 'DEBUG', message)
+        report('DEBUG' if response.status_code in quiet_statuses else 'ERROR' if response.status_code >= 400 else 'DEBUG', message)
         return response
 
 

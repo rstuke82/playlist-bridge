@@ -1,5 +1,5 @@
 """Reviewed, account-owned text sources; pasted content is data, never instructions."""
-import json,re,uuid
+import re,uuid
 from datetime import datetime,timezone
 from typing import Literal
 from fastapi import HTTPException
@@ -41,10 +41,11 @@ class TextSource:
         key=url.removeprefix('text:')
         value=personal_repository().load('text_sources').get(key)
         if not value:raise ValueError('Saved text playlist not found for this account')
-        return value['tracks'],{'name':value['name'],'description':'A playlist curated in Playlist Bridge.','image_url':''}
+        return value['tracks'],{'name':value['name'],'description':'A playlist curated in Harmonia.','image_url':'','complete':True,'expected_track_count':len(value['tracks'])}
 
 def execute(payload):
-    from .legacy import Config,ProcessLock
+    from .config import Config
+    from .process_lock import ProcessLock
     from .lidarr import state_put
     from .api import execute_job
     body=Source(**payload)

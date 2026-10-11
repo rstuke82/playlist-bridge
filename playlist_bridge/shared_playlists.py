@@ -21,7 +21,7 @@ def register(app):
         import requests
         from urllib.parse import urlsplit
         from bs4 import BeautifulSoup
-        from .legacy import Config
+        from .config import Config
         url=Config._normalize_url_input(body.url)
         parsed=urlsplit(url)
         if parsed.scheme!='https' or parsed.hostname not in ('music.apple.com','open.spotify.com') or parsed.username or parsed.password:
@@ -42,7 +42,7 @@ def register(app):
     @app.get('/api/shared-playlists')
     def listing():
         from .api import _config, _source_for_url
-        from .legacy import Config
+        from .config import Config
         from .source_names import clean
         config=_config(read_only=True,namespaces=[])
         registered={(p['source'],p['source_id']) for p in config.config.get('playlists',[])}

@@ -4,7 +4,8 @@ from contextlib import ExitStack,contextmanager
 
 @contextmanager
 def destinations(store,payload):
-    from .legacy import Config,ProcessLock
+    from .config import Config
+    from .process_lock import ProcessLock
     from .accounts import root_repository
     config=Config(read_only=True,namespaces=[])
     server=config.config.get('plex',{}).get('url','').rstrip('/')

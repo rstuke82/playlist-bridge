@@ -36,10 +36,11 @@ def available(repo, db=None):
 def stage_match(request):
     from .api import _config, job_store
     from .track_routes import inspect
-    config = _config(read_only=True)
+    config = _config(read_only=True,namespaces=['health','source_snapshots','mapping','match_metadata','missing','ignored_tracks','artist_aliases'])
     track = request.model_dump(include={'title', 'artist', 'album'})
     changes = []
-    for member in inspect(config, track)['memberships']:
+    wanted=None if request.playlist_keys is None else set(request.playlist_keys) | ({request.replace_playlist_key} if request.replace_playlist_key else set())
+    for member in inspect(config, track, wanted)['memberships']:
         replacement = member['key'] == request.replace_playlist_key
         if not replacement and request.playlist_keys is not None and member['key'] not in request.playlist_keys:
             continue
@@ -55,7 +56,9 @@ def stage_match(request):
 
 def execute(payload):
     from .api import _config, _health_plex, _playlist_key, _capture, job_store
-    from .legacy import ProcessLock, Syncer, Matcher
+    from .process_lock import ProcessLock
+    from .sync_engine import Syncer
+    from .matching import Matcher
     from .diagnostics import redact
     with ProcessLock():
         config = _config()
@@ -103,6 +106,8 @@ def execute(payload):
                 results.append({'key': key, 'name': playlist.get('plex_playlist_name', key), 'ok': ok, 'error': '' if ok else 'Match edits saved; Plex sync or verification failed. See the track differences in the log.', 'result': {'summary': summary}})
             except Exception as exc:
                 results.append({'key': key, 'name': playlist.get('plex_playlist_name', key), 'ok': False, 'error': redact(getattr(exc, 'detail', str(exc)), config)})
+            jobs.activity(mode='completed' if results[-1]['ok'] else 'failed',
+                          stage='Playlist completed' if results[-1]['ok'] else results[-1]['error'])
             ctx = jobs.current()
             if ctx:
                 ctx.store.update(ctx.id, result={'playlists': results, 'total': len(selected), 'matches_saved': len(changes)})
@@ -136,7 +141,7 @@ def register(app):
         from .accounts import owner_key
         if not cached or cached.get('owner')!=owner_key() or cached['expires'] < time.monotonic():
             raise HTTPException(409, 'The preview expired. Make a new preview.')
-        config = _config(read_only=True)
+        config = _config(read_only=True,namespaces=['health','source_snapshots','mapping','match_metadata','missing','ignored_tracks','artist_aliases'])
         rows = [m for m in track_routes.inspect(config, cached['track'])['memberships'] if m['key'] in cached['keys']]
         if track_routes.fingerprint(config, rows) != cached['fingerprint']:
             raise HTTPException(409, 'The track changed after preview. Make a new preview.')

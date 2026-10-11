@@ -5,22 +5,32 @@ import threading
 import time
 from datetime import datetime, timezone
 import requests
-from . import __version__
+from . import __release_name__, __version__, __build__
 
 _lock = threading.Lock()
 INTERVAL = 6 * 3600
 REPO = 'rstuke82/playlist-bridge'
-CHANNEL = os.environ.get('PLAYLIST_BRIDGE_UPDATE_CHANNEL','beta' if '-beta.' in __version__ else 'main')
+CHANNEL = os.environ.get('HARMONIA_UPDATE_CHANNEL','beta' if '-beta' in __version__ else 'main')
 if CHANNEL not in ('main','beta'):CHANNEL='main'
 
 
 def version(value):
-    match = re.fullmatch(r'v?(\d+)\.(\d+)\.(\d+)(?:-beta\.(\d+))?', str(value))
+    build = re.fullmatch(r'(20\d{6})\.(\d+)', str(value))
+    if build:
+        return (int(build.group(1)),0,0,int(build.group(2)))
+    match = re.fullmatch(r'v?(\d+)\.(\d+)\.(\d+)(?:-beta\.?(\d+))?', str(value))
     return tuple(map(int, match.groups()[:3])) + (int(match[4]) if match[4] else 1000000,) if match else None
 
 
+def available_version(latest):
+    # A semantic source release can share its exact image build number.
+    parsed=version(latest)
+    current=version(__build__ if re.fullmatch(r'20\d{6}\.\d+',str(latest)) else __version__)
+    return bool(parsed and current and parsed>current)
+
+
 def repository():
-    from .legacy import CONFIG_DIR
+    from .runtime_paths import CONFIG_DIR
     from .storage import get_repository
     return get_repository(CONFIG_DIR)
 
@@ -50,7 +60,8 @@ def check(force=False):
             latest=response.json().get('config',{}).get('Labels',{}).get('org.opencontainers.image.version','')
             parsed=version(latest)
             if not parsed:raise ValueError('Image has no recognized version label')
-            state.update(latest_version=latest, available=parsed>version(__version__),url='https://github.com/rstuke82/playlist-bridge')
+            current=version(__version__)
+            state.update(latest_version=latest, available=available_version(latest),url='https://github.com/rstuke82/playlist-bridge')
         except Exception:
             state.update(error='Could not check the published release image. Try again later.',
                          latest_version=previous.get('latest_version'), available=bool(previous.get('available')))
@@ -65,8 +76,10 @@ def stored_status(repo):
     if state.get('channel')!=CHANNEL:state={'available':False,'interval_hours':6}
     state['channel']=CHANNEL
     state['current_version']=__version__
+    state['release_name']=__release_name__
     latest=version(state.get('latest_version',''))
-    state['available']=bool(latest and latest>version(__version__))
+    current=version(__version__)
+    state['available']=available_version(state.get('latest_version',''))
     return state
 
 

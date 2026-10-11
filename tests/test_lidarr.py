@@ -18,7 +18,7 @@ class FakeClient:
         self.artist = {'foreignArtistId': ARTIST, 'artistName': 'Artist', 'monitored': True}
         if artist_exists:
             self.artist.update(id=4, path='/existing/Artist', qualityProfileId=8, metadataProfileId=9)
-        self.album = {'foreignAlbumId': ALBUM, 'title': 'Album', 'artist': self.artist, 'monitored': False}
+        self.album = {'foreignAlbumId': ALBUM, 'title': 'Album', 'artist': self.artist, 'monitored': False,'anyReleaseOk':False,'releases':[{'id':1,'foreignReleaseId':'fixture-release','monitored':True,'status':'Official','country':['United States'],'media':[{'mediumFormat':'CD'}],'trackCount':12}]}
         self.existing = existing
 
     def options(self):
@@ -183,15 +183,16 @@ class LidarrTests(unittest.TestCase):
 
     def test_musicbrainz_persistent_cache(self):
         response = Mock()
-        response.json.return_value = {'recordings': [{'artist-credit': [{'name': 'Artist'}],
+        response.json.return_value = {'recordings': [{'id':'recording','title':'Track','artist-credit': [{'name': 'Artist'}],
             'releases': [{'release-group': {'id': ALBUM, 'title': 'Album', 'primary-type': 'Album'}}]}]}
         query = lidarr.Lookup(title='Track', artist='Artist', provider='musicbrainz')
-        with patch.object(lidarr.requests, 'get', return_value=response) as get:
+        response.json.return_value['releases']=[{**r,'artist-credit':[{'name':'Artist'}]} for r in response.json.return_value['recordings'][0]['releases']]
+        with patch('playlist_bridge.musicbrainz_client._session.get', return_value=response) as get:
             result = lidarr.musicbrainz_search(self.repo, self.cfg, query)
             self.assertFalse(result['cached'])
             result = lidarr.musicbrainz_search(Repository(Path(self.tmp.name)), self.cfg, query)
             self.assertTrue(result['cached'])
-            self.assertEqual(get.call_count, 1)
+            self.assertEqual(get.call_count, 2)
         self.assertEqual(result['rows'][0]['album_id'], ALBUM)
 
     def test_new_album_waits_without_starting_refresh(self):
@@ -209,6 +210,47 @@ class LidarrTests(unittest.TestCase):
         self.assertTrue(result['search_requested'])
         body = next(c[2]['json'] for c in self.client.calls if c[:2]==('POST','album'))
         self.assertFalse(body['addOptions']['searchForNewAlbum'])
+
+    def test_running_search_wait_is_not_a_request_error(self):
+        self.defaults['search_now'] = True
+        _, payload = self.preview()
+        from playlist_bridge.lidarr_requests import server_id
+        lidarr.state_put(self.repo, 'lidarr_requests', ALBUM, {'server':server_id(self.cfg),'status':'added'})
+        def running(client, body, label, existing_id=None, accepted=None):
+            accepted(42)
+            raise ValueError('command 42 still started after 120s')
+        with patch.object(lidarr, 'run_album_command', side_effect=running):
+            lidarr.finish_search(self.repo, self.client, payload, 7)
+        record=lidarr.state_get(self.repo,'lidarr_requests',ALBUM)
+        self.assertEqual(record['status'],'search_pending')
+        self.assertEqual(record['error'],'')
+        self.assertIn('still started',record['search_wait_detail'])
+        self.assertEqual(record['search_command_id'],42)
+
+    def test_preview_and_queued_request_keep_album_artwork(self):
+        self.client.album['images']=[{'coverType':'cover','remoteUrl':'https://example.org/album.jpg'}]
+        preview,payload=self.preview()
+        self.assertEqual(payload['artwork'],'https://example.org/album.jpg')
+        app=FastAPI();lidarr.register(app)
+        endpoint=next(r.endpoint for r in app.routes if r.path=='/api/lidarr/add')
+        with patch('playlist_bridge.api.job_store',return_value=jobs.Store(self.repo)):
+            endpoint(lidarr.Confirm(preview_id=preview['preview_id']))
+        self.assertEqual(lidarr.state_get(self.repo,'lidarr_requests',ALBUM)['artwork'],payload['artwork'])
+
+    def test_empty_inventory_cover_does_not_erase_request_artwork(self):
+        from playlist_bridge import lidarr_requests
+        lidarr.state_put(self.repo,'lidarr_requests',ALBUM,{
+            'server':lidarr_requests.server_id(self.cfg),'status':'search_pending',
+            'title':'Album','artist':'Artist','artwork':'https://example.org/album.jpg',
+            'error':'command 42 still started after 120s'})
+        self.repo.save({'inventory':{'lidarr':{'rows':[{'album_id':ALBUM,'title':'Album','artist':'Artist','artwork':''}]}}})
+        app=FastAPI();lidarr_requests.register(app)
+        endpoint=next(r.endpoint for r in app.routes if r.path=='/api/lidarr/requests')
+        with patch('playlist_bridge.accounts.users',return_value={}):
+            row=endpoint.__wrapped__(compute_availability=False)[0]
+        self.assertEqual(row['artwork'],'https://example.org/album.jpg')
+        self.assertEqual(row['error'],'')
+        self.assertIn('still started',row['search_wait_detail'])
 
     def test_failed_search_is_partial_and_preserves_exact_exception(self):
         self.defaults['search_now'] = True

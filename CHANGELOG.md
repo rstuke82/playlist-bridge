@@ -1,4 +1,465 @@
+# Harmonia 3.0 Beta 7
+
+Source release `v3.0.0-beta7`, based on validated build 20261011.9. Includes the web-only runtime migration, beta fixes, security hardening, HARMONIA_* environment names, request pagination, corrected request progress and the redesigned homepage request cards. See BUILD-NOTES.md and SECURITY-DEPLOYMENT.md for validation and upgrade requirements.
+
+# Build 20261011.9
+
+- Homepage recent requests use horizontal cards with right-side artwork, requester names/avatars and readable status pills. No year is displayed.
+- Pending searches are no longer errors; queued and awaiting-approval requests remain in progress. Actual search/download/import failures still require action.
+- Retain album artwork from preview through request creation and empty inventory updates, with release-group cover fallback for older requests.
+- Refresh saved request projections after upgrade. Rename Review / Request to Request Album.
+
+# Build 20261011.9
+
+- Rename all environment variables to HARMONIA_* without compatibility aliases. Update Docker defaults, health checks, Compose settings, tests and documentation. Existing database filenames and data layout are unchanged.
+
+# Build 20261011.9 — prepared
+
+- Requests pagination footer with range counts, page-size choices and navigation.
+- R01–R06 application/container/proxy/redirect/queue/dependency controls; remaining zlib advisory and deployment checks are documented in SECURITY-HARDENING-CHANGES.md.
+
+# Build 20261011.6
+
+- A04: queue member album searches in the bounded lookup worker, with private jobs, immediate cancellation, shared release filtering and recording pagination.
+- A05: try up to four valid advertised Plex connections during first-run setup, preserving TLS verification and existing server/library selection.
+- A06: stream image downloads with a 20 MB limit, a 30-second caller deadline and four-download admission limit.
+
+# Build 20261011.5
+
+- A01: protect fresh installation claiming with a private one-time setup key bound to the Plex login attempt; commit ownership with a recoverable configuration journal and reject competing claims/key reuse.
+- A02: coalesce concurrent and rapid PIN polling, apply expiring per-IP/global limits and cap active checks; retry busy responses automatically in the login UI.
+- A03: queue first-owner Plex inventory initialization, preserve it through interrupted setup recovery, and show progress/failure guidance in the application.
+- Existing configured installations retain normal login and receive no setup key.
+
+## Build 20261011.1
+
+- Extracted the shared runtime into domain modules and removed legacy.py and the unsupported interactive CLI.
+- Removed terminal setup prompts; Plex configuration failures now direct users to web Settings.
+- Updated Docker packaging, documentation and canonical test imports; added ten runtime regression guards.
+
+## Build 20261010.12 — UI consistency audit
+
+- Fix UX01–UX13: request sorting/status badges, full Library filter reset, artist-link operation locks, corrected navigation/instructions, request capability gates, accessible field names, loading/error states, Lookup worker filtering and playlist editor recovery.
+- Standardize explicit sort orders and filter resets; guard saving forms and modal dismissal; align the tablet header breakpoint through 850px.
+- Validation and exact changed files: UI-UX-FIXES.md. Registry publication status is recorded separately.
+
+## Build 20261010.10
+
+- Replace visible Bridge/Playlist Bridge branding with Harmonia in the interface, service messages, notification application label, CLI and current README. Keep compatibility identifiers and recognize legacy Plex summary markers in both sync and description refresh.
+- Remove Requests bulk and per-album Lidarr link-check controls and duplicate search field. Remove the old local search filter so persisted queries cannot hide rows.
+- Align sort dropdown and direction button; give direction button a 44px target and clear accessible action label.
+
+Changed files are listed in BRANDING-FIX.md; Requests also changes web/src/LidarrRequests.tsx and web/src/discover-layout.css. Updated tests/test_30.py branding expectation and tests/test_22_beta3.py legacy-summary replacement case. Backend validation: 615 tests passed for branding; request section checks passed after Requests edits. TypeScript/Vite build passed; Docker repeats it for both architectures. Existing bundle-size warning remains. Live integration and device behavior remain unverified.
+
+## Build 20261010.9
+
+- Correct mobile header spacing across Discover shelves, recommendations, trending and listening history. Replace vertical flex basis with content-sized grid headings.
+- Ignore uses the same text size as other history actions.
+- Move ignored listening-history albums to Blocklist with Restore, busy state and error feedback. Discover no longer fetches or displays the ignored list. Existing account-scoped endpoints and ignore behavior retained.
+
+Changed web/src/discover-layout.css, web/src/Discover.tsx and web/src/DiscoverPreferences.tsx, plus release version metadata and documentation. No backend logic changed. TypeScript/Vite working-source build passed; Docker repeats validation on amd64 and arm64. Existing bundle-size warning remains. On-device layout and interactive Restore have not been verified.
+
+## Build 20261010.8
+
+F28: MusicBrainz discovery strips supported Advance, Advance Copy, Advance Promo and Advance Version qualifiers from parenthesized/bracketed or separated suffixes. Original source metadata is untouched. Legitimate names such as Advance and Follow or Advanced Studies are preserved. Two regression tests cover six qualifier forms and four legitimate names.
+
+Discover listening-history button now reads Ignore.
+
+Both amd64/arm64 TypeScript/Vite image builds passed; npm reported zero vulnerabilities. Existing bundle-size warning remains. No live MusicBrainz/device verification. Docker build completed in local builder cache; registry tags have not been updated.
+
+## Build 20261010.7
+
+- Keep Discover cards and history actions within mobile screen width.
+- Compact album search spacing, text and artwork; keep 44px touch targets.
+- Remove Search Existing Lidarr Library from album search.
+
+## Build 20261010.6
+
+- F07: validate and reconstruct server/account saved-view scope for delegated admins.
+- F24: upgrade source-map-js to 1.2.2; zero dependency vulnerabilities reported.
+- Group Requests into Needs Action, In Progress, Partially Available, Completed and Cancelled / Failed sections with counts. Preserve filters and detail access.
+
+## Build 20261010.5
+
+- Persist targeted Plex album confirmation on requests; preserve complete/partial availability when overall inventory is stale. Retain event-generation/failure/removal safeguards and newer definitive inventory precedence.
+- Label prior fulfilled timestamps as Lidarr imports rather than Plex completion.
+- Rebalance mobile navigation into four equal columns with a smaller bar/selection; preserve position and accessible material fallbacks.
+
+## Build 20261010.4
+
+- Parse explicit featured artist credits for unknown-album MusicBrainz discovery: Pitbull, John Ryan — Fireball (feat. John Ryan) searches Pitbull / Fireball. Preserve original metadata and comma band names without explicit feature credits.
+- Use the same parsed identity when validating recording and album results; invalidate prior search caches.
+- Remove the five-recording rejection; browse all qualifying recordings within the fetched 25-recording search page.
+
+## Build 20261010.3
+
+- Artist-and-song MusicBrainz searches with no album browse containing releases and return artist-credited albums; exclude compilations/singles and respect studio preference. Preserve actual release artist credits; invalidate old recording search caches.
+- Use close duration as supporting evidence for structured/explicit featured lead credits, retaining title/artist/version checks.
+- Remove the large Automatic match panel; show suggestions in the normal candidate list with a small Suggested label and preserved provenance.
+
+## Build 20261010.2
+
+- Resolve otherwise identical catalog recordings using source duration: within 5 seconds, at least 10 seconds closer than competitors; retain ambiguity/version safeguards.
+- F08: retain selected playlist health scope in validation and execution; permit members with playlist permission to check their own selected playlists. Consolidated health remains admin-only. Change per-playlist job submission to POST with normal CSRF protection.
+- F09: Track Details and match previews read current saved source plus overlays. An empty current source remains empty. Historical health is a labeled fallback when no current snapshot exists.
+
+## Build 20261010.1 — updated F23
+
+- Stop periodic rebuilding of every historical saved page; preserve explicit startup landing-page preparation.
+- Prioritize first-load pages and coalesce queued refreshes to the latest revision.
+- Remove request polling bookkeeping from Discover/listening-history dependencies; retain Requests invalidation.
+- Retire obsolete queued page jobs on upgrade, preserving saved data and active jobs.
+- Add 10 regression tests; all 553 backend tests and frontend validation pass.
+
+## Build 20261010.1
+
+- F14: authoritative session refresh handles null users and refreshes CSRF; session changes clear account storage and cancel old API requests before a clean page reload. Ignore obsolete refresh responses and late body decoding. API 401 responses clear the session centrally.
+- F22: replace worker grouping in Jobs history with Running, Queued and Completed sections. Preserve outcome labels, owner/worker filtering, details and Stop Pending Jobs. Active jobs remain visible independently of completed-history pagination.
+
+## Build 20261009.17
+
+- Remove direct media-file tag writes from Harmonia release selection; retain Lidarr release selection and refresh.
+- Preserve album-added dates and album artwork during targeted Plex import lookups.
+- Refresh Discover's saved Recently Added shelf while visible and when returning to the page.
+- Preserve failure status against delayed/duplicate Grabs; current queue evidence confirms retries and retires previous download identities.
+- Protect missing-catalog, identity-repair, search-command and poll-error writes against newer webhooks.
+
+# Build 20261008.9
+
+- Stop repeated mirror searches while keeping public fallback.
+- Preserve automatic retries only for searches routed directly to public MusicBrainz.
+- Clarify search progress and retry preferences, with regression coverage.
+
+## Build 20261008.8
+
+- Remember listening-history identity when requesting selected Lidarr editions.
+- Hide confirmed imported library albums automatically, including before Plex indexes them.
+- Align library candidate scores with automatic history evidence and retain all artist credits.
+- Add request, approval, member isolation and automatic removal coverage.
+
+## Build 20261008.7
+
+- Added per-task startup policies and configurable landing-page preparation.
+- Reuse active jobs and retain saved pages during startup preparation.
+- Default to missing-only inventory scans and overdue Last.fm refreshes; keep other work opt-in.
+- Added startup freshness, identity, deduplication, member context and settings regression coverage.
+
+## Build 20261008.6
+
+- Fixed restricted-member playlist detail controls and matching queue visibility.
+- Fixed album return breadcrumb labels using the same history origin as the Back action.
+- Added focused permission-rendering and breadcrumb regression coverage.
+
+## Build 20261008.5
+
+- Restore the original Playlist Bridge installation declaration structure with Harmonia artwork and matching sRGB export metadata.
+- Add paired original/new icon pages for controlled on-device comparison.
+
+## Build 20261008.4
+
+- Add Apple touch-icon size variants and precomposed fallback.
+- Add isolated Safari icon-check page; actual home-screen fix remains unverified.
+
+## Build 20261008.3
+
+- Refresh browser and mobile PWA icons with simplified Harmonia branding.
+- Add versioned icon and manifest references, opaque Apple exports and a dedicated maskable icon.
+
+## Build 20261008.2
+
+- Ignore individual listening-history albums per account, with a saved restore list.
+- Preserve exclusions across Last.fm refreshes and filter before the suggestion limit.
+- 410 backend checks, frontend behavior checks and production build pass.
+
+## Build 20261008.1
+
+- Add member Library Issues permission and enforce it before prepared reads.
+- Scope all member requests and download actions to their own albums; preserve requester attribution and owned progress links.
+- Support Plex-only Library browsing with requests unavailable when Lidarr is disabled.
+- Align shared Library editing and member request controls with server permissions.
+- Update final regression contracts; 407 backend checks, frontend behavior checks and production build pass.
+
+# Build 20261007.19
+
+Scope Lidarr catalog webhooks to affected albums/artists, batch durable targets, preserve arrivals during execution, and remove unconditional follow-up scans. Imported album track/file reads now use albumId.
+
+# Build 20261007.18
+
+Hide routine request download-status polling from Activity, active counts and filtered history while preserving diagnostic access.
+
+# Build 20261007.17
+
+Guard stale Library and Discover responses, isolate feed updates, invalidate caches after saved changes, and scope album return navigation to browser-history entries.
+
+# Build 20261007.16
+
+Use saved Lidarr rename previews for naming issues, show current and expected paths, clear legacy guessed warnings, and report unavailable checks.
+
+# Build 20261007.15
+
+Canonical album identity, compilation evidence, actionable Plex album Issues, managed secondary types, portrait title alignment, and internal page preparation visibility. See BUILD-NOTES.md for validation and limits.
+
+# Build 20261007.14
+
+Album navigation now loads the correct return destination. Album details share Library availability and artwork rules. Album reads use small durable projections, and Plex image lookups reuse revision-scoped indexes instead of rebuilding library associations.
+
+# Build 20261007.13
+
+Requests now waits for prepared data without crashing navigation and keeps the previous list after a failed refresh. Page preparation runs in a reserved worker alongside long background jobs, while exclusive database maintenance remains serialized.
+
+## Build 20261005.8 — 2026-10-05
+
+- Changed Discover feeds to read saved Last.fm refresh data without making external Last.fm requests during page load.
+- Expanded the Last.fm refresh job to prepare top albums, recent history, and trending recommendations.
+- Made recommendations user-triggered so they cannot delay or time out the listening-history feed.
+- Added clear empty states when saved data is not ready for the current Last.fm settings.
+
+## Build 20261005.7 — 2026-10-05
+
+- Shows Lidarr and Plex cover art in Last.fm library-link candidates, with a placeholder only when the image is unavailable.
+- Prevents Requests cards and filters from overflowing at tablet and small-desktop widths.
+- Reflows playlist problem tracks so long identity and Lidarr status text no longer collapse into narrow word columns.
+- Removes the duplicate inline album-request submit button and uses consistent dialog actions and labels.
+- Adds an accessible label to the library-link filter.
+
+## Build 20261005.6 — 2026-10-05
+
+- Collapses matching Lidarr and Plex copies into one Last.fm library-link result.
+- Saves the Lidarr album as the durable identity while retaining the related Plex album as availability evidence.
+- Keeps Plex-only results when no unique Lidarr counterpart can be established and leaves ambiguous Lidarr identities separate for review.
+
+## Build 20261005.5 — 2026-10-05
+
+- Fixes Last.fm history rows that incorrectly use the album title as the performer, such as Hybrid Theory — Hybrid Theory.
+- Automatically recognizes existing Plex and Lidarr albums using canonical album titles, any credited performer, group-name aliases, and track evidence.
+- Ignores edition labels such as EP, Single, Deluxe and Remaster when comparing listening history with the library.
+- Keeps ambiguous and unrelated same-title albums available for manual review instead of auto-linking them.
+- Narrows manual album-link candidate comparison before scoring tracks, avoiding multi-second scans across every library album.
+
+## Build 20261005.4 — 2026-10-05
+
+- Keeps the dominant album performer for Last.fm history albums with featured guests; only balanced multi-performer compilations use Various Artists.
+
+## Build 20261005.3 — 2026-10-05
+
+- Adds Last.fm missing-album settings for history range, minimum plays, suggestion count, and ordering.
+- Pages through the selected history window in 200-scrobble requests with a 5,000-scrobble safety cap.
+
+## Build 20261005.2 — 2026-10-05
+
+- Fixes Last.fm history-gap filtering when compilation and collaboration credits are returned as artist-name strings.
+
+## Build 20261005.1 — 2026-10-05
+
+- Adds manual album-level Plex linking and uses the saved album target for Plex artwork updates.
+- Fixes Last.fm listening-history parsing when optional fields arrive as strings.
+- Fixes portrait navigation badges, solid on-screen menus, playlist and missing-track text layout, and labeled request filters.
+- Closes playlist action menus after selecting a schedule mode.
+
 # Playlist Bridge changelog
+
+## Build 20261004.11 — 2026-10-04
+
+- Enabled concurrent SQLite reads while workers persist progress, keeping Tasks and History responsive.
+- Prevented health, library, and metadata jobs from running at the same time and reduced health-check fan-out.
+- Added a scheduled and manual Last.fm Discovery refresh for recent plays and top albums.
+- Removed terminal EP and Single release labels from MusicBrainz discovery queries without changing saved titles.
+- Summarized repeated Lidarr fewer-track import rejections and retained full details in an expandable view.
+
+## Build 20261004.10 — 2026-10-04
+
+- Fixed `/api/health` failing after switching from semantic beta versions to build numbers.
+- Made saved update metadata from earlier beta images safe to compare with build-number releases.
+- Fixed `/api/lidarr/requests` failing when an inventory row stores the artist as text.
+
+## Build 20261004.9 — 2026-10-04
+
+- Retried incomplete Spotify chunked GET responses before failing a job.
+- Rejected generic Apple artwork templates that contain no image identity.
+- Kept expected 404s from optional Apple artwork variants out of the error log.
+
+## Build 20261004.8 — 2026-10-04
+
+- Replaced request status sections with one newest-first, artwork-rich feed.
+- Added persistent request status, requester, text, sort, and direction controls.
+- Linked request artwork and titles to the current Library album identity and restored Requests state on return.
+- Kept live download progress visible while moving maintenance actions into a compact details menu.
+- Switched user-facing release labels and package naming from beta numbers to build numbers.
+
+## 3.0.0-beta.16 — 2026-10-04
+
+- Made Lidarr import webhooks log and refresh the mapped Plex album folder, report missing path mappings, and briefly recheck that album while Plex completes asynchronous indexing.
+- Made known-album discovery search release groups by artist and album even when Song is populated, and added public fallback when an indexed mirror returns an empty search result.
+- Added a result badge identifying public MusicBrainz, configured-mirror, and public-fallback searches, including preserved routing evidence for cached results.
+- Fixed Requests claiming an available album was absent when Lidarr retained it under a different selected release-group identity.
+- Fixed Apply Artwork to Plex failing with an undefined repository helper.
+- Added persistent Last.fm listening-history links to existing Plex or Lidarr albums and collapsed compilation plays into one album-level finding.
+- Added candidate/source duration evidence to match review and matching scores, immediate queued-match state, safer automatic fallback, and clearer automatic-versus-user-selected wording.
+- Removed common remaster, deluxe, expanded, anniversary, and edit qualifiers from album and song discovery queries while preserving stored titles and capitalization.
+- Added album artwork to MusicBrainz search results and removed duplicate selected-result text and outbound links from Add Album review.
+- Added Requests badges for active downloads with attention coloring, Activity badges for running jobs, and Library links from request rows.
+- Added optional Plex synchronization for manually selected album artwork, a profile destination menu, a persistent live-album filter, and MusicBrainz-ID-safe same-title blocklists.
+- Added automatic capability testing for MusicBrainz mirrors, including indexed search when the configured server actually supports it.
+
+## 3.0.0-beta.15 — 2026-10-04
+
+- Preserved each account's non-expiring API key when Plex reauthenticates, preventing Lidarr webhook credentials from breaking after an update or sign-in.
+- Added recent Last.fm listening-history gaps to Discover, with inventory-aware missing status and the normal album review/request flow.
+- Made MusicBrainz the default Add Album search, kept Lidarr as a secondary existing-library search, and removed the duplicate footer Add action.
+- Sorted requests newest first within each workflow stage, added stale Lidarr-link inspection and repair, and prevented newly added/download-queued albums from being marked absent during Lidarr inventory lag.
+- Added compact artist/album back links, persistent mobile profile access, grouped Library issues, immediate manual-match feedback, and cleaner artwork controls without image overlays.
+- Removed the redundant global activity banner while retaining compact contextual status and Activity links beside the action that started work.
+- Redesigned Requests around Needs Action, In Progress, Completed, and Cancelled / Failed stages with progress, requester history, download details, and compact workflow sections.
+- Retained fulfilled requests when an album is later removed from Lidarr, while showing the historical fulfillment and current Lidarr state separately.
+- Added an Open in Lidarr action to linked requests and an in-place Re-add to Lidarr flow for retained requests whose album is no longer present.
+- Added a Database settings page with integrity checks, query optimization, WAL checkpointing, backup-first compaction, configurable history cleanup, safe per-cache clearing, and derived-data rebuilding.
+- Added a weekly Optimize Database task, enabled by default, and kept destructive factory reset behind an exact typed confirmation and a safety backup.
+- Expanded desktop layouts to use full-width and ultrawide displays, including denser album grids, artist directories, and popular-track columns while preserving readable metadata text widths.
+- Changed automatic artist background selection to prefer Fanart.tv banners, followed by Fanart.tv backgrounds and Plex artwork. Saved manual artwork choices remain unchanged.
+
+## 3.0.0-beta.14 — 2026-10-03
+
+- Replaced the initial full Library payload with a lightweight artist directory and targeted artist, issue, and album views.
+- Added bounded, per-account Library view caching keyed to relevant saved-data revisions so repeated navigation does not rebuild unchanged inventory and metadata.
+- Replaced repeated per-artist Plex scans, per-album blocklist reads, metadata-priority reads, and artwork lookups with shared indexes prepared once per revision.
+- Reused prepared Plex and Lidarr indexes on album pages, avoiding another full Library and track-association pass for every album opened.
+- Added server-side Library search, sorting, pagination, explicit refresh, and diagnostic timing for slow Library preparation.
+- Kept the last Library directory visible during background refresh and invalidated targeted browser caches after edits.
+- Retained Beta 13's Lidarr webhook batching and administrative Stop Pending Jobs control.
+- Added manual Plex artist search and reviewed linking from the artist service icon, including fuzzy name candidates, album and track counts, Plex destinations, and artwork lookup through the selected artist.
+- Coalesced automatic imported-album finalization into durable quiet-period batches of at most ten albums, with one availability reconciliation per batch.
+- Collapsed existing queued or interrupted per-album finalizers during startup and stopped failed finalizers from automatically looping.
+- Hardened Activity and job-history rendering against incomplete legacy payloads that could otherwise blank the page.
+- Fixed Scan Local Files failing after a full library walk when Lidarr reports an alphanumeric track position such as `B4`.
+
+## 3.0.0-beta.13 — 2026-10-03
+
+- Added owner-first Plex discovery and administrator initialization for a fresh installation, with a redesigned setup and sign-in page.
+- Opened read-only Lidarr-backed Library browsing to signed-in users while retaining administrative controls around scans, files, metadata, and mutations.
+- Added official MusicBrainz release selection for Lidarr albums, mapped-file MBID tagging, and an automatic Lidarr refresh after the change.
+- Replaced fragmented application logging with a structured diagnostic timeline correlated by worker, job, request, user, service, and entity, with search and time filters and 100,000-event retention.
+- Removed Lidarr from display metadata source choices. Lidarr remains the source of truth for library state, monitoring, downloads, paths, and release selection.
+- Standardized the mobile five-tab navigation and Plex-profile entry point, and removed the redundant mobile header search field.
+- Migrated SQLite storage to schema 5 and added restore-time migration for Beta 12 backups.
+- Fixed DEBUG events appearing in Logs while debug logging was disabled, and fixed compressed diagnostic header buttons.
+- Coalesced Lidarr rename, retag, artist, and album webhook bursts into one quiet-period inventory refresh, including automatic cleanup of an existing queued catalog-event backlog while preserving targeted download finalization.
+- Added a Stop Pending Jobs action that clears queued work across all account queues for administrators without interrupting currently running jobs.
+
+
+## 3.0.0-beta.12 — 2026-10-02
+
+- Added direct Fanart.tv artist and album artwork using MusicBrainz IDs, server-side credential storage, caching, source ordering, and connection testing.
+- Removed Lidarr artwork proxying and Lidarr artwork candidates; Lidarr remains the library authority.
+- Reordered desktop navigation around Discover, Library, Playlists, Requests, and Search, with Missing and Blocklist grouped afterward.
+- Reworked the mobile tab bar around the five primary destinations and moved utility destinations to the profile page.
+
+## 3.0.0-beta.11 — 2026-10-02
+
+- Fixed authenticated retrieval of Lidarr's cached artist artwork, removed redundant Account navigation, and stopped normal Plex refresh propagation from appearing as Activity attention.
+- Fixed Lidarr artist artwork choices disappearing when Lidarr returned an internal absolute media URL or a generic image content type. Failed artwork now remains visible as unavailable instead of silently vanishing.
+- Reworked Users into a profile-based directory with grouped, explicitly saved permissions and clearer active, disabled, and pending states.
+- Artist artwork choices now load Lidarr automatically through an authenticated Bridge image proxy, and artist action menus close after a choice.
+- Separated higher-bitrate AAC files into iTunes Match review so they do not count as quality problems or artist attention findings.
+- Lidarr download and upgrade webhooks now visibly run an album-scoped local-file scan before the targeted Plex refresh, including missing and unmapped-file reporting.
+
+### Added
+
+- Added one non-expiring, regenerable API key per user with current permission enforcement and one-time full-key display.
+- Added a stable `v1` API for status, job lookup, playlist URL sharing, library scans, reconciliation, and recent integration events.
+- Added an iOS Shortcut workflow that accepts shared public Apple Music or Spotify playlist URLs.
+- Added an authenticated Lidarr webhook receiver with duplicate-delivery protection and visible trigger attribution in Activity.
+
+### Changed
+
+- Lidarr imports and upgrades use targeted album finalization; rename, retag, artist, and album catalog events refresh the Lidarr inventory.
+
+
+## 3.0.0-beta.10 — 2026-10-01
+
+### Added
+
+- Added a playlist editor for adding, removing, editing, and reordering tracks while preserving duplicate occurrences. Lidarr-library search and pasted `Artist - Track - Album` lists can append tracks to an existing playlist.
+- Added durable Bridge playlist overlays. Manually added and edited tracks survive provider refreshes, including Apple Music uploaded tracks omitted from public playlist data.
+- Added read-only Library Management findings for files that clearly violate the enabled Lidarr naming format and for iTunes Match upgrade review. MP3, non-256 kbps AAC, and non-FLAC/ALAC files are flagged with their codec, bitrate, path, and Lidarr identity.
+- Added a persistent **Missing — awaiting upgraded file** state when a previously identified upgrade candidate is temporarily removed for replacement.
+
+### Changed
+
+- Playlist sync, details, health checks, and auto-sync-off audits now use the same merged source-plus-Bridge playlist, while source audit history remains limited to actual provider changes.
+- Lidarr-search additions retain MusicBrainz recording IDs so known tracks can link directly instead of repeating title-only matching.
+- Expanded contributor parsing and matching for comma-separated, featured, ampersand, and multi-artist credits.
+- Provider observations now protect existing playlists from unconfirmed empty or shortened responses. A playlist is cleared only when the provider explicitly confirms a complete empty result.
+
+### Fixed
+
+- Fixed **Ready to Sync** remaining visible after a successful sync because stale inventory-link evidence was treated as a new pending playlist change. Match edits being processed by an active sync are no longer presented as pending work.
+
+## 3.0.0-beta.9 — 2026-10-01
+
+### Added
+
+- Added album-scoped post-import finalization for Lidarr, mapped local files, and Plex, plus a manual Refresh This Album request action.
+- Added split MusicBrainz routing: public indexed search plus an optional mirror for direct MBID and browse metadata, with safe public fallback.
+- Added scored album and track evidence to Discover's Lidarr linking review, album blocklisting, direct release-group additions to Lidarr, Spotify artist links, and Lidarr banner/fanart background choices.
+- Added ordered fallback priorities for each metadata field.
+- Added inline, clickable Library attention details for artists and albums, explicit artwork controls for missing images, and immediate artwork refresh after selection.
+- Added grouped task schedules by worker, weekly schedules, per-task and all-task default restoration, and clearer local-scan configuration state.
+- Added collapsible Not Completed and Completed request groups, with Lidarr download progress and controls kept in Requests.
+- Added reviewed album-cover, artist-portrait, and artist-background selection using available Lidarr, Plex, Apple Music/iTunes, and Cover Art Archive images.
+- Added Bridge-only artwork overrides with source labels, detected dimensions, enlarged previews, unavailable-image feedback, and Reset to Automatic.
+- Added an optional Last.fm Popular Tracks section to artist pages.
+
+### Fixed
+
+- Replaced the mobile header's username, Account text and sign-out controls with the Plex profile image; Account now contains profile details and sign-out.
+- Reduced Scan Local Files memory pressure by excluding the unrelated Plex inventory, loading individual saved snapshots, and decoding large Plex library responses only once.
+- Added ISO timestamps with timezone offsets to container console output from the first server startup line.
+- Linked manual task runs to their corresponding task row, hid blocklisted albums throughout Library browsing, and simplified artist service buttons to accessible icon-only controls.
+- Prevented concurrent health checks from independently loading the full Plex library, which could report a timeout even while the Plex connection test passed.
+- Changed the MusicBrainz connection test to hydrate a release-group returned by its live public search and return concise mirror errors instead of a server traceback.
+- Made Activity prefer the newest running job over queued work.
+- Stopped Plex inventory scans from silently launching Retry Missing Matches and retire any legacy retry still queued after upgrade.
+- Fixed Metadata Sources order updates returning HTTP 422 and made the current Activity panel follow the newest running job.
+- Classified partially downloaded Lidarr albums as Wanted, added progress to Scan Local Files, and accepted 300×300 playlist artwork when no larger candidate is available.
+- Fixed artist portraits to render at a consistent 1:1 ratio.
+- Prevented Plex-triggered missing-match retries from being presented as manual scheduled-task runs.
+- Removed the duplicate Downloads view from Activity and required Plex confirmation before a request is marked Completed.
+- Fixed an artwork chooser crash that could blank the page as the first candidate image loaded.
+- Unified sidebar, About, API and CLI release labels with the canonical package version.
+- Disabling a schedule now cancels scheduled work already queued across user accounts and requests safe cancellation of running scheduled work.
+- Active task rows now distinguish manual runs from scheduled runs, and workers recheck disabled schedules immediately before execution.
+- Enabled recurring scheduling for Refresh Album Metadata.
+
+## 3.0.0-beta.8 — 2026-09-30
+
+### Added
+
+- Added reviewed artist links for MusicBrainz and Apple Music, plus per-field metadata source preferences.
+- Added Last.fm or MusicBrainz artist descriptions and separate portrait/wide-hero artwork handling.
+- Added canonical album identities using Lidarr's MusicBrainz release-group ID, with cached MusicBrainz catalog fallback when Lidarr omits an identity.
+- Added missing MusicBrainz catalog albums to artist pages without changing Lidarr's role as the library authority.
+- Added a disabled-by-default Refresh Album Metadata task on the Metadata worker.
+- Added supplemental Apple Music album IDs, links, artwork, and dates when iTunes returns one unambiguous exact-title match.
+
+### Changed
+
+- Library navigation now returns to the artist directory; availability and release-type controls support multiple selections.
+- Simplified artist actions and prevented square artwork from being stretched into hero backgrounds.
+- Library filters now mean In Library (downloaded in Lidarr), Wanted (monitored without files), and Missing (not in Lidarr or unmonitored).
+- Plex linkage is shown separately from Lidarr ownership and download state.
+- Album pages identify their metadata source and expose available Lidarr, MusicBrainz, and Apple Music links.
+- Added an Other release-type filter and limited MusicBrainz catalog additions to groups containing an Official release.
+
+## 3.0.0-beta.7 — 2026-09-30
+
+- Unify mobile/desktop navigation, restore missing mobile destinations through More, and refine glass styling with safe-area and accessibility support.
+- Add optional scheduled read-only File Audit, on-demand SHA-256 duplicate verification, inaccessible-mount safeguards, and persistent issue review/intentional decisions.
+
+- Restore Lidarr as the sole library authority; retire local catalog mode while preserving saved data.
+- Add File Tools path mappings, selectable track paths, Plex links, and categorized reconciliation/duplicate findings.
+- Group artist releases, simplify availability filters, preserve Library browsing state, and enforce disc/track order.
+- Run metadata, inventory, download, and playlist work in independent bounded lanes; preserve account/destination and backup protections.
+- Filter persistent job history by worker and show specific queue reasons.
 
 ## 3.0.0-beta.6 — 2026-09-28
 
@@ -179,7 +640,7 @@ Playlist Bridge 2.0 is the final release of the web application, with SQLite per
 - All dialogs render above the application panels, centered in the visible viewport even after scrolling. Dialog content scrolls internally, controls remain reachable on mobile, keyboard focus stays within the dialog and returns to the trigger when closed. This includes Ignore, Fix Match, removal, backup restore, log clearing and Quick Actions.
 - Match labels are consistently Auto, Manual, Saved, Missing, LOST and Ignored. Saved means an older match whose origin is unknown; it is not relabeled as Auto or Manual. Existing mappings and internal field names are preserved. Sorting uses Last synced.
 - Activity has permanent desktop and mobile navigation, full job history and retained logs. Playlist filters, bulk Auto Sync, consistent Settings pages, daily backups, restore and midnight-aligned recurring tasks from Beta 8 are included.
-- Git branches main and beta and Docker image tags main, beta and 2.0.0 receive the same final release. The default Compose image and update channel are main. Set PLAYLIST_BRIDGE_UPDATE_CHANNEL=beta to follow beta update notifications instead.
+- Git branches main and beta and Docker image tags main, beta and 2.0.0 receive the same final release. The default Compose image and update channel are main. Set HARMONIA_UPDATE_CHANNEL=beta to follow beta update notifications instead.
 
 See BUILD-NOTES.md for compatibility and publishing details.
 
@@ -453,3 +914,11 @@ All notable changes to Playlist Bridge are documented here.
 - Kept automatic and manual match scoring more consistent.
 
 This was the first formal GitHub release of Playlist Bridge.
+## Build 20261005.9 — 2026-10-05
+
+- Kept open request action menus above expanded request details so Remove from Bridge remains clickable.
+## Build 20261006.1 — 2026-10-06
+
+- Reordered Discover into personalized recommendations, albums from trending artists, and listening-history gaps.
+- Removed the top-albums feed and generated recommendations from similar artists based on the user's recent listening.
+- Added recommendation explanations and Show more controls; feeds continue to use saved refresh data.

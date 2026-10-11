@@ -1,3 +1,6 @@
+from playlist_bridge.process_lock import ProcessLock
+from playlist_bridge.matching import Matcher
+from playlist_bridge.config import Config
 import asyncio
 import json
 import threading
@@ -5,7 +8,7 @@ import time
 import unittest
 from unittest.mock import patch
 from test_30 import MultiUser
-from playlist_bridge import accounts,api,legacy,tasks,source_history
+from playlist_bridge import accounts, api, tasks, source_history
 from playlist_bridge.musicbrainz_settings import search_scores,Preferences
 from playlist_bridge.lidarr import Lookup
 from playlist_bridge.jobs import Store,Manager
@@ -30,6 +33,11 @@ class Beta2(MultiUser):
         with accounts.as_user(self.a):
             state_put(accounts.personal_repository(),'blocked_artists','test',{'name':'Radiohead'})
             self.assertTrue(blocked({'artist':'Radiohead'}))
+            self.assertTrue(blocked({'artist':'Various Artists','artists':['Radiohead','Weezer']}))
+            self.assertFalse(blocked({'artist':'Various Artists','artists':['Weezer','Blur']}))
+            state_put(accounts.personal_repository(),'blocked_albums','album',{'artist':'Weezer','album':'Blue Album','mbid':'11111111-1111-1111-1111-111111111111'})
+            self.assertTrue(blocked({'artist':'Weezer','title':'Different display title','musicbrainz_id':'11111111-1111-1111-1111-111111111111'}))
+            self.assertTrue(blocked({'artist':'Weezer','title':'Blue Album'}))
         with accounts.as_user(self.b):self.assertFalse(blocked({'artist':'Radiohead'}))
 
     def test_source_history_occurrences_and_retries(self):
@@ -47,14 +55,15 @@ class Beta2(MultiUser):
         self.assertIn('02:30',next_run(cron,'UTC',datetime(2026,9,25,1,tzinfo=timezone.utc)))
 
     def test_artist_collaboration_and_versions(self):
-        source={'title':'The Middle','artist':'Zedd, Maren Morris & Grey','album':'The Middle - Single'}
+        source={'title':'The Middle','artist':'Zedd, Maren Morris & Grey','artists':[{'name':'Zedd'},{'name':'Maren Morris'},{'name':'Grey'}],'album':'The Middle - Single'}
         candidate={'title':'The Middle','artist':'Zedd','album':'The Middle','plex_id':'1'}
-        self.assertEqual(legacy.Matcher.match_track(source,[candidate]),'1')
-        self.assertIsNone(legacy.Matcher.match_track(source,[{**candidate,'album':'Live in London'}]))
-        self.assertIsNone(legacy.Matcher.match_track(source,[{**candidate,'artist':'Jimmy Eat World'}]))
+        with patch('playlist_bridge.track_bridge.context',return_value=None):
+            self.assertEqual(Matcher.match_track(source,[candidate]),'1')
+            self.assertIsNone(Matcher.match_track(source,[{**candidate,'album':'Live in London'}]))
+            self.assertIsNone(Matcher.match_track(source,[{**candidate,'artist':'Jimmy Eat World'}]))
         band={'title':'Song','artist':'Earth, Wind & Fire','album':'Album'}
         # Existing artist variants should not be weakened globally.
-        self.assertLess(legacy.Matcher._artist_score(band['artist'],'Earth'),85)
+        self.assertLess(Matcher._artist_score(band['artist'],'Earth'),85)
 
     def test_query_score_keeps_editions(self):
         rows=[{'title':'BRAT (Live)','artist':'Charli xcx'},{'title':'BRAT','artist':'Charli XCX'}]
@@ -71,15 +80,15 @@ class Beta2(MultiUser):
 
     def test_account_process_locks_are_independent(self):
         with accounts.as_user(self.a):
-            with legacy.ProcessLock():
+            with ProcessLock():
                 with accounts.as_user(self.b):
-                    with legacy.ProcessLock():pass
+                    with ProcessLock():pass
 
     def test_same_destination_is_locked_across_accounts(self):
         from playlist_bridge.job_locks import destinations
         for user in (self.a,self.b):
             with accounts.as_user(user):
-                c=legacy.Config();c.config['playlists']=[{'source':'spotify','source_id':user['id'],'plex_playlist_id':'same'}];c.save()
+                c=Config();c.config['playlists']=[{'source':'spotify','source_id':user['id'],'plex_playlist_id':'same'}];c.save()
         with accounts.as_user(self.a):
             with destinations(api.job_store(),{}):
                 with accounts.as_user(self.b):
@@ -89,7 +98,7 @@ class Beta2(MultiUser):
     def test_sync_applies_only_its_playlist_drafts(self):
         from playlist_bridge.match_queue import stage_changes
         with accounts.as_user(self.a):
-            c=legacy.Config();c.config['playlists']=[{'source':'spotify','source_id':'one'},{'source':'spotify','source_id':'two'}];c.save()
+            c=Config();c.config['playlists']=[{'source':'spotify','source_id':'one'},{'source':'spotify','source_id':'two'}];c.save()
             repo=api.job_store().repository
             stage_changes(repo,[{'playlist_key':'spotify:'+key,'search_key':'Song|Artist','source':{},'plex_id':'1'} for key in ('one','two')])
             with patch('playlist_bridge.match_queue.execute') as apply,patch.object(api,'_execute_job',return_value={'ok':True}):
@@ -110,12 +119,16 @@ class Beta2(MultiUser):
         with accounts.as_user(self.b),patch('playlist_bridge.inventory.current',return_value=(plex,{'checked_at':now,'rows':[]})):
             self.assertEqual(availability([{'artist':'Artist','album':'Album'}])[0]['availability'],'Needs Attention')
 
-    def test_new_inventory_queues_one_retry(self):
-        from playlist_bridge.inventory import queue_changed_matches
+    def test_new_inventory_does_not_queue_retry(self):
+        from playlist_bridge.inventory import scan
         with accounts.as_user(self.a):
             repo=api.job_store().repository;repo.save({'missing':{'spotify:test':[{'title':'Song','artist':'Artist'}]}})
-            for _ in range(2):queue_changed_matches(repo,{},[{'plex_id':'1'}])
-            self.assertEqual(len([j for j in api.job_store().list() if j['action']=='retry_missing']),1)
+            client=type('Client',(),{'base_url':'http://plex','music_library_key':'1','headers':{},'machine_identifier':'server','_fetch_library':lambda self:[{'plex_id':'1'}]})()
+            with patch('playlist_bridge.api._health_plex',return_value=client), \
+                 patch('playlist_bridge.artwork_sync.queue_pending'), \
+                 patch('playlist_bridge.accounts.member_stores',return_value=[]):
+                for _ in range(2):scan('plex')
+            self.assertEqual(len([j for j in api.job_store().list() if j['action']=='retry_missing']),0)
 
     def test_submission_receipt_is_private_and_deduplicated(self):
         sid='11aa22bb-1234-4321-aaaa-123456789abc'
@@ -131,13 +144,13 @@ class Beta2(MultiUser):
         from playlist_bridge.playlist_description import MARKER
         from unittest.mock import MagicMock
         with accounts.as_user(self.a):
-            c=legacy.Config();c.config['playlists']=[{'source':'spotify','source_id':'one','plex_playlist_id':'123','last_synced':'2026-09-25T10:00:00+00:00'}];c.save()
+            c=Config();c.config['playlists']=[{'source':'spotify','source_id':'one','plex_playlist_id':'123','last_synced':'2026-09-25T10:00:00+00:00'}];c.save()
             description='Source text'+MARKER+'Last successful sync: Sep 25, 2026 at 5:00 AM CDT\nTracks: 25 source · 25 matched'
             response=MagicMock();response.json.return_value={'MediaContainer':{'Metadata':[{'summary':description}]}}
             with patch.object(api,'_health_plex',return_value=MagicMock()),patch('playlist_bridge.description_refresh.requests.get',return_value=response),patch('playlist_bridge.description_refresh.requests.put') as write:
                 execute({'playlist_keys':['spotify:one']})
             summary=write.call_args.kwargs['params']['summary'];self.assertIn('Next scheduled sync:',summary);self.assertIn('Last successful sync: Sep 25, 2026 at 5:00 AM CDT',summary);self.assertIn('25 matched',summary)
-            self.assertEqual(legacy.Config().config['playlists'][0]['last_synced'],'2026-09-25T10:00:00+00:00')
+            self.assertEqual(Config().config['playlists'][0]['last_synced'],'2026-09-25T10:00:00+00:00')
 
     def test_worker_runs_two_accounts_but_serializes_exclusive_jobs(self):
         from unittest.mock import MagicMock
@@ -166,8 +179,8 @@ class Beta2(MultiUser):
         invalidate();a=SimpleNamespace(base_url='http://plex',music_library_key='1',headers={'X-Plex-Token':'a'});b=SimpleNamespace(base_url='http://plex',music_library_key='1',headers={'X-Plex-Token':'b'})
         first=Mock(return_value=[{'plex_id':'a'}]);second=Mock(return_value=[{'plex_id':'b'}])
         with patch('playlist_bridge.inventory.snapshot',return_value={}):
-            with reuse():self.assertEqual(load(a,first)[0]['plex_id'],'a')
-            with reuse():self.assertEqual(load(b,second)[0]['plex_id'],'b')
-            with reuse():self.assertEqual(load(a,first)[0]['plex_id'],'a')
-        self.assertEqual(first.call_count,1);self.assertEqual(second.call_count,1)
+            with reuse(refresh=True):self.assertEqual(load(a,first)[0]['plex_id'],'a')
+            with reuse(refresh=True):self.assertEqual(load(b,second)[0]['plex_id'],'b')
+            with reuse(refresh=True):self.assertEqual(load(a,first)[0]['plex_id'],'a')
+        self.assertEqual(first.call_count,2);self.assertEqual(second.call_count,1)
         invalidate()

@@ -1,7 +1,6 @@
 """Per-playlist weekly schedules with a shared server timezone."""
 import json
-import uuid
-from datetime import datetime,timezone
+from datetime import datetime
 from typing import Literal
 from pydantic import BaseModel,Field,model_validator
 from fastapi import HTTPException

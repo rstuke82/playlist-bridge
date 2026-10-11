@@ -1,4 +1,4 @@
-# Playlist Bridge local state / credentials
+# Harmonia local state / credentials
 config.json
 mapping.json
 missing_tracks.json
@@ -48,27 +48,5 @@ backups/
 *.db-wal
 *.zip
 
-# Development Test Scripts
-/tests/*
-
-!tests/test_lidarr.py
-!tests/test_beta_workflows.py
-
-!tests/test_logging.py
-
-!tests/test_musicbrainz.py
-!tests/test_musicbrainz_retry.cjs
-
-!tests/test_lidarr_downloads.py
-
-!tests/test_beta8.py
-
-!tests/test_30_beta2.py
-
-!tests/test_30_beta3.py
-
-!tests/test_30_beta4.py
-
-!tests/test_local_library.py
-
-!tests/test_artist_library.py
+# Track the complete regression suite.
+.factory-reset.json
