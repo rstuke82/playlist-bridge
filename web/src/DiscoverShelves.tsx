@@ -4,11 +4,12 @@ import {request,savedPath} from './api'
 import {refreshLidarrRequests,useLidarrRequests,useRequestLoadState} from './LidarrRequests'
 import {useAccount} from './Auth'
 import ErrorNotice from './ErrorNotice'
+import FittedTitle from './FittedTitle'
 export function RecentRequestCard({row}:{row:any}){
  const status=coverStatus(row),people=row.requesters||[]
  return <a className="recent-request-card" href={'#requests/'+encodeURIComponent(row.key)}>
   {row.artwork&&<span className="recent-request-backdrop" aria-hidden="true" style={{backgroundImage:`url(${row.artwork})`}}/>}
-  <span className="recent-request-copy"><strong className="recent-request-title">{row.title}</strong><span className="recent-request-artist">{row.artist||'Unknown artist'}</span>
+  <span className="recent-request-copy"><FittedTitle title={row.title}/><span className="recent-request-artist">{row.artist||'Unknown artist'}</span>
    <span className="recent-request-users">{people.length?people.map((person:any,index:number)=><span className="recent-request-user" key={person.user_id||index}>{person.avatar?<img src={person.avatar} alt="" loading="lazy" referrerPolicy="no-referrer" onError={e=>{e.currentTarget.style.display='none'}}/>:<span className="recent-request-avatar" aria-hidden="true">{(person.name||'?').slice(0,1).toUpperCase()}</span>}<span>{person.name||'Requester unavailable'}</span></span>):<span>Requester unavailable</span>}</span>
    <span className="recent-request-state"><span>Status</span><span className={'recent-request-status '+status.tone}>{status.label}</span></span>
   </span><span className="recent-request-art"><AlbumCover src={row.artwork}/></span>

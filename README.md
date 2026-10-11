@@ -1,6 +1,6 @@
 # Harmonia
 
-**Release:** Harmonia 3.0 Beta 7 (`v3.0.0-beta7`) — source build 20261011.9.
+**Release:** Harmonia 3.0 Beta 8 (`v3.0.0-beta8`) — source build 20261011.11.
 
 Current changes and validation are recorded in REMAINING-FIXES.md. Runtime credentials and databases are excluded from release packaging. The complete regression suite is tracked.
 

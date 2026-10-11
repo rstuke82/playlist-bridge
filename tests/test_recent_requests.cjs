@@ -12,3 +12,19 @@ function walk(n,fn){if(!n||typeof n!=='object')return;fn(n);for(const c of [n.pr
 const classes=[],texts=[];walk(tree,n=>{if(n.props?.className)classes.push(n.props.className);for(const c of [n.props?.children].flat(Infinity))if(typeof c==='string')texts.push(c)});
 assert.equal(tree.props.href,'#requests/album');assert(classes.includes('recent-request-copy'));assert(classes.includes('recent-request-art'));assert(texts.includes('User'));assert(texts.includes('Queued'));assert(!texts.includes('2004'));
 console.log('Recent request lifecycle and card rendering checks passed');
+for(const [row,label] of [
+ [{status:'search_completed',plex_available:true,download_status:'Imported into Lidarr'},'Available'],
+ [{status:'approval'},'Awaiting approval'],[{status:'adding'},'Queued'],
+ [{status:'search_pending'},'Searching'],[{status:'search_completed'},'Waiting for download'],
+ [{download_status:'Downloading'},'Downloading'],[{download_status:'Importing'},'Importing'],
+ [{download_status:'Imported into Lidarr'},'Waiting for Plex'],
+ [{availability:'Partially Available',plex_available:true},'Partially available'],
+ [{status:'search_failed',error:'Search failed'},'Needs attention'],[{status:'cancelled'},'Cancelled']
+])assert.equal(covers.coverStatus(row).label,label);
+const fitted=load('FittedTitle.tsx');
+function box(needed){return {style:{},clientWidth:160,clientHeight:45,get scrollHeight(){return needed[this.style.fontSize]??60}}}
+let title=box({'1.125rem':44});fitted.fitTitle(title);assert.equal(title.style.fontSize,'1.125rem');
+title=box({'1.125rem':65,'1.0625rem':44});fitted.fitTitle(title);assert.equal(title.style.fontSize,'1.0625rem');
+title=box({'1rem':65});fitted.fitTitle(title);assert.equal(title.style.fontSize,'1rem');
+title.clientWidth=400;Object.defineProperty(title,'scrollHeight',{get:()=>44});fitted.fitTitle(title);assert.equal(title.style.fontSize,'1.125rem');
+console.log('Status labels and measured title fitting checks passed');

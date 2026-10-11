@@ -1,7 +1,7 @@
 {
   "name": "playlist-bridge-web",
   "private": true,
-  "version": "3.0.0-beta7",
+  "version": "3.0.0-beta8",
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",

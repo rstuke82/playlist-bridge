@@ -1,3 +1,18 @@
+# Harmonia 3.0 Beta 8
+
+Source release `v3.0.0-beta8`, build 20261011.11. Includes compact, aligned request cards with fitted titles, consistent request lifecycle labels and the Node.js 24 checkout action.
+
+# Build 20261011.11
+
+- Align homepage request cards and reserve consistent title, artist and requester rows.
+- Fit long request titles from 18 to 16 px before two-line truncation, with full titles retained for accessibility and hover.
+- Use consistent lifecycle labels on homepage and Requests cards; show Available when Plex confirms availability, and Waiting for Plex after import without Plex confirmation.
+- Update the pinned GitHub checkout action to v6.1.0 using Node.js 24.
+
+# Build 20261011.10
+
+- Keep homepage request cards compact on ultrawide displays with capped card/artwork widths and additional grid columns.
+
 # Harmonia 3.0 Beta 7
 
 Source release `v3.0.0-beta7`, based on validated build 20261011.9. Includes the web-only runtime migration, beta fixes, security hardening, HARMONIA_* environment names, request pagination, corrected request progress and the redesigned homepage request cards. See BUILD-NOTES.md and SECURITY-DEPLOYMENT.md for validation and upgrade requirements.

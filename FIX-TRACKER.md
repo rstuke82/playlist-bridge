@@ -168,3 +168,7 @@ Completed environment branding migration to HARMONIA_* with no legacy aliases. U
 ## Build 20261011.9 — prepared, unpublished
 
 Fixed false Needs Action for queued/pending requests and continuing Lidarr searches. Preserve request artwork and requester avatars. Redesign homepage recent-request cards with right-side artwork, left-side requester/album/status, no year, and responsive light/dark styling. Rename Review / Request to Request Album. Refresh saved request projections on upgrade. Validation: 701 backend tests, 14 frontend scripts, production frontend build and Compose configuration passed.
+
+## Build 20261011.11 — prepared, unpublished
+
+Aligned and fitted homepage request card titles; shared request lifecycle labels across homepage and Requests; Plex-confirmed availability displays Available. Updated checkout to pinned Node.js 24 action. Added lifecycle/title-fitting regressions. Validation: 14 frontend scripts and production build passed; existing bundle warning remains. See BUILD-NOTES.md for exact changes and deployment limitations.

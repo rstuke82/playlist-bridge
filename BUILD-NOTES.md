@@ -1,9 +1,17 @@
-# Build 20261011.9 — homepage requests and request progress
+# Build 20261011.11 — request card alignment and lifecycle labels
 
-GitHub source prerelease: `v3.0.0-beta7` (build 20261011.9). Docker images are not being published as part of this source release. Homepage recent requests display artwork on the right and album name, artist, requester avatar/name and status on the left. Light/dark theme variables and responsive layout are supported; no year is shown. Review / Request buttons now say Request Album.
+Based on Harmonia 3.0 Beta 7 and compact-card build 20261011.10.
 
-A continuing Lidarr search after the local wait limit now retains informational wait details rather than an actionable error. Existing pending-search errors are normalized in request projections. Requests without confirmed failures default to In Progress. Genuine failures, removed albums and unconfirmed search submissions remain Needs Action. Request status labels no longer prefer an Unknown availability result over queued/searching state.
+Changes:
+- Add web/src/FittedTitle.tsx to measure titles at 18, 17 and 16 px equivalents before two-line truncation. Refit after resizing and font loading, retain full accessible text and hover title, and use relative units for text scaling.
+- Update DiscoverShelves.tsx and release.css for fitted titles, equal-height grid cards and aligned title/artist/requester rows.
+- Update AlbumCover.tsx and LidarrRequests.tsx to share lifecycle labels: Awaiting approval, Queued, Searching, Waiting for download, Downloading, Importing, Waiting for Plex, Partially available, Available, Needs attention and Cancelled. Imported albums require Plex confirmation before becoming Available. Genuine failures remain actionable.
+- Update .github/workflows/security.yml to pinned checkout v6.1.0 (Node.js 24), retaining persist-credentials: false.
+- Extend tests/test_recent_requests.cjs with lifecycle labels and title-fitting/resize regressions.
+- Increment source/Docker build metadata and update README, CHANGELOG and FIX-TRACKER.
 
-Preview artwork is saved at confirmation, existing-album searches save artwork, and empty inventory images no longer overwrite saved art. Older requests and approval entries use a Cover Art Archive release-group fallback if metadata supplies no cover. Providers may still lack artwork or fail to serve it; the placeholder remains the fallback. Requester avatars come from existing account records, retaining member visibility rules. Saved request projections use a new schema key on upgrade.
+Validation: all 14 frontend regression scripts and TypeScript/Vite production build passed. Existing frontend bundle-size warning remains. The 702 backend tests also passed after updating Beta 8 release metadata. Backend logic is unchanged. Physical-device layout and deployed request lifecycle behavior remain unverified.
 
-Validation: 702 backend tests passed, 14 frontend regression scripts passed, TypeScript/Vite production build passed, and Docker Compose configuration validated. Added three backend regressions for continuing-search state, preview-to-queued artwork persistence and empty-inventory artwork preservation, plus a frontend lifecycle/card-rendering regression script. No production deployment, browser/PC control or registry push performed. Actual mobile/device rendering and live service behavior remain unverified. Existing frontend bundle-size warning and previously reported zlib advisory are unchanged.
+Prepared for the authorized Docker and GitHub Beta 8 publication. Publication results are recorded in the GitHub release. The checkout update takes effect for GitHub Actions after this workflow is pushed to the repository; it does not change prior run warnings.
+
+Release metadata is updated to 3.0.0-beta8. Remove the previously tracked local web/node_modules symlink from the GitHub source; dependencies remain installed locally and excluded from packaging.

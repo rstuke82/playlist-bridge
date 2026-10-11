@@ -7,8 +7,8 @@ COPY web/ ./
 RUN npm run build
 
 FROM python:3.12-slim-trixie@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1 AS runtime
-ARG VERSION=3.0.0-beta7
-ARG BUILD=20261011.9
+ARG VERSION=3.0.0-beta8
+ARG BUILD=20261011.11
 ARG VCS_REF=unknown
 LABEL org.opencontainers.image.title="Harmonia" \
       org.opencontainers.image.description="Sync Spotify and Apple Music playlists to Plex" \
